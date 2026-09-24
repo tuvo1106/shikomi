@@ -176,6 +176,10 @@ CI (`.github/workflows/ci.yml`) runs these as separate jobs: `lint`, `harness`,
 
 ## Gotchas / lessons learned
 
+- **Playwright's `webServer` launches Vite directly, never via `pnpm dev`.** CI's
+  `pnpm/action-setup` pins only the major version, and a newer pnpm 11 stopped passing
+  Playwright's shutdown signal to its child, so every spec passed and then the job hung
+  until GitHub's timeout. Every CI job now has `timeout-minutes` so a hang fails fast.
 - **Coverage + async SQLAlchemy**: coroutine bodies run inside SQLAlchemy's
   greenlet, which coverage doesn't trace by default. Without
   `concurrency = ["greenlet"]` in `[tool.coverage.run]`, async service coverage is

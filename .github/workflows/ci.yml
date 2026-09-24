@@ -8,6 +8,9 @@ on:
 jobs:
   lint:
     runs-on: ubuntu-latest
+    # Every job normally finishes in under five minutes; a cap makes a hang fail fast
+    # instead of running to GitHub's six-hour default.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -24,6 +27,7 @@ jobs:
   harness:
     # Fast harness protocol tests + verdict aggregation (no Docker). DESIGN.md §10.1.
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
@@ -60,6 +64,7 @@ jobs:
   sandbox:
     # Real-container isolation tests. DESIGN.md §10.1 (second layer).
     runs-on: ubuntu-latest  # Docker is available on GitHub-hosted Linux runners
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -74,6 +79,7 @@ jobs:
   backend:
     # API + service tests against a real Postgres, plus a clean-migration check.
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     services:
       postgres:
         image: postgres:16
@@ -110,6 +116,7 @@ jobs:
   e2e:
     # Full pipeline: API + arq worker + real judge containers.
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     services:
       postgres:
         image: postgres:16
@@ -171,6 +178,7 @@ jobs:
 
   frontend:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -194,6 +202,7 @@ jobs:
     # Browser E2E against the full stack. Playwright starts Vite itself (its
     # webServer), which proxies /api to the API launched below.
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     services:
       postgres:
         image: postgres:16
