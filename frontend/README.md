@@ -21,13 +21,14 @@ Run from this directory. `pnpm dev` expects the API to already be up.
 
 **The two test runners are not interchangeable.** Vitest is scoped to `src/`
 and Playwright to `e2e/`, deliberately, so the two don't try to collect each
-other's files — see AGENTS.md's note on the split.
+other's files (Vitest's `include` in `vite.config.ts`).
 
 ## Layout
 
 - `api/` — typed client and the request/response types shared with the backend
-- `pages/` — one folder per page; a page's parts live beside it rather than in
-  a global components bin (see AGENTS.md's "keep page components split")
+- `pages/` — one file per simple page; a page with parts gets its own folder
+  (`workspace/`, `settings/`) rather than a global components bin (see AGENTS.md's
+  "keep page components split")
 - `components/` — only genuinely shared UI
-- `auth/` — route guards
+- `auth/` — session state and route guards
 - `lib/`, `test/` — helpers and test setup

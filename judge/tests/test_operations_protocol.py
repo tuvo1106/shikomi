@@ -201,7 +201,7 @@ def test_listnode_constructor_decodes_arg():
 # start, for a class that wraps an iterator to add `peek()`.
 
 PEEKING_ITERATOR = (
-    "class PeekingIterator:\n"
+    "class LookaheadIterator:\n"
     "    def __init__(self, iterator):\n"
     "        self.iterator = iterator\n"
     "        self._has_peeked = False\n"
@@ -228,11 +228,11 @@ PEEKING_ITERATOR = (
 
 def test_peeking_iterator_constructor_decodes_iterator():
     # peek() must not advance: the value it shows is the one next() returns.
-    ops = ["PeekingIterator", "next", "peek", "next", "next", "hasNext"]
+    ops = ["LookaheadIterator", "next", "peek", "next", "next", "hasNext"]
     args = [[[4, 5, 6]], [], [], [], [], []]
     expected = [None, 4, 5, 5, 6, False]
     res = results(payload(PEEKING_ITERATOR, [case(0, ops, args, expected)],
-                          class_name="PeekingIterator",
+                          class_name="LookaheadIterator",
                           params=[{"name": "iterator", "type": "Iterator"}]))
     assert res[0]["status"] == "passed", res[0]["error"]
 

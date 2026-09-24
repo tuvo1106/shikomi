@@ -1,34 +1,24 @@
 # ADR-0003: Rendering `TreeNode`/`ListNode`/`GraphNode` sample cases — react-d3-tree, Mermaid, or hand-rolled SVG
 
-- **Status:** Accepted — spike run 2026-09-13, all three approaches prototyped against the problem set of the time
+- **Status:** Accepted — spike run 2026-09-13, all three approaches prototyped against fixtures of every node type
 - **Date:** 2026-09-13
 
 ## Context
 
 The workspace's Description panel shows every sample case's input and expected output as the judge's **wire format** — the null-padded level-order array, the `[values, pos]` cyclic pair, the `[[val, random_index], …]` list, the 1-based adjacency list. Those encodings exist so `judge/harness.py` can rebuild a real object graph; they are not a shape a reader can see. `root = [8,4,12,2,6,10,14]` says nothing about which node is whose child until you decode it in your head, and `head = [[4,null],[9,0],[2,4],[6,2],[3,0]]` is worse.
 
-There was a long-standing TODO to compare `react-d3-tree` against Mermaid before committing to either, noting that a hand-rolled flexbox/SVG component might beat both for linked lists. This ADR records that comparison and the decision.
+Drawing them means choosing a renderer. The obvious candidates were `react-d3-tree` and Mermaid, with a hand-rolled SVG component as the third option. This ADR records that comparison and the decision.
 
 ### Evidence — verified in-session
 
-All numbers below come from the problem set in use when the decision was made (529 problems) and from real production builds against one baseline commit, not from estimates.
+The bundle and fidelity numbers below come from real production builds and prototypes, not estimates.
 
-**What the problem set actually contained.** Decoding every sample case of every problem that declares a node-typed param or return type:
+**What the node types demand.** Two properties of the judge's wire formats drive everything else:
 
-| | |
-|---|---|
-| Problems with a node-typed shape | **85** |
-| Diagrams those problems' sample cases produce | **358** |
-| Largest single diagram | **15 nodes** |
-| Longest node label | **7 characters** (`9999999`) |
-| Edges by kind | `left` 437, `right` 507, `next` 234, `random` 14, `neighbor` 8, cycle-back `next` 4 |
+1. **Not every shape is a tree.** `CyclicListNode` (a tail pointing back into the list), `RandomListNode` (a second pointer to any node) and `GraphNode` (arbitrary neighbours) all have edges that point sideways or backwards. They cannot exist in a nested parent→children JSON model.
+2. **A lone child has a side.** In a binary tree a parent with one child has either a left or a right child. A `children: [x]` array cannot say which, and for binary-tree problems that distinction *is* the problem (`[1,2]` and `[1,null,2]` are different trees).
 
-Two facts fall out of that table and drive everything else:
-
-1. **Half the shapes aren't trees.** 26 edges across the problem set (14 `random`, 8 `neighbor`, 4 cycle-back `next`) cannot exist in a nested parent→children JSON model, because they point sideways or backwards. They belong to `CyclicListNode`, `RandomListNode`, and `GraphNode` problems.
-2. **226 lone-child parents, across 118 of the 358 diagrams**, have exactly one child. A `children: [x]` array cannot say whether `x` is the left child or the right child — and for binary-tree problems that distinction *is* the problem.
-
-**The structures are small.** 15 nodes and 7 characters is the whole envelope. Nothing here needs panning, zooming, collapsing, virtualized rendering, or a force simulation. That is the single most important sizing fact in this ADR: it is what makes the cheapest option viable rather than a compromise.
+**The structures are small.** Sample cases are worked examples, so they are small by design. The renderer targets **≤15 nodes** and **≤7-character labels**, and nothing in that envelope needs panning, zooming, collapsing, virtualized rendering, or a force simulation. That is the single most important sizing fact in this ADR: it is what makes the cheapest option viable rather than a compromise.
 
 **Bundle cost, measured.** Each option was built into the app as it stood just before diagrams were added, and compared against that version's own build (878.00 kB raw / 262.40 kB gzip, one chunk):
 
@@ -43,8 +33,8 @@ Context for those deltas: the main chunk **already** trips Vite's 500 kB warning
 
 **Fidelity, measured.** All three were prototyped against the same 12 fixtures covering `TreeNode`, `ListNode`, `List[TreeNode]`, `List[ListNode]`, `CyclicListNode`, `RandomListNode`, and `GraphNode`:
 
-- **react-d3-tree** takes a nested `{name, children}` object, so the 26 non-tree edges have nowhere to go — it renders them by **silently dropping them**. A 4-node cyclic graph comes out as a straight `1 → 2 → 3 → 4` chain, which is not a degraded diagram but an actively wrong one. It also cannot distinguish a lone left child from a lone right child without inserting a visible placeholder node for the missing side.
-- **Mermaid** is correct on all seven shapes — arbitrary edges are its native model — at the bundle cost above, plus an async `render()` per diagram (358 of them across the problem set, up to 6 on a single page).
+- **react-d3-tree** takes a nested `{name, children}` object, so sideways and backward edges have nowhere to go — it renders them by **silently dropping them**. A 4-node cyclic graph comes out as a straight `1 → 2 → 3 → 4` chain, which is not a degraded diagram but an actively wrong one. It also cannot distinguish a lone left child from a lone right child without inserting a visible placeholder node for the missing side.
+- **Mermaid** is correct on all seven shapes — arbitrary edges are its native model — at the bundle cost above, plus an async `render()` per diagram (a problem page can show several).
 - **Hand-rolled SVG** is correct on all seven shapes, in ~5.8 kB.
 
 ## Options
@@ -87,23 +77,23 @@ C was to be abandoned for B if any held. None did:
 Both are guarded in code, commented, and covered by tests — recorded here because neither is visible from the type signatures:
 
 1. **Operations-kind problems can declare node params that don't address their input.** An operations problem with a `TreeNode`/`ListNode` constructor param (a tree iterator, say) has test-case `input` shaped `[ops, args]` — so a param index points at the operations list, not at a tree. `nodeParams()` returns `[]` for any non-`function` kind; without that gate such a problem draws garbage.
-2. **The output codec isn't the mirror of the input codec for two types.** `_encode_cyclic_node` returns a bare *index* (node identity, via an `_idx` stamp), not a `[values, pos]` pair, and `List[ListNode]` has no output codec at all. `decodeExpected()` refuses both: the expected answer there is an identity, not a shape.
+2. **The output codec isn't the mirror of the input codec for `CyclicListNode`.** `_encode_cyclic_node` returns a bare *index* (node identity, via an `_idx` stamp), not a `[values, pos]` pair. `decodeExpected()` refuses it: the expected answer there is an identity, not a shape. Every other type's output encodes in the same shape as its input and is drawn.
 
 ## Alternatives considered
 
 | Option | Why not |
 |---|---|
-| react-d3-tree | Its nested `{name, children}` model cannot represent the 26 sideways/backward edges and silently drops them — a cyclic graph renders as a straight chain. Also can't distinguish a lone left from a lone right child, which is the substance of many of the 85 node-shaped problems. Correctness, not size, is the disqualifier. |
+| react-d3-tree | Its nested `{name, children}` model cannot represent sideways/backward edges and silently drops them — a cyclic graph renders as a straight chain. Also can't distinguish a lone left from a lone right child, which is the substance of most binary-tree problems. Correctness, not size, is the disqualifier. |
 | Mermaid | Correct on every shape, but +4.88 MB / +1.42 MB gzip across 92 chunks (+134.82 kB eager) on a main chunk already past Vite's 500 kB warning, plus an async render per diagram and jsdom-hostile string output. Reconsider only if the app later needs *general* diagramming (sequence/state/ER) for its own content, at which point the marginal cost of using it here too is zero. |
 | Mermaid behind a dynamic `import()` | Moves the eager 134.82 kB off the main chunk but still ships ~4.9 MB into the deployed artifact, and adds a loading state to a panel that should render synchronously with the problem statement. |
 | A general graph library (d3-force, cytoscape, elk) | Solves a layout problem these diagrams don't have. At ≤15 nodes there is nothing to simulate or route around; a force layout would also render the *same* tree differently on every mount, which is worse for a reference diagram than a deterministic one. |
-| Rendering with flexbox/HTML instead of SVG | Fine for the 234 `next` edges (a horizontal chain), but there's no honest way to draw the 26 arcs and 944 tree edges without absolute positioning and pseudo-element hacks. SVG is the right primitive once *any* edge is diagonal or curved. |
+| Rendering with flexbox/HTML instead of SVG | Fine for `next` edges (a horizontal chain), but there's no honest way to draw cycle arcs, random pointers and tree edges without absolute positioning and pseudo-element hacks. SVG is the right primitive once *any* edge is diagonal or curved. |
 | Server-side rendering of the diagram | The wire format is already on the wire; decoding it client-side costs nothing and keeps `judge/harness.py`'s codecs as the single source of truth for what an encoding means. |
 
 ## Consequences
 
-**Easier.** The Description panel now shows shapes instead of encodings, for 85 problems and 358 sample diagrams, with no new dependency and no change to the API, the data model, or the seed format. The layout is pure arithmetic over a plain data structure, so it's unit-testable in jsdom by asserting `<text>` coordinates — including the case that motivates the whole thing (`[1,2]` and `[1,null,2]` must not render identically).
+**Easier.** The Description panel shows shapes instead of encodings for every node-typed sample case, with no new dependency and no change to the API, the data model, or the seed format. The layout is pure arithmetic over a plain data structure, so it's unit-testable in jsdom by asserting `<text>` coordinates — including the case that motivates the whole thing (`[1,2]` and `[1,null,2]` must not render identically).
 
-**Harder.** Layout quality is now ours to maintain. The current renderer assumes the sizing envelope measured above: ≤7-character labels and structures small enough that the panel's width is never the binding constraint. A problem seeded with, say, 40 nodes or a long string label would render too wide to read, and the fix would be ours to write. That is a deliberate, bounded bet — and `seed/` is authored in this repo, so the envelope is enforceable at authoring time rather than hoped for.
+**Harder.** Layout quality is now ours to maintain. The current renderer assumes the sizing envelope measured above: ≤7-character labels and structures small enough that the panel's width is never the binding constraint. A problem seeded with, say, 40 nodes or a long string label would render too wide to read, and the fix would be ours to write. That is a deliberate, bounded bet: sample cases are worked examples, so keeping them inside the envelope is an authoring guideline (the `author-problem` skill) rather than something the renderer has to survive.
 
 **Where a new node type lands.** `judge/harness.py` gains a codec; `nodeGraph.ts` gains the mirror decoder and an `EdgeKind`; `NodeDiagram.tsx` gains a case only if the new shape doesn't fit tree / row / ring. The three-way split exists so the first two steps don't touch layout code.

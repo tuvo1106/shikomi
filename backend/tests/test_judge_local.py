@@ -4,7 +4,7 @@ import json
 from worker import judge_local
 from worker.docker_runner import ContainerResult, build_run_args
 
-TWO_SUM_OK = "def pair_sum(nums, target):\n    return [0, 1]\n"
+PAIR_SUM_OK = "def pair_sum(nums, target):\n    return [0, 1]\n"
 
 
 def _payload(user_code):
@@ -24,7 +24,7 @@ def _write(tmp_path, payload):
 
 
 def test_cli_subprocess_accepts(tmp_path, capsys):
-    rc = judge_local.main(["--subprocess", _write(tmp_path, _payload(TWO_SUM_OK))])
+    rc = judge_local.main(["--subprocess", _write(tmp_path, _payload(PAIR_SUM_OK))])
     assert rc == 0
     assert "accepted" in capsys.readouterr().out
 

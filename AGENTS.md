@@ -45,7 +45,7 @@ Run from `backend/` unless noted.
 | Judge one payload (real sandbox) | `uv run python -m worker.judge_local payload.json` |
 | Backend real-container test | `uv run pytest -m docker` (from `backend/`, needs judge image) |
 | Harness protocol tests | `pytest -m "not docker"` (repo root) |
-| Sandbox isolation tests | `docker build -t shikomi-judge:latest judge/ && docker build -f judge/Dockerfile.js -t shikomi-judge-js:latest judge/ && pytest -m docker` (root) |
+| Sandbox isolation tests | `docker build -t shikomi-judge:latest judge/ && docker build -f judge/Dockerfile.js -t shikomi-judge-js:latest judge/ && docker build -f judge/Dockerfile.sql-mysql -t shikomi-judge-sql:latest judge/ && pytest -m docker` (root) |
 | Frontend unit/component tests | `pnpm test` (from `frontend/`, Vitest) |
 | Browser E2E | `pnpm e2e` (from `frontend/`, Playwright — needs `scripts/dev-up.sh` running; the 2FA spec shells out to `uv run python -m app.cli verify-email`, and the dev API must run with `AUTH_RATE_LIMIT_PER_MINUTE` raised, which `dev-up.sh` does — a hand-started API at the default 10/min makes auth specs fail with "Too many attempts") |
 
@@ -77,7 +77,8 @@ Run from `backend/` unless noted.
   mocked), plus pure-unit tests for verdict aggregation and the judge CLI.
 
 CI (`.github/workflows/ci.yml`) runs these as separate jobs: `lint`, `harness`,
-`sandbox`, `backend`.
+`sandbox`, `backend`, plus `frontend` (Vitest + build), `e2e` (`scripts/e2e_submit.py`)
+and `playwright`.
 
 ### Databases (three of them)
 
@@ -99,7 +100,7 @@ CI (`.github/workflows/ci.yml`) runs these as separate jobs: `lint`, `harness`,
 - **Isolation**: each test gets a freshly dropped+created schema (`conftest.py`),
   so there is zero cross-test bleed. Simple and correct, slightly slower than
   transaction rollback.
-- **Coverage gate is 80%** (`--cov-fail-under=80`); currently ~95%. The remaining
+- **Coverage gate is 80%** (`--cov-fail-under=80`); currently ~92%. The remaining
   gap is `worker/docker_runner.py` / `worker/judge_local.py`, which are exercised
   by the Docker-marked sandbox job rather than the backend unit job.
 
@@ -109,7 +110,7 @@ CI (`.github/workflows/ci.yml`) runs these as separate jobs: `lint`, `harness`,
   returns; the worker judges in a throwaway container. This queue seam is the
   scaling point. (DESIGN.md §1)
 - **Function-call judging**, not stdin/stdout: the harness imports the user's
-  module and calls the named function with JSON args. (DESIGN.md §5, §11)
+  module and calls the named function with JSON args. (DESIGN.md §5, §12)
 - **Test-case authoring**: each problem should have ~10 small edge-case tests
   plus **1–2 large hidden cases near the constraint max**, so runtimes are
   meaningful/stable and O(n²) solutions are caught. Submission runtime is the
@@ -160,7 +161,7 @@ CI (`.github/workflows/ci.yml`) runs these as separate jobs: `lint`, `harness`,
 - **Errors** use `APIError` → `{"detail", "code"}` via one exception handler.
 - **One in-flight submission per user per problem**: a Redis `SETNX` lock
   (`inflight:{user}:{problem}`, 120s TTL) acquired by the API on submit, released
-  by the worker (or the lock's TTL / the sweeper). `/run` is unthrottled.
+  by the worker (or the lock's TTL / the sweeper). `/run` takes no lock.
   Queue + lock live behind `app/queue.py` so tests substitute a `FakeQueue`.
 - **Enqueue ordering** (§5.7): write the submission row, *then* enqueue. If the
   queue is unavailable, the row is marked `judge_error` and the API returns 503 —
@@ -261,13 +262,11 @@ CI (`.github/workflows/ci.yml`) runs these as separate jobs: `lint`, `harness`,
   `format.ts`'s `isOperationsInput` and `nodeGraph.ts`'s `nodeParams` each gate
   on `kind` for exactly this reason.
 - **The judge's output codec is not the mirror of its input codec for
-  `CyclicListNode` and `List[ListNode]`.** `_encode_cyclic_node` returns a bare
-  *index* (node identity, via an `_idx` stamp) rather than the `[values, pos]`
-  pair `_build_cyclic_list` consumes, and `List[ListNode]` has an input builder
-  (`_build_each`) but no output encoder at all. So `expected` for those two
-  cannot be decoded with the input decoder — a "where does the cycle begin"
-  answer is "which node", not "what shape". Anything reading `expected` structurally has
-  to special-case both.
+  `CyclicListNode`.** `_encode_cyclic_node` returns a bare *index* (node identity,
+  via an `_idx` stamp) rather than the `[values, pos]` pair `_build_cyclic_list`
+  consumes, so its `expected` can't be decoded with the input decoder — a "where
+  does the cycle begin" answer is "which node", not "what shape". Anything reading
+  `expected` structurally has to special-case it; every other codec round-trips.
 
 ## Deferred / TODO
 

@@ -136,6 +136,12 @@ below:
 - **Answer shape**: "no answer", and multiple valid answers. Multiple valid
   answers mean `any_of`.
 
+**Samples are drawn.** For node-typed params and return types, the workspace
+draws each `is_sample: true` case as a diagram. Keep samples within the
+renderer's envelope: at most 15 nodes and labels of at most 7 characters
+(`docs/adr/0003-sample-case-diagrams-hand-rolled-svg.md`). Hidden cases can be
+any size.
+
 **`operations` cases**: `input` is `[ops, args]` with `ops[0]` the class name.
 `expected` is the parallel result list with `expected[0] = null`. Prefer several
 shorter traces, each exercising a different call order or edge condition, over

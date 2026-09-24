@@ -25,8 +25,8 @@ No `Co-Authored-By` trailer (see [AGENTS.md](AGENTS.md)).
 
 - Run `lefthook install` once: it enforces the commit format and runs the CI checks your diff
   touches before each push. `scripts/ci-local.sh full` runs *everything* CI does (Docker + the dev
-  stack), so run it before merging, especially when Actions minutes are short. It is not CI: it
-  uses your OS and dev database, so CI is still the final word when it can run.
+  stack), so run it before merging. It is not CI: it uses your OS and dev database, so CI is
+  still the final word.
 
 - Docs stay in sync with the change — see "Documentation is part of 'done'" in [CLAUDE.md](CLAUDE.md).
 - Fill out the [PR template](.github/PULL_REQUEST_TEMPLATE.md).
