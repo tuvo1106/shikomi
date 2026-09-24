@@ -92,8 +92,10 @@ describe('decodeExpected', () => {
     expect(decodeExpected('CyclicListNode', 1)).toEqual([])
   })
 
-  it('refuses List[ListNode], which has no output codec at all', () => {
-    expect(decodeExpected('List[ListNode]', [[1, 2]])).toEqual([])
+  it('decodes List[ListNode], whose output codec mirrors its input one', () => {
+    // harness.py encodes a returned list of lists as one flat array per list.
+    const graphs = decodeExpected('List[ListNode]', [[1, 2], [3]])
+    expect(graphs.map((g) => g.nodes.map((n) => n.label))).toEqual([['1', '2'], ['3']])
   })
 
   it('ignores a non-node return type', () => {

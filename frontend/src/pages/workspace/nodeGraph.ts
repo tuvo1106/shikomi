@@ -154,15 +154,15 @@ export function decodeInput(type: NodeType, value: unknown): VizGraph[] {
 /**
  * The same for a case's `expected`, keyed on the problem's `return_type`.
  *
- * Not simply `decodeInput`: two codecs in `harness.py` are deliberately
+ * Not simply `decodeInput`: one codec in `harness.py` is deliberately
  * asymmetric, because the *answer* to those problems is an identity, not a
  * shape. `CyclicListNode` encodes a returned node as its index in the input
- * (`_encode_cyclic_node`) and `List[ListNode]` has no output codec at all, so
- * neither expected value is a structure — they get no diagram rather than a
- * wrong one.
+ * (`_encode_cyclic_node`), so the expected value isn't a structure — it gets no
+ * diagram rather than a wrong one. Every other codec encodes its output in the
+ * same shape its input takes.
  */
 export function decodeExpected(returnType: string, value: unknown): VizGraph[] {
-  if (returnType === 'CyclicListNode' || returnType === 'List[ListNode]') return []
+  if (returnType === 'CyclicListNode') return []
   return isNodeType(returnType) ? decodeInput(returnType, value) : []
 }
 
