@@ -1,0 +1,23 @@
+sequenceDiagram
+    autonumber
+    participant M as api /internal/queue-depth
+    participant KEDA as KEDA
+    participant HPA as HPA (keda-hpa-worker)
+    participant W as Worker Deployment
+
+    Note over M,W: Idle — queue empty → scale to zero
+    KEDA->>M: poll (every pollingInterval)
+    M-->>KEDA: {depth: 0}  (ZCARD arq:queue)
+    KEDA->>W: replicas → 0  (no worker pods running)
+
+    Note over M,W: Backlog builds — 12 jobs, targetValuePerReplica = 3
+    KEDA->>M: poll
+    M-->>KEDA: {depth: 12}
+    KEDA->>HPA: activate (depth > 0)
+    HPA->>W: replicas 0 → 4  (ceil 12 / 3)
+    Note right of W: new worker pods start, drain the queue
+
+    Note over M,W: Backlog drained → scale back to zero
+    KEDA->>M: poll
+    M-->>KEDA: {depth: 0}
+    HPA->>W: after cooldownPeriod, replicas 4 → 0

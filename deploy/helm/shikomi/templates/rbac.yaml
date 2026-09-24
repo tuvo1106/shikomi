@@ -1,0 +1,37 @@
+{{- if .Values.worker.enabled }}
+# Least-privilege access for the worker's judge runner: it may only manage pods
+# (+ read their logs) and the payload ConfigMaps, only in this namespace. It
+# cannot touch Deployments, Secrets, or other namespaces — so a compromised
+# worker can't escalate much beyond spawning sandboxes it already spawns.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: shikomi-worker
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: shikomi-worker
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create", "get", "list", "watch", "delete", "deletecollection"]
+  - apiGroups: [""]
+    resources: ["pods/log", "pods/status"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create", "get", "delete", "deletecollection"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: shikomi-worker
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: shikomi-worker
+subjects:
+  - kind: ServiceAccount
+    name: shikomi-worker
+{{- end }}

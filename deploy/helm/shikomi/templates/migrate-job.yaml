@@ -1,0 +1,41 @@
+# Schema migration + seed, run as a Helm hook on every install/upgrade — the K8s
+# equivalent of compose's one-shot `migrate` service. post-install/post-upgrade
+# (not pre-) so the in-cluster Postgres/Redis already exist; an initContainer
+# then waits for Postgres to accept connections before Alembic runs.
+#
+# before-hook-creation delete policy lets the immutable Job be recreated on each
+# `helm upgrade` (Jobs can't be patched in place).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: shikomi-migrate
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels: { app: shikomi-migrate }
+    spec:
+      restartPolicy: Never
+      initContainers:
+        - name: wait-postgres
+          image: {{ .Values.postgres.image }}
+          command: ["sh", "-c", "until pg_isready -h postgres -U {{ .Values.postgres.user }}; do echo waiting for postgres; sleep 2; done"]
+      containers:
+        - name: migrate
+          image: {{ .Values.images.api }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          command: ["sh", "-c", "alembic upgrade head && python -m app.cli seed"]
+          envFrom:
+            - configMapRef: { name: shikomi-config }
+            - secretRef: { name: shikomi-secret }
+          volumeMounts:
+            # Seed JSON lives at the repo root (outside the image); the deploy
+            # script publishes it as this ConfigMap. app.cli seed reads /seed/problems.
+            - { name: seed, mountPath: /seed/problems }
+      volumes:
+        - name: seed
+          configMap: { name: shikomi-seed }

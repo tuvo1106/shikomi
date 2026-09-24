@@ -1,0 +1,22 @@
+{{- if .Values.ingress.enabled }}
+# Optional single entrypoint. Everything is one origin already (Caddy proxies
+# /api), so the Ingress just routes the host to the web Service. On a real
+# cluster, add cert-manager annotations + a tls block for automatic HTTPS.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: shikomi
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  rules:
+    - host: {{ .Values.ingress.host }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: web
+                port:
+                  number: 80
+{{- end }}

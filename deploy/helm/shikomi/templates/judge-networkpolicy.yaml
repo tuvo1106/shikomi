@@ -1,0 +1,18 @@
+{{- if .Values.worker.enabled }}
+# Network lockdown for judge pods — the k8s replacement for `docker run
+# --network=none`. Selects `app=judge` and permits no ingress and no egress, so
+# untrusted code can't exfiltrate, call home, or reach in-cluster services.
+#
+# NOTE: enforcement needs a NetworkPolicy-capable CNI (Calico, Cilium). kind's
+# default kindnet does NOT enforce policies, so locally this is declarative only —
+# real isolation comes from the CNI (and gVisor) on a production cluster.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: judge-deny-all
+spec:
+  podSelector:
+    matchLabels: { app: judge }
+  policyTypes: [Ingress, Egress]
+  # No ingress/egress rules → deny everything.
+{{- end }}

@@ -1,0 +1,35 @@
+# Network lockdown for the `api` Service. `_client_ip` trusts X-Forwarded-For when
+# TRUST_PROXY=true, which is correct for the intended client → web (Caddy) → api
+# topology since Caddy overwrites XFF with the real client IP. But without this
+# policy, any other pod in the cluster could call api:8000 directly, set its own
+# spoofed X-Forwarded-For, and have it trusted — bypassing the per-IP auth
+# rate-limit from an in-cluster origin instead of the public internet.
+#
+# Only `app: web` pods are the intended caller in that topology. When KEDA is
+# enabled it's a second legitimate caller: its metrics-api trigger polls
+# /api/v1/internal/queue-depth directly from the KEDA operator pod, which runs in
+# its own `keda` namespace (scripts/k8s-up.sh --keda), so it's allowed in by
+# namespace rather than by pod label.
+#
+# NOTE: enforcement needs a NetworkPolicy-capable CNI (Calico, Cilium) — same
+# caveat as judge-networkpolicy.yaml; kind's default kindnet does not enforce
+# policies, so locally this is declarative only. Also verify on your CNI that
+# kubelet's readiness/liveness probes against `api` (httpGet, node-originated,
+# not pod-originated) still succeed — some CNIs need an explicit allow for
+# host/node traffic alongside podSelector-based rules.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: api-restrict-ingress
+spec:
+  podSelector:
+    matchLabels: { app: api }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app: web }
+{{- if .Values.keda.enabled }}
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: keda }
+{{- end }}

@@ -1,0 +1,46 @@
+# The FastAPI service. Service name `api` (port 8000) so the web image's baked
+# Caddyfile (`reverse_proxy api:8000`) and DATABASE_URL/REDIS_URL resolve via
+# cluster DNS unchanged from compose. Readiness = the deep /healthz probe, so a
+# pod only takes traffic once Postgres + Redis answer; liveness = the shallow /livez.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+spec:
+  replicas: {{ .Values.api.replicas }}
+  selector:
+    matchLabels: { app: api }
+  template:
+    metadata:
+      labels: { app: api }
+    spec:
+      containers:
+        - name: api
+          image: {{ .Values.images.api }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+          envFrom:
+            - configMapRef: { name: shikomi-config }
+            - secretRef: { name: shikomi-secret }
+          ports:
+            - containerPort: 8000
+          readinessProbe:
+            httpGet: { path: /api/v1/healthz, port: 8000 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          # Shallow on purpose: a failing liveness probe restarts the pod, and a database
+          # outage must not crash-loop healthy api pods (readiness above just stops traffic).
+          livenessProbe:
+            httpGet: { path: /api/v1/livez, port: 8000 }
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources: {{ .Values.api.resources | toYaml | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+spec:
+  selector: { app: api }
+  ports:
+    - { port: 8000, targetPort: 8000 }

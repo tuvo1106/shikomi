@@ -1,0 +1,278 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          prune-cache: false
+      # Run ruff via backend's locked dev dependency (not a bare `pip install
+      # ruff`), so CI lints with the exact version pinned in uv.lock instead of
+      # whatever's newest on PyPI — an unpinned install drifts silently and can
+      # fail on newly-enabled default rules with no code change to explain it.
+      - working-directory: backend
+        run: uv run ruff check . ../judge
+
+  harness:
+    # Fast harness protocol tests + verdict aggregation (no Docker). DESIGN.md §10.1.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # need history to diff changed paths below
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20  # matches judge/Dockerfile.js; test_js_protocol.py runs harness.js directly
+      - run: pip install pytest
+      - run: pytest -m "not docker" --ignore=judge/tests/test_seed_solutions.py
+      # test_seed_solutions.py runs every seeded solution's *large* hidden cases
+      # too (DESIGN.md §7.1), so it's the slow part of this job and most PRs never
+      # touch a seed file. Only run it when this push/PR actually changed
+      # seed/problems (the data it validates) or judge/ (the harness that judges
+      # it, e.g. a comparison-mode fix) — falls back to running it when unsure
+      # (no diff base resolved) rather than silently skipping.
+      - name: Check for seed/judge changes
+        id: seed_changed
+        run: |
+          base="${{ github.event.pull_request.base.sha || github.event.before }}"
+          if [ -z "$base" ] || ! git diff --name-only "$base" "${{ github.sha }}" > /tmp/changed.txt; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          elif grep -qE '^(seed/problems/|judge/)' /tmp/changed.txt; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Validate seed solutions (seed/problems or judge/ changed)
+        if: steps.seed_changed.outputs.changed == 'true'
+        run: pytest judge/tests/test_seed_solutions.py -v
+
+  sandbox:
+    # Real-container isolation tests. DESIGN.md §10.1 (second layer).
+    runs-on: ubuntu-latest  # Docker is available on GitHub-hosted Linux runners
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest
+      - run: docker build -t shikomi-judge:latest judge/
+      - run: docker build -f judge/Dockerfile.js -t shikomi-judge-js:latest judge/
+      - run: docker build -f judge/Dockerfile.sql-mysql -t shikomi-judge-sql:latest judge/
+      - run: pytest -m docker
+
+  backend:
+    # API + service tests against a real Postgres, plus a clean-migration check.
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: app
+          POSTGRES_PASSWORD: app
+          POSTGRES_DB: shikomi
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql+asyncpg://app:app@localhost:5432/shikomi
+      TEST_DATABASE_URL: postgresql+asyncpg://app:app@localhost:5432/shikomi_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          # Skip the post-job `uv cache prune --ci` (fails with exit 2 on some
+          # uv versions and fails the whole job even though every step passed).
+          prune-cache: false
+      - name: Create test database
+        run: PGPASSWORD=app psql -h localhost -U app -d shikomi -c "CREATE DATABASE shikomi_test;"
+      - name: Migrations apply cleanly
+        working-directory: backend
+        run: uv run alembic upgrade head
+      - name: Tests + coverage gate
+        working-directory: backend
+        run: uv run pytest
+
+  e2e:
+    # Full pipeline: API + arq worker + real judge containers.
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: app
+          POSTGRES_PASSWORD: app
+          POSTGRES_DB: shikomi
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql+asyncpg://app:app@localhost:5432/shikomi
+      REDIS_URL: redis://localhost:6379/0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          # Skip the post-job `uv cache prune --ci` (fails with exit 2 on some
+          # uv versions and fails the whole job even though every step passed).
+          prune-cache: false
+      - name: Build judge images
+        run: |
+          docker build -t shikomi-judge:latest judge/
+          docker build -f judge/Dockerfile.js -t shikomi-judge-js:latest judge/
+          docker build -f judge/Dockerfile.sql-mysql -t shikomi-judge-sql:latest judge/
+      - name: Migrate + seed
+        working-directory: backend
+        run: |
+          uv run alembic upgrade head
+          uv run python -m app.cli seed
+      - name: Launch API + worker
+        working-directory: backend
+        run: |
+          uv run uvicorn app.main:app --port 8000 > /tmp/api.log 2>&1 &
+          uv run arq worker.main.WorkerSettings > /tmp/worker.log 2>&1 &
+          uv run arq worker.main.AccountsWorkerSettings > /tmp/accounts-worker.log 2>&1 &
+          for i in $(seq 1 30); do
+            [ "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/api/v1/healthz)" = "200" ] && break
+            sleep 1
+          done
+      - name: Run end-to-end pipeline check
+        working-directory: backend
+        run: uv run python ../scripts/e2e_submit.py
+      - name: Worker log (on failure)
+        if: failure()
+        run: cat /tmp/worker.log /tmp/accounts-worker.log /tmp/api.log
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - working-directory: frontend
+        run: pnpm install --frozen-lockfile
+      - working-directory: frontend
+        run: pnpm exec oxlint
+      - working-directory: frontend
+        run: pnpm test
+      - working-directory: frontend
+        run: pnpm build
+
+  playwright:
+    # Browser E2E against the full stack. Playwright starts Vite itself (its
+    # webServer), which proxies /api to the API launched below.
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: app
+          POSTGRES_PASSWORD: app
+          POSTGRES_DB: shikomi
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql+asyncpg://app:app@localhost:5432/shikomi
+      REDIS_URL: redis://localhost:6379/0
+      CI: "true"
+      # Specs sign in/register many times from one IP; the default 10/min would throttle them.
+      AUTH_RATE_LIMIT_PER_MINUTE: "1000"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          # Skip the post-job `uv cache prune --ci` (fails with exit 2 on some
+          # uv versions and fails the whole job even though every step passed).
+          prune-cache: false
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - name: Build judge images
+        run: |
+          docker build -t shikomi-judge:latest judge/
+          docker build -f judge/Dockerfile.js -t shikomi-judge-js:latest judge/
+          docker build -f judge/Dockerfile.sql-mysql -t shikomi-judge-sql:latest judge/
+      - name: Migrate + seed (incl. the verified dev user the specs sign in as)
+        working-directory: backend
+        run: |
+          uv run alembic upgrade head
+          uv run python -m app.cli seed
+          uv run python -m app.cli seed-dev-user
+      - name: Launch API + worker
+        working-directory: backend
+        run: |
+          uv run uvicorn app.main:app --port 8000 > /tmp/api.log 2>&1 &
+          uv run arq worker.main.WorkerSettings > /tmp/worker.log 2>&1 &
+          uv run arq worker.main.AccountsWorkerSettings > /tmp/accounts-worker.log 2>&1 &
+          for i in $(seq 1 30); do
+            [ "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/api/v1/healthz)" = "200" ] && break
+            sleep 1
+          done
+      - name: Install frontend deps
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+      - name: Install Playwright browser
+        working-directory: frontend
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Run E2E
+        working-directory: frontend
+        run: pnpm exec playwright test
+      - name: Playwright report (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: frontend/playwright-report
+      - name: Server logs (on failure)
+        if: failure()
+        run: cat /tmp/worker.log /tmp/accounts-worker.log /tmp/api.log

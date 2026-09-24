@@ -1,0 +1,28 @@
+{{- if .Values.accountsWorker.enabled }}
+# The accounts worker: sends account email and purges stale unverified signups, on its own
+# arq queue (`arq:accounts`) so a mail backlog can't delay judging and vice versa
+# (DESIGN.md §5.6). Unlike the judge worker it launches no sandboxes, so it needs no
+# ServiceAccount/RBAC and runs from the plain api image. Not KEDA-scaled: mail is cheap
+# and must keep flowing while the judge worker is scaled to zero.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: accounts-worker
+spec:
+  replicas: {{ .Values.accountsWorker.replicas }}
+  selector:
+    matchLabels: { app: accounts-worker }
+  template:
+    metadata:
+      labels: { app: accounts-worker }
+    spec:
+      containers:
+        - name: accounts-worker
+          image: {{ .Values.images.api }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          command: ["arq", "worker.main.AccountsWorkerSettings"]
+          envFrom:
+            - configMapRef: { name: shikomi-config }
+            - secretRef: { name: shikomi-secret }
+          resources: {{ .Values.accountsWorker.resources | toYaml | nindent 12 }}
+{{- end }}

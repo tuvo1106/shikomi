@@ -1,0 +1,47 @@
+sequenceDiagram
+    autonumber
+    actor U as Browser (SPA)
+    participant A as API
+    participant DB as Postgres
+    participant W as Worker (arq)
+
+    Note over U,DB: Signup — the response never says whether the email was new
+    U->>A: POST /auth/register {email, username, password}
+    A->>DB: new email → create unverified user · taken email → change nothing
+    A-)W: enqueue (kind, email) — the same cheap job for any address
+    A-->>U: 202 "check your email" (identical either way)
+    W->>DB: look up the user, mint the single-use token
+    W-->>U: inbox gets a verify link (new email)<br/>or "you already have an account" + reset link (taken)
+
+    Note over U,DB: Login — access token in memory, refresh token in an httpOnly cookie
+    U->>A: POST /auth/login {email, password}
+    A->>DB: verify bcrypt hash + email verified · check per-account lockout
+    alt account has two-factor auth on
+        A-->>U: 200 {mfa_required, mfa_token} (no session yet)
+        U->>A: POST /auth/login/2fa {mfa_token, code | recovery code}
+        A->>DB: check code is valid and unused · wrong codes count toward lockout
+    end
+    A->>DB: store hashed rotating refresh token
+    A-->>U: 200 {access_token} + Set-Cookie refresh (httpOnly, Secure, SameSite=Lax)
+    Note right of U: access JWT held in JS memory;<br/>XSS cannot read the httpOnly cookie
+
+    Note over U,DB: Normal request — bearer access token
+    U->>A: GET /auth/me (Authorization: Bearer <access>)
+    A-->>U: 200 {user}
+
+    Note over U,DB: Access token expired → silent refresh with rotation
+    U->>A: POST /auth/refresh (refresh cookie)
+    A->>DB: UPDATE … SET revoked_at, rotated_at WHERE revoked_at IS NULL (one caller wins)
+    A->>DB: insert new (rotate)
+    A-->>U: 200 {access_token} + new refresh cookie
+
+    Note over U,DB: Same token again within seconds → concurrent request, not theft
+    U->>A: POST /auth/refresh (token rotated < 10s ago)
+    A->>DB: claim fails, but rotated_at is inside the grace window
+    A-->>U: 200 {access_token} + its own new refresh cookie
+
+    Note over U,DB: Stolen refresh token replayed → reuse detection
+    U->>A: POST /auth/refresh (a token rotated earlier, or logged out)
+    A->>DB: claim fails and no grace → REUSE detected
+    A->>DB: revoke ALL of the user's sessions
+    A-->>U: 401 REFRESH_REUSE (log in again)

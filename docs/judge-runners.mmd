@@ -1,0 +1,23 @@
+sequenceDiagram
+    autonumber
+    participant K as Worker (judging.py)
+    participant RUN as runner.py
+    participant D as Docker daemon
+    participant P as Kubernetes API
+
+    Note over K,P: one run_in_container(...) → one ContainerResult; JUDGE_RUNNER picks the backend
+    K->>RUN: run_in_container(payload, limits, wall_timeout)
+
+    alt JUDGE_RUNNER = docker  (Compose / single VPS)
+        RUN->>D: docker run -i  (network=none, read-only, cap-drop ALL, non-root)
+        Note right of D: payload piped to stdin
+        D-->>RUN: stdout verdict JSON + exit code
+        RUN->>D: docker kill if wall-clock exceeded
+    else JUDGE_RUNNER = k8s  (cluster)
+        RUN->>P: create ConfigMap(payload) + Pod (same lockdown, as spec fields)
+        Note right of P: payload mounted as a file (JUDGE_PAYLOAD_FILE)
+        P-->>RUN: verdict via Pod log + terminated state
+        RUN->>P: delete Pod + ConfigMap
+    end
+
+    RUN-->>K: ContainerResult (stdout, exit_code, timed_out, oom_killed)

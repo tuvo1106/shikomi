@@ -1,0 +1,31 @@
+flowchart TB
+    img[/"same images: api · worker · web · judge"/]
+
+    subgraph Compose["Docker Compose — single VPS (scripts/prod-up.sh)"]
+        direction TB
+        cc["Caddy (web) :80/:443"]
+        cc --> capi["api"]
+        cc --> cspa["SPA static files"]
+        capi --> cpg[("postgres")]
+        capi --> crd[("redis")]
+        cwk["worker"] --> crd
+        cawk["accounts-worker"] --> crd
+        cawk --> cpg
+        cwk -. "docker run (per submission)" .-> cj[["judge container"]]
+    end
+
+    subgraph K8s["Kubernetes — Helm chart (scripts/k8s-up.sh)"]
+        direction TB
+        king["Caddy (web) Service"]
+        king --> kapi["api Deployment"]
+        kapi --> kpg[("postgres")]
+        kapi --> krd[("redis")]
+        kwk["worker Deployment"] --> krd
+        kawk["accounts-worker Deployment"] --> krd
+        kawk --> kpg
+        kwk -. "K8s API (per submission)" .-> kj[["judge Pod"]]
+        keda{{"KEDA"}} -. "scale on queue depth" .-> kwk
+    end
+
+    img -.-> Compose
+    img -.-> K8s

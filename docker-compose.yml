@@ -1,0 +1,152 @@
+# Production-shaped stack (DESIGN.md §9). Brings up the whole system
+# as containers behind Caddy — the same shape that deploys to a VPS, but runnable
+# locally. For day-to-day hot-reload development use scripts/dev-up.sh instead;
+# this stack builds the frontend and runs ENV=prod (no CORS, Secure cookies).
+#
+#   scripts/prod-up.sh        # build judge image + bring the stack up
+#   docker compose down       # stop (add -v to wipe the database volume)
+#
+# Visit http://localhost:8080 (override with WEB_PORT) — localhost is a secure
+# context, so the Secure refresh cookie works even over plain HTTP.
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+      POSTGRES_DB: shikomi
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d shikomi"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # One-shot: run migrations + seed problems, then exit. api/worker wait for it to
+  # finish successfully so they never start against an unmigrated schema.
+  migrate:
+    build:
+      context: ./backend
+      target: base
+    command: sh -c "alembic upgrade head && python -m app.cli seed"
+    environment: &backend_env
+      ENV: prod
+      DATABASE_URL: postgresql+asyncpg://app:app@postgres:5432/shikomi
+      REDIS_URL: redis://redis:6379/0
+      # No default and no `:?`: `:?` would make `down`/`logs`/`ps` demand it too. The api
+      # refuses to boot under ENV=prod without a strong one; prod-up.sh supplies it.
+      JWT_SECRET: ${JWT_SECRET:-}
+      # Retired keys that still verify during a rotation (DESIGN.md §4.1); empty normally.
+      JWT_PREVIOUS_SECRETS: ${JWT_PREVIOUS_SECRETS:-}
+      # Encrypts two-factor secrets at rest (DESIGN.md §4.1). Like JWT_SECRET: no default here,
+      # the api refuses the public dev key under ENV=prod, and prod-up.sh supplies one.
+      # TOTP_PREVIOUS_KEYS are retired keys that still decrypt during a rotation.
+      TOTP_ENCRYPTION_KEY: ${TOTP_ENCRYPTION_KEY:-}
+      TOTP_PREVIOUS_KEYS: ${TOTP_PREVIOUS_KEYS:-}
+      # The api sits behind the web (Caddy) edge, which sets X-Forwarded-For to the
+      # real client — so trust it for the per-IP auth rate limit (DESIGN.md §4.1).
+      TRUST_PROXY: "true"
+      JUDGE_IMAGE: shikomi-judge:latest
+      JUDGE_IMAGE_JS: shikomi-judge-js:latest
+      JUDGE_IMAGE_SQL: shikomi-judge-sql:latest
+      # Links in verify/reset emails are built from this, so a real deploy must set it
+      # (e.g. https://your.domain.com). Mail is sent by the worker (DESIGN.md §4.1);
+      # `console` just prints it to the worker log, `smtp` needs SMTP_HOST.
+      FRONTEND_BASE_URL: ${FRONTEND_BASE_URL:-http://localhost}
+      EMAIL_FROM: ${EMAIL_FROM:-no-reply@example.com}
+      EMAIL_BACKEND: ${EMAIL_BACKEND:-console}
+      # Optional operator address the watchdog mails when account email backs up
+      # (worker/watchdog.py); empty = log-only.
+      ALERT_EMAIL: ${ALERT_EMAIL:-}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+    # Problems live outside the backend build context, so they aren't baked into
+    # the image — mount them where app.cli seed looks. PROBLEMS_DIR swaps the
+    # bundled starters for an operator's own problem directory (bring your own).
+    volumes:
+      - ${PROBLEMS_DIR:-./seed/problems}:/seed/problems:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build:
+      context: ./backend
+      target: base
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    environment: *backend_env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c",
+              "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/healthz')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  worker:
+    build:
+      context: ./backend
+      target: worker
+    command: arq worker.main.WorkerSettings
+    environment: *backend_env
+    # The worker shells `docker run` on the *host* daemon to launch judge
+    # sandboxes (DESIGN.md §5.5 accepted risk). The judge image must exist on the
+    # host — scripts/prod-up.sh builds it before starting the stack.
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  # Account email + the unverified-signup purge, on their own arq queue so a mail backlog
+  # can't delay judging (DESIGN.md §5.6). No sandbox work, so it uses the lean api image:
+  # no Docker CLI, no host socket.
+  accounts-worker:
+    build:
+      context: ./backend
+      target: base
+    command: arq worker.main.AccountsWorkerSettings
+    environment: *backend_env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  web:
+    build:
+      context: ./frontend
+    # Host port defaults to 8080: Colima/rootless Docker often won't forward
+    # privileged ports (<1024) to localhost. On a real VPS, set WEB_PORT=80.
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    environment:
+      # Defaults to :80 (plain HTTP). Set SITE_ADDRESS=your.domain.com for auto-TLS.
+      # Must never be empty-but-set, or Caddy misreads the site block as globals.
+      SITE_ADDRESS: ${SITE_ADDRESS:-:80}
+    depends_on:
+      - api
+
+volumes:
+  pgdata:
