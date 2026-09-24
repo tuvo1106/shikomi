@@ -30,11 +30,11 @@ Two facts fall out of that table and drive everything else:
 
 **The structures are small.** 15 nodes and 7 characters is the whole envelope. Nothing here needs panning, zooming, collapsing, virtualized rendering, or a force simulation. That is the single most important sizing fact in this ADR: it is what makes the cheapest option viable rather than a compromise.
 
-**Bundle cost, measured.** Each option was built into the app at the baseline commit and compared against that commit's own build (878.00 kB raw / 262.40 kB gzip, one chunk):
+**Bundle cost, measured.** Each option was built into the app as it stood just before diagrams were added, and compared against that version's own build (878.00 kB raw / 262.40 kB gzip, one chunk):
 
 | | main chunk | Δ main chunk | total JS shipped | Δ total | chunks |
 |---|---|---|---|---|---|
-| Baseline (`61a3f4d`) | 878.00 kB / 262.40 kB gz | — | 878.00 kB | — | 1 |
+| Baseline (no diagrams) | 878.00 kB / 262.40 kB gz | — | 878.00 kB | — | 1 |
 | **Hand-rolled SVG (shipped)** | 883.81 kB / 264.66 kB gz | **+5.81 kB / +2.26 kB gz** | 883.81 kB | **+5.81 kB** | 1 |
 | react-d3-tree | 968.09 kB / 290.96 kB gz | +90.09 kB / +28.56 kB gz | 968.09 kB | +90.09 kB | 1 |
 | Mermaid | 1,012.82 kB / 302.03 kB gz | +134.82 kB / +39.63 kB gz | 5,758.82 kB / 1,683.46 kB gz | **+4.88 MB / +1.42 MB gz** | **92** |

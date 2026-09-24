@@ -135,9 +135,9 @@ async def test_two_files_with_the_same_slug_are_refused(session_factory, monkeyp
 
 async def test_unknown_keys_warn_but_load(session_factory, monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(cli, "SessionLocal", session_factory)
-    _write(tmp_path, "demo", is_premium=True)
+    _write(tmp_path, "demo", author="someone")
     assert await cli.seed(tmp_path) == 0
-    assert "is_premium" in capsys.readouterr().err
+    assert "author" in capsys.readouterr().err
 
 
 async def test_verify_email_marks_verified(session_factory, monkeypatch):

@@ -4,9 +4,9 @@ import { ResendVerification } from './ResendVerification'
 
 /**
  * The full-screen wall shown by the route guards to signed-in but unverified
- * users. Unverified accounts can no longer log in (DESIGN.md §4.1), so this is
- * only reachable from a session that predates that rule — kept as a safety net
- * rather than trusting that no such session exists.
+ * users. Unverified accounts can't log in (DESIGN.md §4.1), so this should be
+ * unreachable — it's a safety net, so the guard doesn't have to trust that no
+ * unverified session can ever exist.
  * Offers Resend, "I've verified — continue" (re-fetches the user so the gate
  * clears once verified in another tab), and Sign out.
  */
