@@ -1,0 +1,37 @@
+import { defineConfig, devices } from '@playwright/test'
+
+// E2E runs against the full dev stack (Vite + API + worker + Postgres/Redis +
+// the judge image). Bring it up with `scripts/dev-up.sh` first; these tests
+// drive the real browser against http://localhost:5173.
+const BASE_URL = process.env.E2E_BASE_URL ?? 'http://localhost:5173'
+
+export default defineConfig({
+  testDir: './e2e',
+  // Judging is a shared, heavy resource — keep runs serial and deterministic.
+  fullyParallel: false,
+  workers: 1,
+  forbidOnly: !!process.env.CI,
+  retries: process.env.CI ? 1 : 0,
+  reporter: process.env.CI ? 'list' : [['list'], ['html', { open: 'never' }]],
+  timeout: 60_000,
+  expect: { timeout: 15_000 },
+  use: {
+    baseURL: BASE_URL,
+    // Match the app's dark-first default so theme state is deterministic
+    // (Chromium otherwise reports prefers-color-scheme: light).
+    colorScheme: 'dark',
+    trace: 'on-first-retry',
+    screenshot: 'only-on-failure',
+  },
+  projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
+  // Locally, reuse the Vite server dev-up.sh started (or start one if absent); on CI
+  // always start a fresh one. pnpm is pinned (package.json `packageManager`) because
+  // some pnpm 11 releases don't pass Playwright's shutdown signal on to Vite, which
+  // hangs the run after the last test — check that a run exits before bumping it.
+  webServer: {
+    command: 'pnpm dev',
+    url: BASE_URL,
+    reuseExistingServer: !process.env.CI,
+    timeout: 30_000,
+  },
+})

@@ -1,0 +1,50 @@
+# SQL judge sandbox image (DESIGN.md §13, docs/adr/0002-sql-judge-engine-mysql-vs-mariadb.md).
+# Named `Dockerfile.sql-mysql`, not `Dockerfile.sql`, so a Postgres fast-follow's
+# `Dockerfile.sql-postgres` sits symmetrically beside it. Engine is MariaDB
+# (ADR-0002: MySQL 8's fresh datadir is a confirmed 190MB, structurally
+# incompatible with this sandbox's tmpfs budget; MariaDB's tuned template
+# fits in 22MB — see the ADR's "Phase 0 results").
+#
+# The datadir is pre-baked at BUILD time (mariadb-install-db + the
+# sql_provision_template.sh grant step below) so the per-submission path never
+# pays that cost — sql_entrypoint.sh only `cp -a`s the finished template into
+# tmpfs and starts the server, ~50ms per the ADR's measurements. This is the
+# one flag that isn't a small extension of the python/js images: it needs an
+# actual database server, unlike those two stateless-interpreter images.
+FROM debian:12-slim
+
+# Needed for the RUN step below: `source`-ing sql_innodb_layout_flags.sh and
+# expanding its bash array doesn't work under Debian's default RUN shell
+# (/bin/sh -> dash, no array support).
+SHELL ["/bin/bash", "-c"]
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    mariadb-server python3 python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir --break-system-packages pymysql==1.1.1
+
+RUN useradd -m -u 1000 runner
+
+COPY sql_innodb_layout_flags.sh /opt/judge/sql_innodb_layout_flags.sh
+COPY sql_provision_template.sh /opt/judge/sql_provision_template.sh
+RUN chmod +x /opt/judge/sql_provision_template.sh && \
+    mkdir -p /opt/judge/datadir-template && \
+    source /opt/judge/sql_innodb_layout_flags.sh && \
+    mariadb-install-db \
+      --datadir=/opt/judge/datadir-template \
+      --auth-root-authentication-method=normal \
+      --skip-test-db \
+      "${INNODB_LAYOUT_FLAGS[@]}" \
+      > /opt/judge/install.log 2>&1 && \
+    /opt/judge/sql_provision_template.sh /opt/judge/datadir-template && \
+    chown -R runner:runner /opt/judge/datadir-template
+
+COPY harness_sql.py /opt/judge/harness_sql.py
+COPY sql_entrypoint.sh /opt/judge/sql_entrypoint.sh
+RUN chmod +x /opt/judge/sql_entrypoint.sh && \
+    chown runner:runner /opt/judge/harness_sql.py /opt/judge/sql_entrypoint.sh
+
+USER runner
+WORKDIR /home/runner
+ENTRYPOINT ["/opt/judge/sql_entrypoint.sh"]

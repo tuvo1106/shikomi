@@ -1,0 +1,47 @@
+sequenceDiagram
+    autonumber
+    actor U as Browser (SPA)
+    participant W as Caddy (web)
+    participant A as API (FastAPI)
+    participant DB as Postgres
+    participant R as Redis (arq queue)
+    participant K as Worker (arq)
+    participant J as Judge Pod (k8s)
+
+    Note over U,J: Submitting a solution — Kubernetes judge-as-Pod path
+
+    U->>W: POST /api/v1/submissions {problem_id, code}
+    W->>A: reverse-proxy /api/*
+    A->>A: auth (JWT) · require_verified · rate limit
+    A->>R: SET NX inflight:{user}:{problem} = submission id  (one in-flight per problem)
+    A->>DB: INSERT submission (status = pending)
+    A->>R: enqueue judge_submission(id, mode)  → ZADD arq:queue
+    A-->>U: 202 {id}
+
+    par SPA polls for the verdict
+        loop every 1s until terminal
+            U->>A: GET /submissions/{id}
+            A->>DB: SELECT status
+            A-->>U: {status: pending | running | …}
+        end
+    and Worker judges the submission
+        R->>K: dequeue judge_submission(id, mode)
+        K->>DB: UPDATE status = running
+        K->>DB: load problem + test cases
+        K->>J: create ConfigMap(payload) + locked-down Pod
+        Note right of J: no network · read-only FS · cap-drop ALL<br/>non-root · mem/cpu limits · per-case SIGALRM
+        activate J
+        J->>J: run harness over test cases
+        J-->>K: verdict JSON (read via Pod log)
+        deactivate J
+        K->>J: delete Pod + ConfigMap
+        K->>K: aggregate → verdict (accepted / wrong_answer / …)
+        K->>DB: UPDATE status, runtime_ms, verdict_detail
+        K->>R: release inflight lock (only if still ours)
+    end
+
+    U->>A: GET /submissions/{id}
+    A->>DB: SELECT
+    A-->>U: {status: accepted, passed, total, results}
+
+    Note over R,K: KEDA autoscales Worker replicas 0..N on ZCARD arq:queue (backlog)

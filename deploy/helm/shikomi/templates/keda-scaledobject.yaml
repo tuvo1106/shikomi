@@ -1,0 +1,28 @@
+{{- if .Values.keda.enabled }}
+# Autoscale the judge worker on queue backlog (DESIGN.md §5.6). KEDA polls the
+# api's queue-depth metric (pending arq jobs) and drives a Deployment 0..N:
+# idle → scale to zero (no worker pods burning CPU); backlog builds → scale out to
+# drain it, up to maxReplicaCount. Requires KEDA installed in the cluster
+# (scripts/k8s-up.sh --keda). Uses the metrics-api scaler because arq's queue is a
+# Redis *sorted set* (ZCARD), which KEDA's built-in list scaler (LLEN) can't read.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: worker
+spec:
+  scaleTargetRef:
+    name: worker
+  minReplicaCount: {{ .Values.keda.minReplicas }}
+  maxReplicaCount: {{ .Values.keda.maxReplicas }}
+  pollingInterval: {{ .Values.keda.pollingInterval }}   # how often KEDA reads the metric (s)
+  cooldownPeriod: {{ .Values.keda.cooldownPeriod }}     # idle time before scaling down / to zero (s)
+  triggers:
+    - type: metrics-api
+      metadata:
+        url: "http://api.{{ .Release.Namespace }}.svc.cluster.local:8000/api/v1/internal/queue-depth"
+        valueLocation: "depth"
+        format: "json"
+        # Desired replicas ≈ ceil(backlog / targetValue). Any backlog > 0 activates
+        # from zero (activationTargetValue defaults to 0).
+        targetValue: "{{ .Values.keda.targetValuePerReplica }}"
+{{- end }}

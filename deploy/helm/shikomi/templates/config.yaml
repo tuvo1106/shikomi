@@ -1,0 +1,34 @@
+# App config split the 12-factor way: non-secret values in a ConfigMap, the JWT
+# signing key in a Secret. api/worker/migrate all pull both via envFrom, so a
+# config change is one edit here (mirrors the compose &backend_env anchor).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: shikomi-config
+data:
+  ENV: {{ .Values.config.env | quote }}
+  DATABASE_URL: {{ .Values.config.databaseUrl | quote }}
+  REDIS_URL: {{ .Values.config.redisUrl | quote }}
+  JUDGE_IMAGE: {{ .Values.config.judgeImage | quote }}
+  JUDGE_IMAGE_JS: {{ .Values.config.judgeImageJs | quote }}
+  JUDGE_IMAGE_SQL: {{ .Values.config.judgeImageSql | quote }}
+  FRONTEND_BASE_URL: {{ .Values.config.frontendBaseUrl | quote }}
+  EMAIL_FROM: {{ .Values.config.emailFrom | quote }}
+  EMAIL_BACKEND: {{ .Values.config.emailBackend | quote }}
+  ALERT_EMAIL: {{ .Values.config.alertEmail | default "" | quote }}
+  SMTP_HOST: {{ .Values.config.smtpHost | quote }}
+  SMTP_PORT: {{ .Values.config.smtpPort | quote }}
+  SMTP_USER: {{ .Values.config.smtpUser | quote }}
+  TRUST_PROXY: {{ .Values.config.trustProxy | quote }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: shikomi-secret
+type: Opaque
+stringData:
+  JWT_SECRET: {{ .Values.secrets.jwtSecret | quote }}
+  JWT_PREVIOUS_SECRETS: {{ .Values.secrets.jwtPreviousSecrets | default "" | quote }}
+  SMTP_PASSWORD: {{ .Values.secrets.smtpPassword | default "" | quote }}
+  TOTP_ENCRYPTION_KEY: {{ .Values.secrets.totpEncryptionKey | quote }}
+  TOTP_PREVIOUS_KEYS: {{ .Values.secrets.totpPreviousKeys | default "" | quote }}

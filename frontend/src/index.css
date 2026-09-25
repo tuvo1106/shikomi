@@ -1,0 +1,66 @@
+@import "tailwindcss";
+@plugin "@tailwindcss/typography";
+
+/* Opt-in `light:` variant so accent badges (which don't flip with the zinc
+   ramp) can use darker shades on light surfaces. */
+@custom-variant light (&:where(:root.light *));
+
+/* Dark-first (DESIGN.md §6.5): near-black zinc surfaces, borders over shadows.
+   Light mode is achieved by inverting the zinc ramp (950 <-> 50), so every
+   `bg-zinc-900` / `text-zinc-100` utility flips without touching components.
+   Accent colors (indigo/emerald/rose) are intentionally left untouched. */
+:root {
+  color-scheme: dark;
+  --code-chip-bg: rgba(255, 255, 255, 0.06);
+}
+
+:root.light {
+  color-scheme: light;
+  --code-chip-bg: rgba(0, 0, 0, 0.05);
+  /* Text end (50-600) is pushed darker than a pure inversion so copy reads
+     crisply on light surfaces; the surface/border end (700-950) stays light. */
+  --color-zinc-50: #09090b;
+  --color-zinc-100: #09090b;
+  --color-zinc-200: #18181b;
+  --color-zinc-300: #27272a;
+  --color-zinc-400: #3f3f46;
+  --color-zinc-500: #52525b;
+  --color-zinc-600: #71717a;
+  --color-zinc-700: #d4d4d8;
+  --color-zinc-800: #e4e4e7;
+  --color-zinc-900: #f4f4f5;
+  --color-zinc-950: #fafafa;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--color-zinc-950);
+  color: var(--color-zinc-100);
+  font-family: ui-sans-serif, system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Tailwind typography wraps inline <code> in literal backtick quotes and bolds
+   it; drop the quotes and render it as a subtle chip instead. */
+.prose code::before,
+.prose code::after {
+  content: "" !important;
+}
+.prose code {
+  font-weight: 500;
+  background: var(--code-chip-bg);
+  padding: 0.1em 0.35em;
+  border-radius: 0.25rem;
+}
+
+/* Keep constraint math close to the surrounding (smaller) text size. */
+.constraints .katex {
+  font-size: 0.95em;
+}
+

@@ -1,0 +1,11 @@
+# Keep the build context small + reproducible (deps come from uv.lock, not a
+# baked-in venv; caches/tests aren't needed at runtime).
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+.coverage
+htmlcov
+.env
+tests

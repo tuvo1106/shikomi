@@ -1,0 +1,14 @@
+# Root config drives the judge harness/sandbox tests (stdlib + pytest only).
+# The backend (app + worker) is a uv project with its own config in backend/pyproject.toml.
+[tool.pytest.ini_options]
+pythonpath = ["backend", "judge", "judge/tests"]
+testpaths = ["judge/tests"]
+markers = [
+    "docker: test requires a running Docker daemon (sandbox isolation); run with -m docker",
+]
+# Default local run excludes Docker-dependent tests; CI runs them as a separate job.
+addopts = "-ra -m 'not docker' --import-mode=importlib"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"

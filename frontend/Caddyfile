@@ -1,0 +1,30 @@
+# Caddy: static SPA + API reverse proxy on one origin (DESIGN.md §9).
+#
+# SITE_ADDRESS controls the listener:
+#   * local prod stack  → unset → defaults to :80 (plain HTTP; visit
+#     http://localhost, which browsers treat as a secure context so the `Secure`
+#     refresh cookie still works).
+#   * real deploy       → set SITE_ADDRESS=your.domain.com and Caddy provisions +
+#     renews Let's Encrypt TLS automatically.
+{$SITE_ADDRESS::80} {
+	# API traffic → the FastAPI service. We *overwrite* X-Forwarded-For with the
+	# real socket peer ({remote_host}) rather than letting Caddy append to a
+	# client-supplied value — otherwise a client could send its own XFF and, since
+	# the backend trusts the first hop (TRUST_PROXY, DESIGN.md §4.1), spoof a fresh
+	# rate-limit bucket per request. Caddy is the edge here, so its peer *is* the
+	# client. If you front this with another trusted proxy, have that proxy set XFF
+	# and relax this to `header_up X-Forwarded-For {header.X-Forwarded-For}`.
+	handle /api/* {
+		reverse_proxy api:8000 {
+			header_up X-Forwarded-For {remote_host}
+		}
+	}
+
+	# Everything else → the built SPA, with a history-API fallback so client-side
+	# routes (e.g. /problems/design-vending-machine) resolve to index.html instead of 404.
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
+}

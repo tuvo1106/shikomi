@@ -1,0 +1,103 @@
+# Shikomi chart values. Defaults target a local kind cluster (images loaded
+# with `kind load`, so pullPolicy: Never). Override for a real cluster: point
+# image.repository at a registry, bump replicas/resources, enable ingress+TLS.
+
+images:
+  # Built from backend/Dockerfile targets + frontend/Dockerfile, loaded into
+  # kind. IfNotPresent on a real cluster once these are pushed to a registry.
+  api: shikomi-api:local
+  worker: shikomi-worker:local
+  web: shikomi-web:local
+  pullPolicy: Never
+
+# App config → ConfigMap (non-secret) + Secret. Service names are literal
+# (postgres/redis/api) so these URLs — and the web image's baked Caddyfile
+# (reverse_proxy api:8000) — match the compose stack unchanged.
+config:
+  env: prod
+  databaseUrl: postgresql+asyncpg://app:app@postgres:5432/shikomi
+  redisUrl: redis://redis:6379/0
+  judgeImage: shikomi-judge:latest
+  judgeImageJs: shikomi-judge-js:latest
+  judgeImageSql: shikomi-judge-sql:latest
+  frontendBaseUrl: http://localhost:8080
+  emailFrom: no-reply@example.com
+  # Account email is sent by the worker (DESIGN.md §4.1). `console` prints links to the
+  # worker log (fine for a local kind cluster); `smtp` needs smtpHost (+ secrets.smtpPassword).
+  emailBackend: console
+  # Operator address the watchdog mails when account email backs up (needs emailBackend: smtp
+  # to actually send). Empty = it only logs at ERROR.
+  alertEmail: ""
+  smtpHost: ""
+  smtpPort: "587"
+  smtpUser: ""
+  # Trust X-Forwarded-For for the per-IP auth rate limit (DESIGN.md §4.1). The api
+  # is behind the web (Caddy) edge, which overwrites XFF with the real client, so
+  # trust it. Ingress is off by default (dev reaches web via port-forward). If you
+  # enable an L7 ingress in front of Caddy, the baked Caddyfile would then key on
+  # the ingress IP — see the Caddyfile note for the one-line change to preserve the
+  # client XFF in that topology.
+  trustProxy: "true"
+secrets:
+  jwtSecret: ""                     # set: --set secrets.jwtSecret=$(openssl rand -hex 32); the api refuses to boot on an empty/weak one
+  jwtPreviousSecrets: ""           # retired keys that still verify during a rotation
+  smtpPassword: ""                 # only with config.emailBackend=smtp
+  totpEncryptionKey: ""            # set: --set secrets.totpEncryptionKey=$(python3 -c "import base64,os;print(base64.urlsafe_b64encode(os.urandom(32)).decode())"); the api refuses to boot on an empty/dev one
+  totpPreviousKeys: ""             # retired keys that still decrypt during a rotation
+
+postgres:
+  image: postgres:16
+  user: app
+  password: app
+  db: shikomi
+  storage: 1Gi
+
+redis:
+  image: redis:7
+
+api:
+  replicas: 1
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { cpu: 500m, memory: 256Mi }
+
+# The judge worker launches a locked-down Pod per submission via the K8s API
+# (worker/k8s_runner.py) — no host Docker socket. RBAC in rbac.yaml scopes it to
+# managing judge pods + their payload ConfigMaps.
+worker:
+  enabled: true
+  replicas: 1
+
+# Account email + signup purge, on their own arq queue (DESIGN.md §5.6). Runs from the api
+# image (no sandbox, no RBAC) and is deliberately not KEDA-scaled: one replica, always on,
+# so a verify link never waits on a judge-worker scale-up.
+# Keep this enabled: the api always enqueues account email onto `arq:accounts`, so with the
+# worker off, register/reset still 202 but verify/reset mail piles up and never sends
+# (watch GET /internal/accounts-queue-depth).
+accountsWorker:
+  enabled: true
+  replicas: 1
+  resources:
+    requests: { cpu: 25m, memory: 96Mi }
+    limits: { cpu: 250m, memory: 256Mi }
+
+web:
+  replicas: 1
+
+# KEDA event-driven autoscaling for the worker on judge-queue backlog (§5.6).
+# Off by default (needs KEDA installed: scripts/k8s-up.sh --keda). When enabled,
+# KEDA owns the worker's replica count, so worker.yaml omits `replicas`.
+keda:
+  enabled: false
+  minReplicas: 0            # scale to zero when the queue is idle
+  maxReplicas: 5
+  targetValuePerReplica: 3  # queued jobs per worker replica
+  pollingInterval: 5        # seconds between metric reads (low = snappy demo)
+  cooldownPeriod: 30        # seconds of idle before scaling down / to zero
+
+# Optional: an Ingress (needs an ingress controller in-cluster). Off by default;
+# locally we reach the app with `kubectl port-forward svc/web 8080:80`.
+ingress:
+  enabled: false
+  className: nginx
+  host: shikomi.localhost
