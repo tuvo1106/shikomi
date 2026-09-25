@@ -277,7 +277,10 @@ and `playwright`.
   order. Raising the bar's number is whack-a-mole; the fix is `isolate` on the
   editor pane (`Workspace.tsx`), which confines all of them below it. Don't put
   `isolate` on an ancestor shared with the modals — that traps `Modal`'s `z-50`
-  under the bar instead.
+  under the bar instead. Guarded by `e2e/user-menu.spec.ts`, which injects a
+  stand-in widget: nothing in a normal session opens a real Monaco widget over the
+  dropdown and leaves it open (pressing the avatar blurs the editor, which cancels
+  the suggest widget), so the honest options were a synthetic stand-in or no test.
 
 ## Deferred / TODO
 
