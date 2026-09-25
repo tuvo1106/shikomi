@@ -171,6 +171,21 @@ async def test_unknown_keys_warn_but_load(session_factory, monkeypatch, tmp_path
     assert "author" in capsys.readouterr().err
 
 
+def test_validate_checks_every_rule_without_touching_the_db(tmp_path, capsys):
+    """Same validation phase as seed, no database: 0 when valid, 1 listing each bad file."""
+    _write(tmp_path, "demo")
+    assert cli.main(["validate", "--dir", str(tmp_path)]) == 0
+    assert "1 problem file(s) valid" in capsys.readouterr().out
+
+    _write(tmp_path, "nosample", slug="nosample",
+           test_cases=[{"ordinal": 0, "input": [1], "expected": 1}])
+    assert cli.main(["validate", "--dir", str(tmp_path)]) == 1
+    err = capsys.readouterr().err
+    assert "nosample.json" in err and "1 problem file(s) failed" in err
+
+    assert cli.main(["validate", "--dir", str(tmp_path / "missing")]) == 1
+
+
 async def test_verify_email_marks_verified(session_factory, monkeypatch):
     monkeypatch.setattr(cli, "SessionLocal", session_factory)
     async with session_factory() as s:

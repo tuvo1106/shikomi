@@ -32,6 +32,7 @@ Run from `backend/` unless noted.
 | New migration (autogenerate) | `uv run alembic revision --autogenerate -m "msg"` |
 | Seed the bundled starter problems | `uv run python -m app.cli seed` |
 | Seed your own problems | `uv run python -m app.cli seed --dir /path/to/problems` |
+| Check problem files against the seed rules (no DB) | `uv run python -m app.cli validate --dir /path/to/problems` |
 | Validate a problem directory against the real harness | `SEED_DIR=/path/to/problems pytest judge/tests/test_seed_solutions.py` (repo root) |
 | Verify an account by hand | `uv run python -m app.cli verify-email <email>` |
 | Regenerate schema diagram | `uv run python -m app.cli schema-docs` → `docs/schema.md` |

@@ -4,6 +4,7 @@ The CLI is the only way problems get into the database: shikomi has no
 authoring API or UI, so an operator writes JSON files and loads them here.
 
     python -m app.cli seed [--dir PATH]
+    python -m app.cli validate [--dir PATH]
     python -m app.cli seed-dev-user
     python -m app.cli verify-email <email>
     python -m app.cli disable-2fa <email>
@@ -65,6 +66,32 @@ def _load_problem_files(seed_dir: pathlib.Path) -> tuple[list[ProblemFile], list
     return problems, errors
 
 
+def _report(errors: list[str]) -> None:
+    for line in errors:
+        print(f"error: {line}", file=sys.stderr)
+    print(f"{len(errors)} problem file(s) failed validation.", file=sys.stderr)
+
+
+def validate(seed_dir: pathlib.Path) -> int:
+    """Check a problem directory against every seed rule, without a database.
+
+    Runs exactly the validation phase of `seed` (`_load_problem_files`: the
+    `ProblemFile` schema, at least one test case and one sample, unique ordinals,
+    the judge budget, duplicate slugs), so a directory that validates here will
+    load. It doesn't run the reference solutions; `judge/tests/test_seed_solutions.py`
+    does that. Together they're the check to put in a problem repo's CI.
+
+    Returns:
+        0 if every file is valid, 1 otherwise.
+    """
+    problems, errors = _load_problem_files(seed_dir)
+    if errors:
+        _report(errors)
+        return 1
+    print(f"{len(problems)} problem file(s) valid.")
+    return 0
+
+
 async def seed(seed_dir: pathlib.Path) -> int:
     """Load every `*.json` problem in `seed_dir` into the DB (idempotent upsert).
 
@@ -83,10 +110,8 @@ async def seed(seed_dir: pathlib.Path) -> int:
     """
     problems, errors = _load_problem_files(seed_dir)
     if errors:
-        for line in errors:
-            print(f"error: {line}", file=sys.stderr)
-        print(f"Seed aborted: {len(errors)} problem file(s) failed; nothing was written.",
-              file=sys.stderr)
+        _report(errors)
+        print("Seed aborted; nothing was written.", file=sys.stderr)
         return 1
     async with SessionLocal() as session:
         done = [await problem_service.upsert_problem(session, p) for p in problems]
@@ -214,6 +239,9 @@ def main(argv=None) -> int:
     seed_p = sub.add_parser("seed", help="upsert problems from seed JSON files")
     seed_p.add_argument("--dir", type=pathlib.Path, default=SEED_DIR)
 
+    validate_p = sub.add_parser("validate", help="check problem files against the seed rules (no DB)")
+    validate_p.add_argument("--dir", type=pathlib.Path, default=SEED_DIR)
+
     sub.add_parser("seed-dev-user", help="create a known, verified login for local dev")
 
     sub.add_parser("schema-docs", help="regenerate docs/schema.md from the models")
@@ -227,6 +255,8 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     if args.command == "seed":
         return asyncio.run(seed(args.dir))
+    if args.command == "validate":
+        return validate(args.dir)
     if args.command == "seed-dev-user":
         return asyncio.run(seed_dev_user())
     if args.command == "schema-docs":
