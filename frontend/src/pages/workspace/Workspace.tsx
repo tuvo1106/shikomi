@@ -288,7 +288,13 @@ function ProblemWorkspace() {
         <Panel defaultSize={55} minSize={30}>
           <PanelGroup direction="vertical">
             <Panel defaultSize={65} minSize={20}>
-              <section className={CARD}>
+              {/* `isolate` gives the editor its own stacking context: `.monaco-editor`
+                  doesn't create one, so without this every Monaco z-index (suggest
+                  widget 40, rename box 100, overlay message 10000) competes in the root
+                  stacking context and can paint over the navbar's dropdown (`Navbar.tsx`,
+                  z-40). Don't move this up to `<main>` — that would trap `Modal`'s z-50
+                  below the bar too. */}
+              <section className={`${CARD} isolate`}>
                 <header className="flex items-center justify-between border-b border-zinc-800 px-3 py-1.5 text-xs">
                   <span className="text-zinc-500">{LANGUAGE_LABEL[problem.language]}</span>
                   <div className="flex items-center gap-2">

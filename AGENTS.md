@@ -269,6 +269,15 @@ and `playwright`.
   consumes, so its `expected` can't be decoded with the input decoder — a "where
   does the cycle begin" answer is "which node", not "what shape". Anything reading
   `expected` structurally has to special-case it; every other codec round-trips.
+- **Monaco doesn't create a stacking context, so `z-index` alone can't outrank
+  it.** `.monaco-editor` is `position: relative; z-index: auto`, which means every
+  z-index inside it competes in the *root* stacking context: the suggest widget is
+  40, its details container 41, the rename box 100, the overlay message 10000. The
+  navbar's `z-40` (`Navbar.tsx`) ties with the first of those and would lose on DOM
+  order. Raising the bar's number is whack-a-mole; the fix is `isolate` on the
+  editor pane (`Workspace.tsx`), which confines all of them below it. Don't put
+  `isolate` on an ancestor shared with the modals — that traps `Modal`'s `z-50`
+  under the bar instead.
 
 ## Deferred / TODO
 
