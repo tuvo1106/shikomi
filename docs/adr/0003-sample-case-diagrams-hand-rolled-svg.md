@@ -1,7 +1,6 @@
 # ADR-0003: Rendering `TreeNode`/`ListNode`/`GraphNode` sample cases — react-d3-tree, Mermaid, or hand-rolled SVG
 
-- **Status:** Accepted — spike run 2026-09-13, all three approaches prototyped against fixtures of every node type
-- **Date:** 2026-09-13
+- **Status:** Accepted — spike run, all three approaches prototyped against fixtures of every node type
 
 ## Context
 

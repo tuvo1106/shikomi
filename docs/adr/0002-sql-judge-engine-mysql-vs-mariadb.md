@@ -1,7 +1,6 @@
 # ADR-0002: SQL judge engine — MariaDB, MySQL, or SQLite
 
-- **Status:** Accepted — Phase 0 spike run 2026-09-01, all kill-criteria cleared (see Decision)
-- **Date:** 2026-09-01
+- **Status:** Accepted — Phase 0 spike run, all kill-criteria cleared (see Decision)
 
 ## Context
 
@@ -76,7 +75,7 @@ MySQL 8 is dropped rather than spiked: its expected data-directory floor is stru
    - needs more than a modest bump above `--pids-limit=64`
 4. **If it fails: ship SQLite v1** on the existing Python image, and revisit a server engine only once the SQL problem set is large enough that dialect divergence actually bites.
 
-### Phase 0 results (2026-09-01) — MariaDB 10.11.18 (Debian 12 `mariadb-server`)
+### Phase 0 results — MariaDB 10.11.18 (Debian 12 `mariadb-server`)
 
 All four kill-criteria **cleared**, with wide margins:
 
