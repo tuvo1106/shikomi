@@ -283,12 +283,6 @@ slice ships, delete its entry here.
   the auth pages, and a hard refusal to start under `ENV=prod` unless explicitly
   allowed.
 
-- **User menu hidden behind the workspace pane:** after a submit, the navbar's
-  user-menu dropdown (Sign out included) renders *behind* the workspace's top-right
-  pane, so it can't be clicked. Likely a stacking-context / `z-index` clash with the
-  pane that appears post-submit. Fix it and add a Playwright check that the menu is
-  clickable after a verdict.
-
 - **Deploy hardening:** run the backend containers as non-root (the worker needs
   docker-socket group access), pin base-image digests, healthcheck-gated rollout.
   Point an external monitor at `/internal/accounts-queue-depth`

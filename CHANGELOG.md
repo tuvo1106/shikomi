@@ -6,6 +6,11 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- The account menu (and its Sign out) no longer opens behind the code editor in the
+  workspace.
+
 ## [0.1.0] — 2026-09-24
 
 Initial open-source release.
