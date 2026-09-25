@@ -315,6 +315,12 @@ slice ships, delete its entry here.
   Enforced by a `commit-msg` hook — run `lefthook install` once after cloning.
   See [CONTRIBUTING.md](CONTRIBUTING.md) for the full commit/PR/ADR process.
 - **Never commit directly to `main`.** One PR per feature or slice.
+- **Releasing:** in one `chore/release-X.Y.Z` PR, bump the version in all four places
+  (`backend/pyproject.toml`, `backend/app/main.py`, `frontend/package.json`,
+  `deploy/helm/shikomi/Chart.yaml` `version` + `appVersion`) and move CHANGELOG's
+  `[Unreleased]` entries under a dated `[X.Y.Z]` heading, with its compare link. After
+  it merges, tag `vX.Y.Z` on `main` and publish a GitHub release from that CHANGELOG
+  section. Shipped work goes under `[Unreleased]` as it lands.
 - **PR descriptions follow the template and stay brief** (What changed / Testing /
   Docs, readable in under a minute). No step-by-step narration of the diff, and no
   hard-wrapped lines, since GitHub renders each newline as a line break.
