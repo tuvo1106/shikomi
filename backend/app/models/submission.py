@@ -27,7 +27,7 @@ class Submission(Base, PKMixin, TimestampMixin):
       shape varies. Hidden-case inputs are redacted here except the first failing
       one.
     * `runtime_ms` — summed per-case runtime (Float; sub-millisecond matters).
-    * `is_run` — True for "Run" (sample cases only, unthrottled, no history) vs a
+    * `is_run` — True for "Run" (sample cases only, no in-flight lock, not in history) vs a
       real "Submit". This one flag distinguishes the two flows across the app.
 
     The composite index `(user_id, problem_id, created_at DESC)` makes "this

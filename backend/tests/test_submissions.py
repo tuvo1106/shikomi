@@ -2,11 +2,10 @@
 import uuid
 
 import pytest
-
-from app.errors import APIError
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.errors import APIError
 from app.config import get_settings
 from app.models import Submission, User
 from app.services import submission_service
@@ -58,7 +57,7 @@ async def test_in_flight_lock_blocks_second_submit(client, make_problem, make_us
     assert second.json()["code"] == "SUBMISSION_IN_FLIGHT"
 
 
-async def test_run_is_unthrottled_and_flagged(client, queue, make_problem, make_user):
+async def test_run_takes_no_inflight_lock_and_is_flagged(client, queue, make_problem, make_user):
     pid, _ = await make_problem()
     _, headers = await make_user()
     body = {"problem_id": pid, "code": CODE}
@@ -187,6 +186,28 @@ async def test_enqueue_and_judge_error_write_both_failing_still_503s_and_frees_t
     assert [key for key, _ in queue.released] == [(str(user_id), str(problem_id))]
     async with session_factory() as s:
         assert (await s.execute(select(Submission))).scalar_one().status == "pending"
+
+
+async def test_an_enqueue_error_after_a_worker_claimed_the_job_leaves_it_alone(
+        client, queue, session_factory, make_problem, make_user):
+    """Redis stored the job but the reply timed out, and a worker already flipped the row to
+    `running`. The API must not overwrite that with judge_error or free the worker's lock."""
+    pid, _ = await make_problem()
+    _, headers = await make_user()
+
+    async def stored_then_timed_out(submission_id, mode):
+        async with session_factory() as s:          # the worker's claim lands first
+            await s.execute(update(Submission).where(Submission.id == uuid.UUID(submission_id))
+                            .values(status="running"))
+            await s.commit()
+        raise TimeoutError("reply lost")
+
+    queue.enqueue_judge = stored_then_timed_out
+    r = await client.post(SUBMIT, headers=headers, json={"problem_id": pid, "code": CODE})
+    assert r.status_code == 503
+    async with session_factory() as s:
+        assert (await s.execute(select(Submission))).scalar_one().status == "running"
+    assert queue.released == []                          # the worker's lock is untouched
 
 
 async def test_run_is_rate_limited(client, make_problem, make_user):

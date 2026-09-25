@@ -11,7 +11,7 @@ runtime percentile/distribution that power the "you beat X%" feedback.
 import time
 import uuid
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -74,7 +74,7 @@ async def create_submission(session: AsyncSession, queue: Queue, user: User,
     # load of `user.id` in the error path would raise inside the lock-release guard.
     user_id = user.id
 
-    # One in-flight submission per user per problem (submit only; run is unthrottled).
+    # One in-flight submission per user per problem (submit only; run takes no lock).
     if mode == "submit":
         try:
             acquired = await queue.acquire_inflight(user_id, problem_id, str(sub_id))
@@ -105,16 +105,26 @@ async def create_submission(session: AsyncSession, queue: Queue, user: User,
     try:
         await queue.enqueue_judge(str(sub.id), mode)
     except Exception:
+        # The enqueue may have failed *after* Redis stored the job (a timeout on the
+        # reply), so a worker could already be judging it. Only a row still `pending`
+        # is failed, and only then is the lock freed — the same conditional claim the
+        # worker and sweeper use, so a live judging is never overwritten or unlocked.
         # Best-effort: if Postgres is failing too, the row stays `pending` and the
-        # sweeper re-enqueues it once Redis is back, so the code is judged late
-        # rather than lost. Either way the lock is released and the caller gets the
-        # 503 — not a 500 that also leaves them locked out for the in-flight TTL.
+        # sweeper re-enqueues it once Redis is back (judged late, not lost). Either
+        # way the caller gets the 503, not a 500.
+        failed = False
         try:
-            sub.status = "judge_error"
+            failed = (await session.execute(
+                update(Submission)
+                .where(Submission.id == sub_id, Submission.status == "pending")
+                .values(status="judge_error"))).rowcount == 1
             await session.commit()
         except Exception:
             await session.rollback()
-        if mode == "submit":
+            # Can't tell whether a worker holds it. Free the lock anyway: a lockout for
+            # the whole TTL is worse than a rare overlap, which the rate limit bounds.
+            failed = True
+        if mode == "submit" and failed:
             try:
                 await queue.release_inflight(user_id, problem_id, str(sub_id))
             except Exception:

@@ -41,7 +41,8 @@ async def create_submission(body: SubmissionCreate, user=Depends(require_verifie
 async def run_submission(body: SubmissionCreate, user=Depends(require_verified),
                          session: AsyncSession = Depends(get_session),
                          queue: Queue = Depends(get_queue)):
-    """POST /run — judge against *sample* cases only; unthrottled, not saved. 202."""
+    """POST /run — judge against *sample* cases only. Rate-limited but takes no in-flight lock;
+    stored as an `is_run` row, excluded from history and stats. 202."""
     sub = await submission_service.create_submission(
         session, queue, user, body.problem_id, body.code, mode="run")
     return SubmissionAccepted(id=sub.id, status=sub.status)

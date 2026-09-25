@@ -3,6 +3,7 @@
 Unit tests mock run_judgement so they need no Docker; the docker-marked test at
 the bottom exercises the whole job against a real container.
 """
+import asyncio
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -599,6 +600,61 @@ async def test_a_redis_error_releasing_a_stale_lock_does_not_abort_the_sweep(
         assert (await s.get(Submission, uuid.UUID(sid))).status == "judge_error"
         hashes = (await s.execute(select(EmailToken.token_hash))).scalars().all()
         assert "expired" not in hashes
+
+
+async def test_the_stale_budget_uses_the_database_clock_not_the_workers(
+        session_factory, make_problem, make_user, monkeypatch):
+    """`updated_at` is set by Postgres, so the cutoff is computed there too: a worker whose clock
+    runs ten minutes fast must not fail a submission that only just started running."""
+    pid, _ = await make_problem(slug="pair-sum")
+    user, _ = await make_user()
+    sid = await _make_pending(session_factory, user["id"], pid)
+    async with session_factory() as s:
+        await s.execute(text("update submissions set status = 'running', updated_at = now()"))
+        await s.commit()
+    monkeypatch.setattr(sweeper, "SessionLocal", session_factory)
+
+    real = sweeper.datetime
+
+    class FastClock(real):
+        @classmethod
+        def now(cls, tz=None):
+            return real.now(tz) + timedelta(minutes=10)
+
+    monkeypatch.setattr(sweeper, "datetime", FastClock)
+    await sweeper.sweep_stale({"redis": FakeRedis()})
+
+    async with session_factory() as s:
+        assert (await s.get(Submission, uuid.UUID(sid))).status == "running"
+
+
+async def test_one_failed_requeue_does_not_hide_the_rest_and_concurrency_is_capped(
+        session_factory, make_problem, make_user, monkeypatch):
+    pid, _ = await make_problem(slug="pair-sum")
+    user, _ = await make_user()
+    sids = [await _make_pending(session_factory, user["id"], pid) for _ in range(30)]
+    for sid in sids:
+        await _age(session_factory, sid, 60)
+    monkeypatch.setattr(sweeper, "SessionLocal", session_factory)
+    monkeypatch.setattr(sweeper, "REENQUEUE_CONCURRENCY", 4)
+
+    class Flaky(FakeRedis):
+        in_flight = peak = 0
+
+        async def enqueue_job(self, function, *args, _job_id=None, **kwargs):
+            type(self).in_flight += 1
+            type(self).peak = max(type(self).peak, type(self).in_flight)
+            await asyncio.sleep(0)                   # let the others pile up if they can
+            type(self).in_flight -= 1
+            if _job_id == sids[0]:
+                raise ConnectionError("reset")
+            return await super().enqueue_job(function, *args, _job_id=_job_id, **kwargs)
+
+    redis = Flaky()
+    await sweeper.sweep_stale({"redis": redis})
+
+    assert {kw["_job_id"] for _, _, kw in redis.enqueued} == set(sids[1:])  # the rest still went
+    assert Flaky.peak <= 4
 
 
 async def test_a_redis_error_while_requeueing_does_not_abort_the_rest_of_the_sweep(

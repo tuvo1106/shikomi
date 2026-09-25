@@ -10,7 +10,7 @@ import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import delete, or_, select, update
+from sqlalchemy import delete, func, or_, select, update
 
 from app.db import SessionLocal
 from app.models import EmailToken, RefreshToken, Submission
@@ -29,6 +29,9 @@ REENQUEUE_AFTER = timedelta(seconds=30)
 # the whole batch (`Queue.missing_judge_jobs`), so this can be generous: a backlog of legitimately
 # queued rows must not crowd a genuinely lost job out of the window.
 REENQUEUE_BATCH = 1000
+# Concurrent enqueues. Each is its own WATCH/MULTI exchange on a pooled connection, so an
+# uncapped burst after a Redis wipe could open a connection per missing job.
+REENQUEUE_CONCURRENCY = 20
 
 
 async def sweep_stale(ctx) -> None:
@@ -70,7 +73,7 @@ async def sweep_stale(ctx) -> None:
         stale = (await session.execute(
             update(Submission)
             .where(Submission.status.in_(("pending", "running")),
-                   Submission.updated_at < now - STALE_AFTER)
+                   Submission.updated_at < func.now() - STALE_AFTER)
             .values(status="judge_error")
             .returning(Submission.id, Submission.user_id, Submission.problem_id))).all()
         await session.commit()
@@ -87,7 +90,7 @@ async def sweep_stale(ctx) -> None:
             except Exception:
                 logger.exception("could not release the in-flight lock for %s", sid)
 
-        await _requeue_lost_jobs(session, redis, now)
+        await _requeue_lost_jobs(session, redis)
 
         cutoff = now - TOKEN_RETENTION
         await session.execute(
@@ -101,7 +104,7 @@ async def sweep_stale(ctx) -> None:
         await session.commit()
 
 
-async def _requeue_lost_jobs(session, redis, now) -> None:
+async def _requeue_lost_jobs(session, redis) -> None:
     """Re-enqueue `pending` rows whose judge job was never queued.
 
     `create_submission` commits the row and *then* enqueues, so a crash in between leaves a
@@ -115,7 +118,8 @@ async def _requeue_lost_jobs(session, redis, now) -> None:
     # Only the two columns needed, and the read transaction is ended before any Redis call
     # so no pooled connection sits idle-in-transaction during the round trips.
     stmt = (select(Submission.id, Submission.is_run)
-            .where(Submission.status == "pending", Submission.updated_at < now - REENQUEUE_AFTER)
+            .where(Submission.status == "pending",
+                   Submission.updated_at < func.now() - REENQUEUE_AFTER)
             .order_by(Submission.created_at).limit(REENQUEUE_BATCH))
     rows = (await session.execute(stmt)).all()
     await session.commit()
@@ -125,15 +129,27 @@ async def _requeue_lost_jobs(session, redis, now) -> None:
     is_run = {str(sid): run for sid, run in rows}
     try:
         missing = await queue.missing_judge_jobs(list(is_run))
-        # Normally zero or a handful; after a Redis restart without persistence it can be the
-        # whole batch, so the enqueues go out concurrently rather than one round trip each.
-        results = await asyncio.gather(*(
-            queue.enqueue_judge(sid, "run" if is_run[sid] else "submit") for sid in missing))
-        requeued = sum(results)
     except Exception:
         # A Redis hiccup must not abort the rest of the sweep (token pruning, the final commit):
         # the rows stay pending and are checked again next minute.
-        logger.exception("could not re-enqueue pending submissions; will retry next pass")
+        logger.exception("could not check pending submissions for lost jobs; will retry next pass")
         return
+
+    # Normally zero or a handful; after a Redis restart without persistence it can be the whole
+    # batch, so the enqueues run concurrently, capped so they can't exhaust Redis connections.
+    limit = asyncio.Semaphore(REENQUEUE_CONCURRENCY)
+
+    async def enqueue(sid):
+        async with limit:
+            return await queue.enqueue_judge(sid, "run" if is_run[sid] else "submit")
+
+    # return_exceptions: one failed enqueue mustn't hide the ones that succeeded; the failures
+    # stay pending and are retried next pass.
+    results = await asyncio.gather(*(enqueue(sid) for sid in missing), return_exceptions=True)
+    failed = [r for r in results if isinstance(r, BaseException)]
+    requeued = sum(1 for r in results if r is True)
     if requeued:
         logger.warning("re-enqueued %d pending submission(s) that had no job", requeued)
+    if failed:
+        logger.error("could not re-enqueue %d pending submission(s); will retry next pass: %r",
+                     len(failed), failed[0])
