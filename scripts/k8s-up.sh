@@ -9,7 +9,13 @@
 # Pass --keda to also install KEDA and enable worker autoscaling on queue depth.
 set -euo pipefail
 export PATH="/opt/homebrew/bin:$HOME/.local/bin:$PATH"
+# Resolve PROBLEMS_DIR against the caller's directory before the cd below changes it.
+if [ -n "${PROBLEMS_DIR:-}" ]; then
+  PROBLEMS_DIR=$(cd "$PROBLEMS_DIR" 2>/dev/null && pwd) || { echo "PROBLEMS_DIR is not a directory" >&2; exit 1; }
+fi
 cd "$(dirname "$0")/.."
+PROBLEMS_DIR=${PROBLEMS_DIR:-$PWD/seed/problems}
+ls "$PROBLEMS_DIR"/*.json >/dev/null 2>&1 || { echo "no *.json problem files in $PROBLEMS_DIR" >&2; exit 1; }
 
 CLUSTER=shikomi
 REL=shikomi
@@ -62,13 +68,15 @@ for img in shikomi-api:local shikomi-worker:local shikomi-web:local shikomi-judg
 done
 
 # 3. Seed data → ConfigMap (the JSON lives at the repo root, outside the image;
-#    the migrate hook mounts this at /seed/problems). Imperative create, not
-#    apply: the seed JSON is larger than apply's 256KB last-applied annotation.
-#    PROBLEMS_DIR swaps in an operator's own problems; a ConfigMap caps at 1MiB,
-#    so a large problem set needs a different carrier (see AGENTS.md TODO).
+#    the migrate hook mounts this at /seed/problems). Server-side apply, because
+#    client-side apply's last-applied annotation caps at 256KB, and because it
+#    updates in place: a rejected update leaves the old ConfigMap intact, where
+#    delete-then-create would leave none. PROBLEMS_DIR swaps in an operator's own
+#    problems; a ConfigMap caps at 1MiB, so a large problem set needs a different
+#    carrier (see AGENTS.md TODO).
 echo "▶ publishing problems as a ConfigMap"
-kubectl delete configmap shikomi-seed --ignore-not-found >/dev/null
-kubectl create configmap shikomi-seed --from-file="${PROBLEMS_DIR:-seed/problems}/"
+kubectl create configmap shikomi-seed --from-file="$PROBLEMS_DIR/" --dry-run=client -o yaml \
+  | kubectl apply --server-side --force-conflicts -f - >/dev/null
 
 # 4. Optional: KEDA (event-driven autoscaling for the worker)
 HELM_ARGS=()

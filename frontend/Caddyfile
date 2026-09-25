@@ -1,4 +1,4 @@
-# Caddy: static SPA + API reverse proxy on one origin (DESIGN.md §8).
+# Caddy: static SPA + API reverse proxy on one origin (DESIGN.md §9).
 #
 # SITE_ADDRESS controls the listener:
 #   * local prod stack  → unset → defaults to :80 (plain HTTP; visit

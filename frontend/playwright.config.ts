@@ -24,12 +24,12 @@ export default defineConfig({
     screenshot: 'only-on-failure',
   },
   projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
-  // Reuse the Vite server started by dev-up.sh; start one if absent (local only).
-  // Vite is launched directly, not via `pnpm dev`: newer pnpm 11 releases don't pass
-  // Playwright's shutdown signal on to the child, so the run hangs after the last
-  // test instead of exiting.
+  // Locally, reuse the Vite server dev-up.sh started (or start one if absent); on CI
+  // always start a fresh one. pnpm is pinned (package.json `packageManager`) because
+  // some pnpm 11 releases don't pass Playwright's shutdown signal on to Vite, which
+  // hangs the run after the last test — check that a run exits before bumping it.
   webServer: {
-    command: './node_modules/.bin/vite',
+    command: 'pnpm dev',
     url: BASE_URL,
     reuseExistingServer: !process.env.CI,
     timeout: 30_000,

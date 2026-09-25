@@ -1,4 +1,4 @@
-# Backend image — serves the API and runs the arq judge worker (DESIGN.md §7.2).
+# Backend image — serves the API and runs the arq judge worker (DESIGN.md §9).
 #
 # Two build targets share one dependency install:
 #   * `base`   — the api + migrate services (plain Python, no Docker access).

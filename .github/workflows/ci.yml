@@ -183,7 +183,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
         with:
-          version: 11
+          # The version comes from frontend/package.json's packageManager pin.
+          package_json_file: frontend/package.json
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -240,7 +241,8 @@ jobs:
           prune-cache: false
       - uses: pnpm/action-setup@v4
         with:
-          version: 11
+          # The version comes from frontend/package.json's packageManager pin.
+          package_json_file: frontend/package.json
       - uses: actions/setup-node@v4
         with:
           node-version: 22

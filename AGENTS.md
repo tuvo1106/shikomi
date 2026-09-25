@@ -177,10 +177,11 @@ and `playwright`.
 
 ## Gotchas / lessons learned
 
-- **Playwright's `webServer` launches Vite directly, never via `pnpm dev`.** CI's
-  `pnpm/action-setup` pins only the major version, and a newer pnpm 11 stopped passing
-  Playwright's shutdown signal to its child, so every spec passed and then the job hung
-  until GitHub's timeout. Every CI job now has `timeout-minutes` so a hang fails fast.
+- **pnpm is pinned (`frontend/package.json` `packageManager`), so bump it deliberately.**
+  CI, the web image (corepack) and local installs all read that one pin. Some pnpm 11
+  releases don't pass Playwright's shutdown signal on to the `pnpm dev` it starts as its
+  `webServer`, so every spec passes and then the run hangs. After a bump, check that
+  `CI=true pnpm e2e` exits. Every CI job also has `timeout-minutes`, so a hang fails fast.
 - **Coverage + async SQLAlchemy**: coroutine bodies run inside SQLAlchemy's
   greenlet, which coverage doesn't trace by default. Without
   `concurrency = ["greenlet"]` in `[tool.coverage.run]`, async service coverage is
