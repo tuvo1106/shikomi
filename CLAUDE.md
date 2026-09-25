@@ -38,6 +38,9 @@ isn't finished until the code **and** its documentation land together:
 
 ## Conventions (see AGENTS.md for the full list)
 
+- **This repo is public.** Never commit secrets, credentials, tokens or real user data —
+  config comes from environment variables (`.env`, gitignored).
+- **Never commit directly to `main`**: branch (`feat/`, `fix/`, `chore/`, `docs/`) and open a PR.
 - Commit messages: **no `Co-Authored-By` trailer** (maintainer preference).
 - PR descriptions: fill the [template](.github/PULL_REQUEST_TEMPLATE.md) and keep it
   brief — what and why, what was tested, which docs changed.
