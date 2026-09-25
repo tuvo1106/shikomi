@@ -268,12 +268,26 @@ class ProblemFile(ProblemIn):
 
     @model_validator(mode="after")
     def _unique_ordinals(self) -> "ProblemFile":
-        # Duplicate ordinals collide in build_verdict_results (worker/judging.py),
+        # Duplicate case ordinals collide in build_verdict_results (worker/judging.py),
         # which keys revealed-case lookup by ordinal — a collision can reveal the
         # wrong hidden case's input/expected to the client.
         ordinals = [tc.ordinal for tc in self.test_cases]
         if len(ordinals) != len(set(ordinals)):
             raise ValueError("test case ordinals must be unique")
+        # Solutions have a DB unique constraint (uq_solution_ordinal); checked here too
+        # so a duplicate is a per-file validation error, not a crash mid-write.
+        ordinals = [sol.ordinal for sol in self.solutions]
+        if len(ordinals) != len(set(ordinals)):
+            raise ValueError("solution ordinals must be unique")
+        return self
+
+    @model_validator(mode="after")
+    def _has_a_sample_case(self) -> "ProblemFile":
+        # Run judges only the sample cases, so with none it would judge 0/0 — which
+        # aggregates to `accepted` for any code, the same hole min_length closes for
+        # Submit. The workspace also renders its worked examples from the samples.
+        if not any(tc.is_sample for tc in self.test_cases):
+            raise ValueError("at least one test case must have is_sample: true")
         return self
 
     @model_validator(mode="after")

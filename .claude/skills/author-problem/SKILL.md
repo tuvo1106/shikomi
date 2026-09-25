@@ -124,7 +124,8 @@ the references.
 ## 3. Write test cases
 
 Aim for about 10 small cases (the worked examples marked `is_sample: true`) plus
-**1–2 large hidden cases**. Every case should be able to catch some plausible
+**1–2 large hidden cases**. At least one case must be a sample: Run judges only
+the samples, and the seed rejects a file without one. Every case should be able to catch some plausible
 wrong solution. Ten variations of the happy path catch nothing. Check each item
 below:
 

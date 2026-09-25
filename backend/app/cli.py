@@ -50,7 +50,7 @@ def _load_problem_files(seed_dir: pathlib.Path) -> tuple[list[ProblemFile], list
         try:
             raw = json.loads(path.read_text())
             problem = ProblemFile.model_validate(raw)
-        except (json.JSONDecodeError, ValidationError) as exc:
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValidationError) as exc:
             errors.append(f"{path.name}: {exc}")
             continue
         unknown = sorted(set(raw) - set(ProblemFile.model_fields))
@@ -89,10 +89,11 @@ async def seed(seed_dir: pathlib.Path) -> int:
               file=sys.stderr)
         return 1
     async with SessionLocal() as session:
-        for problem in problems:
-            row, action = await problem_service.upsert_problem(session, problem)
-            print(f"  {action}: {row.slug}")
+        done = [await problem_service.upsert_problem(session, p) for p in problems]
         await session.commit()
+    # Reported only after the commit, so a failed write never reads as a successful load.
+    for row, action in done:
+        print(f"  {action}: {row.slug}")
     print(f"Seeded {len(problems)} problem(s).")
     return 0
 

@@ -89,12 +89,43 @@ async def test_a_problem_needs_at_least_one_test_case(session_factory, monkeypat
     assert await _problems(session_factory) == []
 
 
+async def test_duplicate_solution_ordinals_are_a_validation_error(session_factory, monkeypatch,
+                                                                   tmp_path, capsys):
+    """Caught per file before any write, not as an IntegrityError halfway through."""
+    monkeypatch.setattr(cli, "SessionLocal", session_factory)
+    _write(tmp_path, "demo", solutions=[SEED["solutions"][0], SEED["solutions"][0]])
+    assert await cli.seed(tmp_path) == 1
+    assert "solution ordinals must be unique" in capsys.readouterr().err
+    assert await _problems(session_factory) == []
+
+
+async def test_a_problem_needs_a_sample_case(session_factory, monkeypatch, tmp_path, capsys):
+    """Run judges only samples: with none, any code would be `accepted` 0/0."""
+    monkeypatch.setattr(cli, "SessionLocal", session_factory)
+    _write(tmp_path, "demo", test_cases=[{"ordinal": 0, "input": [1], "expected": 1}])
+    assert await cli.seed(tmp_path) == 1
+    assert "is_sample" in capsys.readouterr().err
+
+
+async def test_an_unreadable_file_is_reported_not_a_crash(session_factory, monkeypatch, tmp_path,
+                                                         capsys):
+    """Every bad file is listed, including one that isn't UTF-8 or can't be read."""
+    monkeypatch.setattr(cli, "SessionLocal", session_factory)
+    _write(tmp_path, "good")
+    (tmp_path / "latin1.json").write_bytes('{"title": "Caf\xe9"}'.encode("latin-1"))
+    (tmp_path / "dangling.json").symlink_to(tmp_path / "missing-target.json")
+    assert await cli.seed(tmp_path) == 1
+    err = capsys.readouterr().err
+    assert "latin1.json" in err and "dangling.json" in err
+    assert await _problems(session_factory) == []
+
+
 async def test_seed_refuses_a_problem_over_the_judge_budget(session_factory, monkeypatch, tmp_path,
                                                           capsys):
     monkeypatch.setattr(cli, "SessionLocal", session_factory)
     most = jb.max_cases_within_job_timeout(2000)
     _write(tmp_path, "big", test_cases=[
-        {"ordinal": i, "input": [i], "expected": i} for i in range(most + 1)])
+        {"ordinal": i, "input": [i], "expected": i, "is_sample": i == 0} for i in range(most + 1)])
     assert await cli.seed(tmp_path) == 1
     assert f"at most {most} cases" in capsys.readouterr().err  # actionable
 
@@ -104,11 +135,11 @@ async def test_time_limit_and_case_count_change_together(session_factory, monkey
     slower cases in one edit is valid even though old count x new limit wouldn't be."""
     monkeypatch.setattr(cli, "SessionLocal", session_factory)
     _write(tmp_path, "demo", time_limit_ms=2000, test_cases=[
-        {"ordinal": i, "input": [i], "expected": i} for i in range(100)])
+        {"ordinal": i, "input": [i], "expected": i, "is_sample": i == 0} for i in range(100)])
     assert await cli.seed(tmp_path) == 0
 
     _write(tmp_path, "demo", time_limit_ms=10_000, test_cases=[
-        {"ordinal": i, "input": [i], "expected": i} for i in range(20)])
+        {"ordinal": i, "input": [i], "expected": i, "is_sample": i == 0} for i in range(20)])
     assert not jb.fits_job_timeout(100, 10_000)               # the old check would refuse this
     assert await cli.seed(tmp_path) == 0
     assert (await _problems(session_factory))[0].time_limit_ms == 10_000

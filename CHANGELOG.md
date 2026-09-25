@@ -14,7 +14,8 @@ Initial open-source release.
   any-of comparison; per-problem time and memory limits.
 - **Bring your own problems:** problems are JSON files loaded with
   `python -m app.cli seed --dir <path>`, all-or-nothing: every file is validated
-  (schema, at least one test case, the judge-time budget) before any is written; `SEED_DIR=<path> pytest
+  (schema, at least one test case and one sample, the judge-time budget) before any is
+  written; `SEED_DIR=<path> pytest
   judge/tests/test_seed_solutions.py` checks every reference solution against the
   real harness; `PROBLEMS_DIR` points the Compose and kind stacks at your own
   directory. Five original starter problems ship as examples.
