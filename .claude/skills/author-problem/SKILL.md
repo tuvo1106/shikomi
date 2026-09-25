@@ -208,11 +208,11 @@ their `*_reason` fields, written with real prose depth.
 
 ## 5. Validate: don't just claim it works
 
-1. **Schema**: every file is validated against `ProblemFile`
-   (`backend/app/schemas/problem.py`) before anything is written, and one bad
-   file aborts the whole load. Run it against a dev database:
-   `cd backend && uv run python -m app.cli seed --dir <dir>`. Warnings about
-   unknown keys usually mean a typo.
+1. **Schema**: `cd backend && uv run python -m app.cli validate --dir <dir>`
+   checks every file against `ProblemFile` (`backend/app/schemas/problem.py`)
+   with no database. It's the same check `seed` runs before writing anything, so
+   a directory that validates will load. Warnings about unknown keys usually mean
+   a typo.
 2. **Real harness**: from the repo root, run
    `SEED_DIR=<dir> .venv/bin/pytest judge/tests/test_seed_solutions.py -k <slug> -v --durations=0`.
    This runs every shipped solution against every case and shows per-case timing.

@@ -89,12 +89,17 @@ starters in [`seed/problems/`](seed/problems/) are complete examples. Keep your
 problems wherever you like; a separate git repo works well.
 
 ```bash
-# 1. Check every reference solution passes every test case, using the real harness
+# 1. Check the files against every loading rule (no database needed)
+(cd backend && uv run python -m app.cli validate --dir ~/my-problems/problems)
+
+# 2. Check every reference solution passes every test case, using the real harness
 SEED_DIR=~/my-problems/problems .venv/bin/pytest judge/tests/test_seed_solutions.py -v
 
-# 2. Load them (an idempotent upsert keyed on slug, so re-run after every edit)
+# 3. Load them (an idempotent upsert keyed on slug, so re-run after every edit)
 cd backend && uv run python -m app.cli seed --dir ~/my-problems/problems
 ```
+
+Steps 1 and 2 need no running stack, so they also make a good CI job for a problem repo.
 
 Loading validates every file first, against the schema and the judge-time
 budget the worker enforces, and writes nothing if any file fails. So a malformed
@@ -104,7 +109,7 @@ file doesn't remove its problem. With the Compose stack, set `PROBLEMS_DIR=~/my-
 before `scripts/prod-up.sh`, and the migrate step loads your directory instead
 of the starters.
 
-To set up the repo-root test environment used in step 1, run
+To set up the repo-root test environment used in step 2, run
 `uv venv .venv && uv pip install --python .venv pytest` once.
 
 If you use [Claude Code](https://claude.com/claude-code), the bundled
