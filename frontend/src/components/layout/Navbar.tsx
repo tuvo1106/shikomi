@@ -32,7 +32,15 @@ function NavItem({ to, end, children }: { to: string; end?: boolean; children: R
 export function Navbar() {
   const { user, logout } = useAuth()
   return (
-    <nav className="flex h-14 items-center justify-between gap-2 border-b border-zinc-800 px-2 sm:px-4">
+    // `relative z-40` makes the bar its own layer above the page, so its dropdown (the
+    // user menu) isn't painted under the workspace: Monaco's editor subtree is
+    // `z-index: auto` like the dropdown was, so it won on DOM order alone (it comes
+    // later in the document). The editor pane pairs this with `isolate`
+    // (`workspace/Workspace.tsx`) so Monaco's own widget z-indexes — the suggest
+    // widget is 40, a tie this bar would lose — can't reach past it either.
+    // The app's layers, low to high: page content, this bar (40), modals (50,
+    // `Modal.tsx`), confetti (60, `Confetti.tsx`).
+    <nav className="relative z-40 flex h-14 items-center justify-between gap-2 border-b border-zinc-800 px-2 sm:px-4">
       <div className="flex h-full items-center gap-2 sm:gap-6">
         <Link to="/" className="flex shrink-0 items-center gap-2">
           <span className="grid h-7 w-7 place-items-center rounded-md bg-indigo-500 text-white">
