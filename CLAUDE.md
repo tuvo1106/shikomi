@@ -39,6 +39,8 @@ isn't finished until the code **and** its documentation land together:
 ## Conventions (see AGENTS.md for the full list)
 
 - Commit messages: **no `Co-Authored-By` trailer** (maintainer preference).
+- PR descriptions: fill the [template](.github/PULL_REQUEST_TEMPLATE.md) and keep it
+  brief — what and why, what was tested, which docs changed.
 - `ruff` (backend) / `oxlint` (frontend) are the linters of record; match
   surrounding style.
 - Verify behavior end-to-end before claiming done (there's a running app / cluster

@@ -314,8 +314,11 @@ slice ships, delete its entry here.
   Enforced by a `commit-msg` hook — run `lefthook install` once after cloning.
   See [CONTRIBUTING.md](CONTRIBUTING.md) for the full commit/PR/ADR process.
 - **Never commit directly to `main`.** One PR per feature or slice.
+- **PR descriptions follow the template and stay brief** (What changed / Testing /
+  Docs, readable in under a minute). No step-by-step narration of the diff, and no
+  hard-wrapped lines, since GitHub renders each newline as a line break.
   Branch prefixes: `feat/<slug>`, `fix/<slug>`, `chore/<slug>`, `docs/<slug>`.
-- **Build as if this repo were public.** No secrets, credentials, tokens, or real
+- **This repo is public.** No secrets, credentials, tokens, or real
   user data committed — ever, not "temporarily," not in a branch you plan to
   squash. Config comes from environment variables (`.env`, gitignored). A
   `no-secrets` pre-commit hook backs this up but isn't a substitute for not

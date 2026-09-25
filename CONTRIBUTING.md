@@ -29,7 +29,9 @@ No `Co-Authored-By` trailer (see [AGENTS.md](AGENTS.md)).
   still the final word.
 
 - Docs stay in sync with the change — see "Documentation is part of 'done'" in [CLAUDE.md](CLAUDE.md).
-- Fill out the [PR template](.github/PULL_REQUEST_TEMPLATE.md).
+- Fill out the [PR template](.github/PULL_REQUEST_TEMPLATE.md), and keep it brief: what and
+  why in a sentence or two, what you ran to test it, and which docs changed. Reasoning that
+  should outlive the PR goes in the code, DESIGN.md or an ADR, not the PR description.
 - A decision that's hard to reverse, non-obvious to the next reader, or reached by rejecting a
   plausible alternative gets an ADR in [docs/adr/](docs/adr/) — see ADR-0001.
 

@@ -1,25 +1,18 @@
+<!--
+Keep it short: a reviewer should be able to read this in under a minute.
+Say what and why, not how. The diff shows how; lasting reasoning belongs in
+code comments, DESIGN.md §12 or an ADR, not here. Write each paragraph or
+bullet as one line (GitHub renders every newline as a line break).
+-->
+
 ## What changed
 
-<!-- One or two sentences. -->
-
-## Why
-
-<!-- The problem this solves. -->
+<!-- One or two sentences on what changed and why. Add up to ~4 highlight bullets only if needed. -->
 
 ## Testing
 
-<!-- How was this verified? Which test suites ran? -->
+<!-- What ran and what it showed, one line per check (e.g. `scripts/ci-local.sh full` passes). Say so if something wasn't run. -->
 
 ## Docs
 
-- [ ] [DESIGN.md](../DESIGN.md) — architecture, data model, API, tech stack, or status & roadmap
-- [ ] [README.md](../README.md) — how to run/build/test/use
-- [ ] [AGENTS.md](../AGENTS.md) — conventions, gotchas, or the open TODO list
-      (delete a TODO entry when it ships rather than marking it done)
-- [ ] [CHANGELOG.md](../CHANGELOG.md) — anything user-visible that shipped
-- [ ] Diagrams (`docs/*.mmd`) — and their copy embedded in DESIGN.md
-- [ ] New decisions recorded as an ADR ([docs/adr/](../docs/adr/))
-
-## Notes for review
-
-<!-- Anything deliberately left out, or a decision you'd like a second opinion on. Delete if none. -->
+<!-- One line: which docs changed, or "none needed". CLAUDE.md lists what each doc covers. -->
