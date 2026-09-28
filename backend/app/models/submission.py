@@ -22,6 +22,9 @@ class Submission(Base, PKMixin, TimestampMixin):
     `TERMINAL_STATUSES`). The client polls the row until it's terminal.
 
     * `code` — the exact source submitted (kept so the user can view/reload it).
+    * `language` — which of the problem's languages `code` is written in; picks the
+      judge (the matching `ProblemLanguage` row) and scopes the runtime stats,
+      since runtimes aren't comparable across languages.
     * `status` — the current verdict state.
     * `verdict_detail` (JSONB) — per-case results + pass counts; JSON because the
       shape varies. Hidden-case inputs are redacted here except the first failing
@@ -35,8 +38,8 @@ class Submission(Base, PKMixin, TimestampMixin):
     scan instead of a sort. The DESC in the index matches the query's ORDER BY so
     Postgres reads rows already in the right order.
 
-    The composite index `(problem_id, is_run, status)` serves the stats queries
-    (`runtime_percentile`/`runtime_distribution`, which filter on all three)
+    The composite index `(problem_id, language, is_run, status)` serves the stats
+    queries (`runtime_percentile`/`runtime_distribution`, which filter on all four)
     without a full-table scan.
 
     The partial index on `updated_at WHERE status IN ('pending', 'running')` serves
@@ -50,8 +53,8 @@ class Submission(Base, PKMixin, TimestampMixin):
     __table_args__ = (
         Index("ix_submissions_user_problem_created",
               "user_id", "problem_id", text("created_at DESC")),
-        Index("ix_submissions_problem_is_run_status",
-              "problem_id", "is_run", "status"),
+        Index("ix_submissions_problem_language_is_run_status",
+              "problem_id", "language", "is_run", "status"),
         Index("ix_submissions_unfinished_updated", "updated_at",
               postgresql_where=text("status IN ('pending', 'running')")),
     )
@@ -61,6 +64,7 @@ class Submission(Base, PKMixin, TimestampMixin):
     problem_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("problems.id"), nullable=False)
     code: Mapped[str] = mapped_column(Text, nullable=False)
+    language: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default="pending")
     verdict_detail: Mapped[dict] = mapped_column(JSONB, nullable=True)
     runtime_ms: Mapped[float] = mapped_column(Float, nullable=True)

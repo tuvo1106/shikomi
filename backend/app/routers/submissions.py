@@ -33,7 +33,8 @@ async def create_submission(body: SubmissionCreate, user=Depends(require_verifie
                             queue: Queue = Depends(get_queue)):
     """POST /submissions — judge against *all* cases; saved to history. 202 pending."""
     sub = await submission_service.create_submission(
-        session, queue, user, body.problem_id, body.code, mode="submit")
+        session, queue, user, body.problem_id, body.code, mode="submit",
+        language=body.language)
     return SubmissionAccepted(id=sub.id, status=sub.status)
 
 
@@ -44,7 +45,8 @@ async def run_submission(body: SubmissionCreate, user=Depends(require_verified),
     """POST /run — judge against *sample* cases only. Rate-limited but takes no in-flight lock;
     stored as an `is_run` row, excluded from history and stats. 202."""
     sub = await submission_service.create_submission(
-        session, queue, user, body.problem_id, body.code, mode="run")
+        session, queue, user, body.problem_id, body.code, mode="run",
+        language=body.language)
     return SubmissionAccepted(id=sub.id, status=sub.status)
 
 
@@ -54,14 +56,15 @@ async def get_submission(submission_id: uuid.UUID, user=Depends(current_user),
                          queue: Queue = Depends(get_queue)):
     """GET /submissions/{id} — the submission (the poll target).
 
-    On an accepted verdict, enriches the response with `runtime_percentile` so the
-    client can show "beats X%" without a second request.
+    On an accepted verdict, enriches the response with `runtime_percentile` (among
+    accepted submissions in the same language) so the client can show "beats X%"
+    without a second request.
     """
     sub = await submission_service.get_submission(session, user, submission_id)
     out = SubmissionOut.model_validate(sub)
     if sub.status == "accepted" and sub.runtime_ms is not None:
         out.runtime_percentile = await submission_service.runtime_percentile(
-            session, queue, sub.problem_id, sub.runtime_ms)
+            session, queue, sub.problem_id, sub.language, sub.runtime_ms)
     return out
 
 
@@ -83,6 +86,7 @@ async def list_submissions(slug: str, user=Depends(current_user),
 @router.get("/submissions/{submission_id}/distribution", response_model=RuntimeDistribution)
 async def submission_distribution(submission_id: uuid.UUID, user=Depends(current_user),
                                   session: AsyncSession = Depends(get_session)):
-    """GET /submissions/{id}/distribution — runtime histogram for the success modal."""
+    """GET /submissions/{id}/distribution — runtime histogram for the success modal,
+    over accepted submissions in this submission's language."""
     sub = await submission_service.get_submission(session, user, submission_id)
-    return await submission_service.runtime_distribution(session, sub.problem_id)
+    return await submission_service.runtime_distribution(session, sub.problem_id, sub.language)

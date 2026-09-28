@@ -67,6 +67,25 @@ the reference-solution run in step 5 catches it. Integer overflow **panics**
 same limit. Each case runs in a fresh process, so statics don't carry over
 between cases.
 
+**Several languages.** A function-mode problem can be offered in more than one
+language (`merge-booking-windows` is Python, JS and Rust; DESIGN.md §7.1). Write
+it once: the statement, `kind`, `comparison`, limits and test cases are shared,
+and a `languages` list (default first) carries each language's `function_name`,
+`starter_code`, `params`, `return_type` and an optional `note_md`. Rules:
+
+- Keep the statement and constraints **language-neutral** (`n bookings`, not
+  `bookings.len()`); a line that only makes sense in one language goes in that
+  language's `note_md` ("times don't fit in an `i32`").
+- Every language declares the same number of params (cases are positional), and
+  every rule above (function-mode-only, the Rust memory floor, the judge budget)
+  must hold for **each** language.
+- Each harness compares values as its language sees them. A Python variant must
+  return **lists** where the JSON has arrays (`(1, 6) != [1, 6]` in Python), so type
+  it `list[list[int]]`, not `list[tuple[int, int]]`.
+- Limits are shared, so calibrate `time_limit_ms` and the large cases against the
+  slowest language's reference solution (usually Python).
+- Operations problems stay Python-only (JS and Rust have no operations mode).
+
 **In-place mutation isn't observable.** The judge never inspects mutated
 arguments. A "modify the array in place" problem returns the resulting array
 instead, and the statement says so.
@@ -93,8 +112,10 @@ Don't work around it per problem.
 
 ## 2. Write the metadata
 
-Match an existing file's shape exactly. The five files in `seed/problems/` are
-the references.
+Match an existing file's shape exactly. The files in `seed/problems/` are the
+references. A one-language problem puts its language fields at the top level (the
+shorthand, below); a multi-language one lists them under `languages` instead,
+never both.
 
 - `slug`: kebab-case, derived from the title.
 - Python `starter_code` uses modern hints (`list[int]`). `params` types are
@@ -216,6 +237,12 @@ bloat to megabytes. Aim for roughly 100–300KB at most per file.
 Write 1–2 approaches, usually brute force first and then optimal. Each needs
 `intuition_md`, `algorithm_md`, `code`, `time_complexity`, `space_complexity`, and
 their `*_reason` fields, written with real prose depth.
+
+On a multi-language problem, `code` is a `{"python": …, "rust": …}` map. The prose
+and complexity are shared, so keep them language-neutral too (or say which
+language a remark is about). An approach may exist in only some languages (the
+workspace labels it "Rust only"), but every language needs at least one solution:
+that's what proves its signature against the shared cases in step 5.
 
 - Ship the solution you'd want a learner to copy. A technically-passing answer
   that dodges the problem's actual difficulty doesn't qualify.

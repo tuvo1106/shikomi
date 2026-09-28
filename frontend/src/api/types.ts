@@ -33,6 +33,8 @@ export type ProblemListItem = {
   title: string
   difficulty: Difficulty
   tags: string[]
+  /** The languages the problem can be solved in, default first. */
+  languages: Language[]
   user_status: UserStatus
 }
 
@@ -52,19 +54,28 @@ export type ProblemListResponse = {
 export type ParamSpec = { name: string; type: string }
 export type SampleCase = { ordinal: number; input: unknown[]; expected: unknown }
 
+/** One language a problem is offered in (docs/adr/0005-multi-language-problems.md):
+ * what pre-fills the editor, the signature's names and display types, and a short
+ * language-specific addendum to the shared statement. */
+export type LanguageVariant = {
+  language: Language
+  starter_code: string
+  function_name: string | null
+  class_name: string | null
+  params: ParamSpec[]
+  return_type: string
+  note_md: string
+}
+
 export type ProblemDetail = {
   id: string
   slug: string
   title: string
   difficulty: Difficulty
   statement_md: string
-  starter_code: string
   kind: Kind
-  language: Language
-  function_name: string | null
-  class_name: string | null
-  params: ParamSpec[]
-  return_type: string
+  /** Ordered, default first; a one-language problem has one entry. */
+  languages: LanguageVariant[]
   tags: string[]
   constraints: string[]
   sample_cases: SampleCase[]
@@ -105,7 +116,9 @@ export type Solution = {
   title: string
   intuition_md: string
   algorithm_md: string
-  code: string
+  /** Reference code per language. May cover fewer languages than the problem
+   * offers (a "Rust only" approach). */
+  code: Partial<Record<Language, string>>
   time_complexity: string
   space_complexity: string
   time_complexity_reason: string
@@ -119,16 +132,19 @@ export type Submission = {
   problem_id: string
   status: SubmissionStatus
   code: string
+  language: Language
   verdict_detail: VerdictDetail | null
   runtime_ms: number | null
   is_run: boolean
   created_at: string
+  /** Among accepted submissions in the same language. */
   runtime_percentile?: number | null
 }
 
 export type SubmissionListItem = {
   id: string
   status: string
+  language: Language
   runtime_ms: number | null
   created_at: string
 }

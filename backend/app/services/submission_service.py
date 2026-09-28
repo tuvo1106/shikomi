@@ -28,13 +28,16 @@ _RATE_LIMITS = {
 
 
 async def create_submission(session: AsyncSession, queue: Queue, user: User,
-                            problem_id: uuid.UUID, code: str, *, mode: str) -> Submission:
+                            problem_id: uuid.UUID, code: str, *, mode: str,
+                            language: str | None = None) -> Submission:
     """Accept a Run/Submit attempt and enqueue it for async judging.
 
     `mode` is "submit" (all cases, rate-limited, one-in-flight, saved to history)
     or "run" (sample cases only, no in-flight lock). Guards run cheapest-first so
     abuse is rejected before doing real work: size cap → rate limit → problem
-    exists → in-flight lock → write row → enqueue.
+    exists → language offered → in-flight lock → write row → enqueue.
+
+    `language` None means the problem's default (its first language).
 
     The row is written *before* the enqueue (§5.7): if enqueue then fails we mark
     the row `judge_error` and release the lock, so we never accept work we can't
@@ -48,7 +51,8 @@ async def create_submission(session: AsyncSession, queue: Queue, user: User,
 
     Raises:
         APIError: 413 CODE_TOO_LARGE, 429 RATE_LIMITED, 404 NOT_FOUND (unpublished/
-            missing), 429 SUBMISSION_IN_FLIGHT, or 503 QUEUE_UNAVAILABLE.
+            missing), 400 UNSUPPORTED_LANGUAGE, 429 SUBMISSION_IN_FLIGHT, or 503
+            QUEUE_UNAVAILABLE.
     """
     if len(code.encode()) > settings.max_code_bytes:
         raise APIError(413, "CODE_TOO_LARGE", "Submission code exceeds the size limit.")
@@ -66,6 +70,12 @@ async def create_submission(session: AsyncSession, queue: Queue, user: User,
     problem = await session.get(Problem, problem_id)
     if problem is None or not problem.is_published:
         raise APIError(404, "NOT_FOUND", "Problem not found.")
+    offered = [v.language for v in problem.languages]
+    language = language or offered[0]
+    if language not in offered:
+        raise APIError(400, "UNSUPPORTED_LANGUAGE",
+                       f"This problem can't be solved in {language}. "
+                       f"Choose one of: {', '.join(offered)}.")
 
     # The id is chosen up front so it can be the lock's owner token: the lock is taken before
     # the row exists, and every later release (here, the worker, the sweeper) knows this id.
@@ -85,7 +95,7 @@ async def create_submission(session: AsyncSession, queue: Queue, user: User,
                            "You already have a submission running for this problem.")
 
     sub = Submission(id=sub_id, user_id=user_id, problem_id=problem_id, code=code,
-                     status="pending", is_run=(mode == "run"))
+                     language=language, status="pending", is_run=(mode == "run"))
     session.add(sub)
     try:
         await session.commit()
@@ -154,19 +164,27 @@ async def delete_submission(session: AsyncSession, user: User, submission_id: uu
     await session.commit()
 
 
-def _accepted_filter(problem_id):
-    """The WHERE clauses for "a real, accepted submission on this problem".
+def _accepted_filter(problem_id, language):
+    """The WHERE clauses for "a real, accepted submission on this problem, in
+    this language".
 
     Reused by the stats queries so they consistently exclude Runs (`is_run`) and
-    non-accepted attempts. Returns a tuple splatted into `.where(*_accepted_filter(...))`.
+    non-accepted attempts. The language matters because runtimes aren't
+    comparable across languages: a compiled Rust solution runs in a millisecond
+    where the same algorithm in Python takes tens, so a pooled "beats X%" would
+    rank languages, not solutions. Returns a tuple splatted into
+    `.where(*_accepted_filter(...))`.
     """
     return (Submission.problem_id == problem_id,
+            Submission.language == language,
             Submission.status == "accepted",
             Submission.is_run.is_(False))
 
 
-async def runtime_percentile(session: AsyncSession, queue: Queue, problem_id, runtime_ms) -> float | None:
-    """What percent of *other* accepted submissions this runtime is at least as
+async def runtime_percentile(session: AsyncSession, queue: Queue, problem_id, language,
+                             runtime_ms) -> float | None:
+    """What percent of *other* accepted submissions in the same language this
+    runtime is at least as
     fast as. Counts accepted submissions with `runtime_ms >= ours`, excluding
     ourselves from both that count and the total, so faster runtimes score
     higher (100 = faster than every other accepted submission). Powers
@@ -181,30 +199,33 @@ async def runtime_percentile(session: AsyncSession, queue: Queue, problem_id, ru
     submissions would score 50% ("beats" itself) instead of the true 0% (it
     beats zero *other* submissions).
 
-    Cached briefly per (problem_id, runtime_ms): this is two full COUNT(*) scans,
+    Cached briefly per (problem_id, language, runtime_ms): this is two full COUNT(*) scans,
     and once accepted a submission's runtime never changes, so repeated polls/
     views of the same (or another identically-timed) submission would otherwise
     re-run both scans every time for the same answer. The sole-submission case
     isn't cached — it's a single count query, and caching "None" isn't
     distinguishable from a cache miss in `get_cached_percentile`'s contract.
     """
-    cached = await queue.get_cached_percentile(problem_id, runtime_ms)
+    cached = await queue.get_cached_percentile(problem_id, language, runtime_ms)
     if cached is not None:
         return cached
     total = await session.scalar(
-        select(func.count()).select_from(Submission).where(*_accepted_filter(problem_id)))
+        select(func.count()).select_from(Submission).where(*_accepted_filter(problem_id, language)))
     if total <= 1:
         return None
     at_least_as_slow = await session.scalar(
         select(func.count()).select_from(Submission).where(
-            *_accepted_filter(problem_id), Submission.runtime_ms >= runtime_ms))
+            *_accepted_filter(problem_id, language), Submission.runtime_ms >= runtime_ms))
     percentile = round(100.0 * (at_least_as_slow - 1) / (total - 1), 1)
-    await queue.set_cached_percentile(problem_id, runtime_ms, percentile)
+    await queue.set_cached_percentile(problem_id, language, runtime_ms, percentile)
     return percentile
 
 
-async def runtime_distribution(session: AsyncSession, problem_id, num_buckets: int = 20) -> dict:
+async def runtime_distribution(session: AsyncSession, problem_id, language,
+                               num_buckets: int = 20) -> dict:
     """Bucket accepted-submission runtimes into a histogram for the success modal.
+
+    Only submissions in `language` count, for the reason `_accepted_filter` gives.
 
     Returns `{buckets, lo, hi, total}`: `buckets` are equal-width bin counts from
     `lo`..`hi` (min/max runtime). Edge cases return early — no data → empty, and
@@ -213,7 +234,7 @@ async def runtime_distribution(session: AsyncSession, problem_id, num_buckets: i
     """
     rows = list((await session.execute(
         select(Submission.runtime_ms).where(
-            *_accepted_filter(problem_id), Submission.runtime_ms.is_not(None)))).scalars().all())
+            *_accepted_filter(problem_id, language), Submission.runtime_ms.is_not(None)))).scalars().all())
     if not rows:
         return {"buckets": [], "lo": 0.0, "hi": 0.0, "total": 0}
     lo, hi = float(min(rows)), float(max(rows))

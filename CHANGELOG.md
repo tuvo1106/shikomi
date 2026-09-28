@@ -23,6 +23,19 @@ All notable changes to this project are recorded here. The format follows
   (SQL).
 - `python -m worker.judge_local --language <python|js|rust|mysql>` judges a payload in
   that language's sandbox (its image, tmpfs size and `exec` flag).
+- **Problems in several languages.** A problem can be offered in any number of
+  languages, with one shared statement and one shared set of test cases. The workspace
+  gets a language switcher (shown only when there's more than one), keeps a separate
+  draft per language, and shows a short language-specific note under the statement.
+  Solutions show code in the editor's language, and label an approach that exists in
+  only some languages ("Rust only"). The Submissions tab and the verdict show each
+  submission's language, and "Beats X%" compares only against accepted submissions in
+  the same language. *Merge Booking Windows* is now offered in Python, JavaScript and
+  Rust. Problem files list `languages` and give solution `code` per language; the
+  single-language form still loads unchanged. `POST /submissions` and `/run` take an
+  optional `language` (default: the problem's first). Existing deployments need
+  `alembic upgrade head`, which moves each problem's language fields into the new
+  `problem_languages` table and backfills every submission's language.
 
 ### Fixed
 

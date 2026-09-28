@@ -10,7 +10,7 @@ sequenceDiagram
 
     Note over U,J: Submitting a solution — Kubernetes judge-as-Pod path
 
-    U->>W: POST /api/v1/submissions {problem_id, code}
+    U->>W: POST /api/v1/submissions {problem_id, code, language}
     W->>A: reverse-proxy /api/*
     A->>A: auth (JWT) · require_verified · rate limit
     A->>R: SET NX inflight:{user}:{problem} = submission id  (one in-flight per problem)
@@ -27,7 +27,7 @@ sequenceDiagram
     and Worker judges the submission
         R->>K: dequeue judge_submission(id, mode)
         K->>DB: UPDATE status = running
-        K->>DB: load problem + test cases
+        K->>DB: load problem, its variant for the language, test cases
         K->>J: create ConfigMap(payload) + locked-down Pod
         Note right of J: no network · read-only FS · cap-drop ALL<br/>non-root · mem/cpu limits · per-case SIGALRM
         activate J

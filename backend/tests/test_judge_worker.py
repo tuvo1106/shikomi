@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from sqlalchemy import select, text
 
-from app.models import EmailToken, Problem, Submission, TestCase
+from app.models import EmailToken, Problem, ProblemLanguage, Submission, TestCase
 from app.models.email_token import PURPOSE_VERIFY
 from worker import judge as judge_mod
 from worker import sweeper
@@ -211,10 +211,11 @@ async def test_run_judgement_dispatches_rust_to_its_image_with_an_exec_tmpfs(mon
     assert captured["payload"]["compile_timeout_s"] == RUST_COMPILE_TIMEOUT_S
 
 
-async def _make_pending(session_factory, user_id, problem_id, code="x", is_run=False):
+async def _make_pending(session_factory, user_id, problem_id, code="x", is_run=False,
+                        language="python"):
     async with session_factory() as s:
         sub = Submission(user_id=uuid.UUID(user_id), problem_id=uuid.UUID(problem_id),
-                         code=code, status="pending", is_run=is_run)
+                         code=code, language=language, status="pending", is_run=is_run)
         s.add(sub)
         await s.commit()
         await s.refresh(sub)
@@ -260,10 +261,12 @@ async def _make_operations_problem(session_factory):
     async with session_factory() as s:
         problem = Problem(
             slug="recency-cache", title="Recency Cache", difficulty="medium",
-            statement_md="Design an LRU cache.", kind="operations", class_name="LRUCache",
-            starter_code="class LRUCache: ...", is_published=True)
+            statement_md="Design an LRU cache.", kind="operations", is_published=True)
         s.add(problem)
         await s.flush()
+        s.add(ProblemLanguage(problem_id=problem.id, ordinal=0, language="python",
+                              class_name="LRUCache", starter_code="class LRUCache: ...",
+                              params=[]))
         s.add(TestCase(problem_id=problem.id, ordinal=0,
                        input=[["LRUCache", "put", "get"], [[2], [1, 1], [1]]],
                        expected=[None, None, 1], is_sample=True))
@@ -715,3 +718,53 @@ async def test_a_redis_error_while_requeueing_does_not_abort_the_rest_of_the_swe
         hashes = (await s.execute(select(EmailToken.token_hash))).scalars().all()
         assert "expired" not in hashes                       # the rest of the sweep still ran
         assert (await s.get(Submission, uuid.UUID(sid))).status == "pending"   # retried next pass
+
+
+async def _capture_run(monkeypatch, session_factory):
+    captured = {}
+
+    async def fake_run(**kwargs):
+        captured.update(kwargs)
+        return Verdict(status="accepted", runtime_ms=1, passed=1, total=1, results=[
+            {"test_case_id": 0, "status": "passed", "runtime_ms": 1, "output": "[0,1]",
+             "stdout": "", "error": None}])
+
+    monkeypatch.setattr(judge_mod, "SessionLocal", session_factory)
+    monkeypatch.setattr(judge_mod, "run_judgement", fake_run)
+    return captured
+
+
+async def test_judge_uses_the_variant_for_the_submissions_language(
+        session_factory, make_problem, make_user, monkeypatch):
+    """A Rust submission to a Python-first problem is judged by the Rust
+    variant: its language (so the Rust image) and its own signature."""
+    pid, _ = await make_problem(languages=("python", "rust"))
+    async with session_factory() as s:
+        rust = (await s.execute(select(ProblemLanguage).where(
+            ProblemLanguage.language == "rust"))).scalar_one()
+        rust.function_name = "pair_sum_rs"
+        await s.commit()
+    user, _ = await make_user()
+    sid = await _make_pending(session_factory, user["id"], pid, language="rust")
+    captured = await _capture_run(monkeypatch, session_factory)
+
+    await judge_mod.judge_submission({"redis": FakeRedis()}, sid, "run")
+
+    assert captured["language"] == "rust"
+    assert captured["function_name"] == "pair_sum_rs"
+
+
+async def test_a_language_the_problem_no_longer_offers_is_a_judge_error(
+        session_factory, make_problem, make_user, monkeypatch):
+    """A re-seed can drop a language while a submission in it is queued; the
+    judge must not quietly run the code under a different language."""
+    pid, _ = await make_problem(languages=("python",))
+    user, _ = await make_user()
+    sid = await _make_pending(session_factory, user["id"], pid, language="rust")
+    captured = await _capture_run(monkeypatch, session_factory)
+
+    await judge_mod.judge_submission({"redis": FakeRedis()}, sid, "run")
+
+    assert captured == {}  # never reached a sandbox
+    async with session_factory() as s:
+        assert (await s.get(Submission, uuid.UUID(sid))).status == "judge_error"

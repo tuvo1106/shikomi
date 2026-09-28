@@ -15,8 +15,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.errors import APIError
-from app.models import Problem, Solution, Submission, TestCase
+from app.models import Problem, ProblemLanguage, Solution, SolutionCode, Submission, TestCase
 from app.schemas.problem import (
+    LanguageVariantOut,
     ParamSpec,
     ProblemDetail,
     ProblemFile,
@@ -132,7 +133,8 @@ async def list_problems(session, user_id, *, difficulty=None, tag=None,
     statuses = await user_statuses(session, user_id, [p.id for p in page_rows])
     items = [
         ProblemListItem(id=p.id, slug=p.slug, title=p.title, difficulty=p.difficulty,
-                        tags=list(p.tags), user_status=statuses[p.id])
+                        tags=list(p.tags), languages=[v.language for v in p.languages],
+                        user_status=statuses[p.id])
         for p in page_rows
     ]
     return items, total
@@ -181,7 +183,8 @@ async def next_problem(session: AsyncSession, user_id, slug: str):
 
     status = (await user_statuses(session, user_id, [nxt.id]))[nxt.id]
     return ProblemListItem(id=nxt.id, slug=nxt.slug, title=nxt.title, difficulty=nxt.difficulty,
-                           tags=list(nxt.tags), user_status=status)
+                           tags=list(nxt.tags), languages=[v.language for v in nxt.languages],
+                           user_status=status)
 
 
 async def list_filter_facets(session: AsyncSession) -> dict[str, list[str]]:
@@ -227,11 +230,12 @@ async def _get_published(session: AsyncSession, slug: str) -> Problem:
 
 
 async def get_problem_detail(session: AsyncSession, user_id, slug: str) -> ProblemDetail:
-    """Build the public problem view — statement, params, *sample* cases, status.
+    """Build the public problem view — statement, languages, *sample* cases, status.
 
     Only `is_sample` cases are surfaced (hidden cases stay server-side), and
     `has_solutions` is a boolean so the UI can show/hide the Solutions tab without
-    leaking the solutions themselves here.
+    leaking the solutions themselves here. `languages` keeps the authored order,
+    so the first entry is the default the workspace opens in.
     """
     problem = await _get_published(session, slug)
     samples = [SampleCase(ordinal=tc.ordinal, input=tc.input, expected=tc.expected)
@@ -239,10 +243,14 @@ async def get_problem_detail(session: AsyncSession, user_id, slug: str) -> Probl
     status = (await user_statuses(session, user_id, [problem.id]))[problem.id]
     return ProblemDetail(
         id=problem.id, slug=problem.slug, title=problem.title, difficulty=problem.difficulty,
-        statement_md=problem.statement_md, starter_code=problem.starter_code,
-        kind=problem.kind, language=problem.language,
-        function_name=problem.function_name, class_name=problem.class_name,
-        params=[ParamSpec(**p) for p in problem.params], return_type=problem.return_type,
+        statement_md=problem.statement_md, kind=problem.kind,
+        languages=[
+            LanguageVariantOut(
+                language=v.language, starter_code=v.starter_code,
+                function_name=v.function_name, class_name=v.class_name,
+                params=[ParamSpec(**p) for p in v.params], return_type=v.return_type,
+                note_md=v.note_md)
+            for v in problem.languages],
         tags=list(problem.tags), constraints=list(problem.constraints), sample_cases=samples,
         has_solutions=len(problem.solutions) > 0, user_status=status,
     )
@@ -255,7 +263,14 @@ async def get_solutions(session: AsyncSession, slug: str) -> list[SolutionOut]:
     §6.3), but the server doesn't gate them.
     """
     problem = await _get_published(session, slug)
-    return [SolutionOut.model_validate(s) for s in problem.solutions]
+    return [
+        SolutionOut(
+            id=s.id, ordinal=s.ordinal, title=s.title, intuition_md=s.intuition_md,
+            algorithm_md=s.algorithm_md, code={c.language: c.code for c in s.codes},
+            time_complexity=s.time_complexity, space_complexity=s.space_complexity,
+            time_complexity_reason=s.time_complexity_reason,
+            space_complexity_reason=s.space_complexity_reason)
+        for s in problem.solutions]
 
 
 # --- seed loading -----------------------------------------------------------
@@ -267,9 +282,10 @@ async def upsert_problem(session: AsyncSession, data: ProblemFile) -> tuple[Prob
 
     Keyed on `slug`, derived from the title when the file omits it (so a slug-less
     file still maps to the same row on every re-seed). An update is a full replace:
-    every metadata field is overwritten and the cases and solutions are swapped
-    wholesale (delete-then-insert), because a problem file is always the complete
-    desired state, never a patch.
+    every metadata field is overwritten and the languages, cases and solutions are
+    swapped wholesale (delete-then-insert), because a problem file is always the
+    complete desired state, never a patch. Deleting a solution cascades to its
+    per-language code in the database.
 
     **Does not commit.** The caller owns the transaction, so `app.cli seed` can load
     a whole directory atomically: either every file lands or none does. All
@@ -280,7 +296,7 @@ async def upsert_problem(session: AsyncSession, data: ProblemFile) -> tuple[Prob
         The problem row and `"created"` or `"updated"`.
     """
     slug = data.slug or slugify(data.title)
-    fields = data.model_dump(exclude={"slug", "test_cases", "solutions"})
+    fields = data.model_dump(exclude={"slug", "languages", "test_cases", "solutions"})
     problem = await session.scalar(select(Problem).where(Problem.slug == slug))
     if problem is None:
         problem = Problem(slug=slug, **fields)
@@ -290,12 +306,19 @@ async def upsert_problem(session: AsyncSession, data: ProblemFile) -> tuple[Prob
     else:
         for field, value in fields.items():
             setattr(problem, field, value)
+        await session.execute(
+            delete(ProblemLanguage).where(ProblemLanguage.problem_id == problem.id))
         await session.execute(delete(TestCase).where(TestCase.problem_id == problem.id))
         await session.execute(delete(Solution).where(Solution.problem_id == problem.id))
         action = "updated"
     session.add_all(
         TestCase(problem_id=problem.id, **tc.model_dump()) for tc in data.test_cases)
     session.add_all(
-        Solution(problem_id=problem.id, **sol.model_dump()) for sol in data.solutions)
+        ProblemLanguage(problem_id=problem.id, ordinal=i, **v.model_dump())
+        for i, v in enumerate(data.languages))
+    session.add_all(
+        Solution(problem_id=problem.id, **sol.model_dump(exclude={"code"}),
+                 codes=[SolutionCode(language=lang, code=code) for lang, code in sol.code.items()])
+        for sol in data.solutions)
     await session.flush()
     return problem, action

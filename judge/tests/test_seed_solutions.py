@@ -89,38 +89,56 @@ def _seed_problems():
     return [json.loads(path.read_text()) for path in sorted(SEED_DIR.glob("*.json"))]
 
 
+def _variants(problem):
+    """The problem's languages, default first (DESIGN.md §7.1). A file in the
+    single-language form keeps its fields at the top level; read it the way
+    `ProblemIn` lifts it, as one variant."""
+    if "languages" in problem:
+        return problem["languages"]
+    return [{"language": problem.get("language", "python"),
+             **{k: problem[k] for k in ("function_name", "class_name", "params", "return_type")
+                if k in problem}}]
+
+
 def _solution_cases():
-    # mysql problems need the real SQL sandbox image + a live database (see
-    # module docstring) — mark just those parametrizations `docker` so the
-    # fast `pytest -m "not docker"` path stays Docker-free for every other
-    # problem, same convention as the rest of this repo's Docker-gated tests.
-    return [
-        pytest.param(problem, solution, id=f"{problem['slug']}-{solution.get('ordinal', i)}",
-                     marks=pytest.mark.docker if problem.get("language") in _CONTAINER_LANGUAGES else ())
-        for problem in _seed_problems()
-        for i, solution in enumerate(problem.get("solutions", []))
-    ]
+    # One parametrization per (solution, language it has code for), so every
+    # language of every problem is proven by a real harness run. Languages judged
+    # in their real sandbox image need Docker, so just those parametrizations are
+    # marked `docker` and the fast `pytest -m "not docker"` path stays Docker-free,
+    # the same convention as the rest of this repo's Docker-gated tests.
+    params = []
+    for problem in _seed_problems():
+        variants = {v["language"]: v for v in _variants(problem)}
+        only = next(iter(variants))
+        for i, solution in enumerate(problem.get("solutions", [])):
+            codes = solution["code"] if isinstance(solution["code"], dict) else {only: solution["code"]}
+            for language, code in codes.items():
+                params.append(pytest.param(
+                    problem, variants[language], solution["title"], code,
+                    id=f"{problem['slug']}-{solution.get('ordinal', i)}-{language}",
+                    marks=pytest.mark.docker if language in _CONTAINER_LANGUAGES else ()))
+    return params
 
 
-@pytest.mark.parametrize("problem,solution", _solution_cases())
-def test_seed_solution_passes_its_own_test_cases(problem, solution):
+@pytest.mark.parametrize("problem,variant,title,code", _solution_cases())
+def test_seed_solution_passes_its_own_test_cases(problem, variant, title, code):
     payload = {
         "kind": problem.get("kind", "function"),
-        "function_name": problem.get("function_name"),
-        "class_name": problem.get("class_name"),
-        "user_code": solution["code"],
+        "function_name": variant.get("function_name"),
+        "class_name": variant.get("class_name"),
+        "user_code": code,
         "test_cases": _cases(problem),
         "comparison": problem.get("comparison", {"mode": "exact"}),
         "time_limit_ms": problem.get("time_limit_ms", 2000),
         "memory_limit_mb": problem.get("memory_limit_mb", 256),
-        "params": problem.get("params", []),
-        "return_type": problem.get("return_type", ""),
+        "params": variant.get("params", []),
+        "return_type": variant.get("return_type", ""),
     }
-    results = _run_harness(payload, language=problem.get("language", "python"))
+    results = _run_harness(payload, language=variant["language"])
     failures = [r for r in results if r["status"] != "passed"]
     assert not failures, (
         f"{len(failures)}/{len(results)} case(s) failed for "
-        f"{problem['slug']} ({solution['title']}):\n"
+        f"{problem['slug']} ({title}, {variant['language']}):\n"
         + "\n".join(
             f"  case {r['test_case_id']}: {r['status']} "
             f"(output={r['output']!r}, error={r['error']!r})"

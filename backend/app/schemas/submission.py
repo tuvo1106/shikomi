@@ -12,15 +12,22 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.config import get_settings
+from app.schemas.problem import Language
 
 _MAX_CODE = get_settings().max_code_bytes
 
 
 class SubmissionCreate(BaseModel):
-    """The Run/Submit request body: which problem, and the code to judge."""
+    """The Run/Submit request body: which problem, the code, and its language.
+
+    `language` must be one of the problem's languages. Omitting it means the
+    problem's default (its first language), which is what every client sent
+    before problems had several languages, so those requests keep working.
+    """
 
     problem_id: uuid.UUID
     code: str = Field(min_length=1, max_length=_MAX_CODE)
+    language: Language | None = None
 
 
 class SubmissionAccepted(BaseModel):
@@ -44,11 +51,13 @@ class SubmissionOut(BaseModel):
     problem_id: uuid.UUID
     status: str
     code: str
+    language: str
     verdict_detail: Any | None = None
     runtime_ms: float | None = None
     is_run: bool
     created_at: datetime
-    # % of accepted submissions this one is at least as fast as (accepted only).
+    # % of accepted submissions *in the same language* this one is at least as
+    # fast as (accepted only).
     runtime_percentile: float | None = None
 
 
@@ -59,6 +68,7 @@ class SubmissionListItem(BaseModel):
 
     id: uuid.UUID
     status: str
+    language: str
     runtime_ms: float | None = None
     created_at: datetime
 
@@ -72,7 +82,8 @@ class SubmissionListResponse(BaseModel):
 
 class RuntimeDistribution(BaseModel):
     """The runtime histogram for the success modal: `buckets` are counts per
-    equal-width bin from `lo`..`hi`, `total` is the sample size."""
+    equal-width bin from `lo`..`hi`, `total` is the sample size. Only accepted
+    submissions in the submission's own language are counted."""
 
     buckets: list[int]  # count of accepted submissions per runtime bin, low → high
     lo: float

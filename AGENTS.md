@@ -118,6 +118,12 @@ and `playwright`.
   scaling point. (DESIGN.md §1)
 - **Function-call judging**, not stdin/stdout: the harness imports the user's
   module and calls the named function with JSON args. (DESIGN.md §5, §12)
+- **A problem is offered in one or more languages**
+  ([ADR-0005](docs/adr/0005-multi-language-problems.md)): language-specific fields live
+  in `problem_languages` (default = ordinal 0), solution code in `solution_codes`, and
+  every submission records its `language`. Statement, `kind`, `comparison`, limits and
+  test cases are shared. The kind/language rules can't be `CHECK`s (they span tables),
+  so `ProblemIn` checks them per variant; the seed CLI is the only writer.
 - **Test-case authoring**: each problem should have ~10 small edge-case tests
   plus **1–2 large hidden cases near the constraint max**, so runtimes are
   meaningful/stable and O(n²) solutions are caught. Submission runtime is the
@@ -311,6 +317,20 @@ and `playwright`.
   dropdown and leaves it open (pressing the avatar blurs the editor, which cancels
   the suggest widget), so the honest options were a synthetic stand-in or no test.
 
+- **A Python variant must return lists, not tuples, where `expected` has arrays.**
+  The Python harness compares with `==`, and `(1, 6) != [1, 6]`, so a correct answer
+  built from tuples fails every case as `wrong_answer` even though its printed output
+  looks identical to the expected one. Rust tuples and JS arrays serialize to arrays, so
+  a shared case set is only language-neutral if each variant returns the natural JSON
+  shape (`merge-booking-windows` declares `list[list[int]]` for this reason).
+- **Runtime stats are per language; solved status isn't.** "Beats X%" and the histogram
+  filter on `submissions.language` (and the percentile cache key includes it); pooling
+  would let every Rust run beat every Python one. `user_statuses` counts an accepted
+  submission in any language.
+- **Drafts are keyed `code:<slug>:<language>`.** The bare `code:<slug>` key is a
+  pre-multi-language draft; the workspace moves it to the default language on first
+  read. The E2E helper `openProblemWithCode` seeds the per-language key.
+
 ## Deferred / TODO
 
 Open work only. Shipped work is recorded in [CHANGELOG.md](CHANGELOG.md); when a
@@ -354,6 +374,12 @@ slice ships, delete its entry here.
   `fork`/`exec` feel), and trim the ~1.1GB image (a `rustup --profile minimal`
   build on `debian:slim`). A dedicated `compile_error` verdict would suit every
   language at once, not just Rust.
+
+- **Multi-language follow-ups** ([ADR-0005](docs/adr/0005-multi-language-problems.md)):
+  per-language `time_limit_ms` (limits are shared today, so they're calibrated to the
+  slowest language's reference solution); a language filter and language chips in the
+  problem list (`ProblemListItem.languages` is already returned); and offering more of
+  the bundled starters in several languages (only `merge-booking-windows` is, today).
 
 - **Auth roadmap:** revisit session strategy (currently JWT-in-memory access +
   httpOnly refresh cookie — consider server-side sessions / cookie-based access

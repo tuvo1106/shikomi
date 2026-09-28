@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import Editor from '@monaco-editor/react'
@@ -11,7 +11,8 @@ import { RotateCcw } from 'lucide-react'
 import { useTheme } from '../../lib/theme'
 import { useMediaQuery } from '../../lib/useMediaQuery'
 import { api, HttpError } from '../../api/client'
-import type { Language, ProblemDetail, Submission } from '../../api/types'
+import type { Language, LanguageVariant, ProblemDetail, Submission } from '../../api/types'
+import { LANGUAGE_LABEL, MONACO_LANGUAGE } from '../../lib/languages'
 import { DifficultyBadge } from '../../components/badges'
 import { isTerminal, nextPollDelay, POLL_DEADLINE_MS } from '../../lib/verdict'
 import { CARD, HandleX, HandleY, LeftTab } from './ui'
@@ -22,20 +23,35 @@ import { Solutions } from './Solutions'
 import { Submissions } from './Submissions'
 import { SuccessModal } from './SuccessModal'
 import { ResultsBody } from './Results'
+import { LanguageSwitcher } from './LanguageSwitcher'
 
-// Monaco's built-in language id and the header's human label, per problem
-// `language` (DESIGN.md §13) — one place to add another language later.
-const MONACO_LANGUAGE: Record<Language, string> = {
-  python: 'python',
-  js: 'javascript',
-  rust: 'rust',
-  mysql: 'sql',
+/** localStorage key of a problem's draft in one language. */
+const draftKey = (slug: string, language: Language) => `code:${slug}:${language}`
+/** localStorage key remembering which language a problem was last open in. */
+const languageKey = (slug: string) => `lang:${slug}`
+
+/**
+ * The saved draft for `language`, or null. Drafts saved before problems had
+ * several languages live under the bare `code:<slug>` key; that draft belongs to
+ * the default language, so it's moved to the per-language key the first time it's
+ * read (the E2E specs also seed that bare key).
+ */
+function readDraft(problem: ProblemDetail, language: Language): string | null {
+  const key = draftKey(problem.slug, language)
+  const legacyKey = `code:${problem.slug}`
+  const legacy = localStorage.getItem(legacyKey)
+  if (legacy !== null && language === problem.languages[0].language && localStorage.getItem(key) === null) {
+    localStorage.setItem(key, legacy)
+    localStorage.removeItem(legacyKey)
+  }
+  return localStorage.getItem(key)
 }
-const LANGUAGE_LABEL: Record<Language, string> = {
-  python: 'Python3',
-  js: 'JavaScript',
-  rust: 'Rust',
-  mysql: 'MySQL',
+
+/** The language to open in: the one last used on this problem if it still
+ * offers it, else the problem's default (its first language). */
+function initialLanguage(problem: ProblemDetail): Language {
+  const saved = localStorage.getItem(languageKey(problem.slug))
+  return problem.languages.find((v) => v.language === saved)?.language ?? problem.languages[0].language
 }
 
 /**
@@ -45,7 +61,12 @@ const LANGUAGE_LABEL: Record<Language, string> = {
  *
  * Two behaviors worth knowing:
  * - **Draft persistence**: the editor's code is mirrored to `localStorage` per
- *   slug, so a refresh or navigating away doesn't lose work (and E2E seeds it).
+ *   slug *and language*, so a refresh, navigating away, or switching languages
+ *   never loses work (and E2E seeds it).
+ * - **Languages**: a problem offers one or more languages
+ *   (docs/adr/0005-multi-language-problems.md). With several, the editor header
+ *   gets a switcher; each language keeps its own draft, and Run/Submit send the
+ *   selected one.
  * - **Verdict polling**: submitting returns an id; the query below re-fetches on
  *   an interval until the status is terminal (see `refetchInterval`), which is how
  *   an async verdict shows up without websockets.
@@ -72,6 +93,7 @@ function ProblemWorkspace() {
   })
 
   const [code, setCode] = useState('')
+  const [language, setLanguage] = useState<Language | null>(null)
   const [submissionId, setSubmissionId] = useState<string | null>(null)
   const [starting, setStarting] = useState(false)
   const [pollTimedOut, setPollTimedOut] = useState(false)
@@ -82,16 +104,51 @@ function ProblemWorkspace() {
   const [showSchema, setShowSchema] = useState(false)
   const queryClient = useQueryClient()
 
+  // The selected language's variant. Falls back to the default so a render
+  // before the effect below has picked a language still has one to show.
+  const variant: LanguageVariant | undefined =
+    problem?.languages.find((v) => v.language === language) ?? problem?.languages[0]
+  const multiLanguage = (problem?.languages.length ?? 0) > 1
+
   useEffect(() => {
     if (!problem) return
-    setCode(localStorage.getItem(`code:${problem.slug}`) ?? problem.starter_code)
+    const lang = initialLanguage(problem)
+    const v = problem.languages.find((l) => l.language === lang)!
+    setLanguage(lang)
+    setCode(readDraft(problem, lang) ?? v.starter_code)
   }, [problem])
 
   function onCodeChange(value: string | undefined) {
     const next = value ?? ''
     setCode(next)
-    if (problem) localStorage.setItem(`code:${problem.slug}`, next)
+    if (problem && variant) localStorage.setItem(draftKey(problem.slug, variant.language), next)
   }
+
+  /** Switch the editor to `next`, bringing up that language's own draft. The
+   * current draft is already saved (every edit is), so nothing is lost. */
+  function switchLanguage(next: Language) {
+    if (!problem || next === variant?.language) return
+    const v = problem.languages.find((l) => l.language === next)
+    if (!v) return
+    setLanguage(next)
+    setCode(readDraft(problem, next) ?? v.starter_code)
+    localStorage.setItem(languageKey(problem.slug), next)
+  }
+
+  /** Which languages hold a draft that differs from their starter code, for the
+   * switcher's "edited" dots. Read from storage because only the current
+   * language's code is in state; `code` in the deps re-reads after every edit. */
+  const edited = useMemo(() => {
+    if (!problem) return new Set<Language>()
+    return new Set(
+      problem.languages
+        .filter((v) => {
+          const draft = v.language === variant?.language ? code : readDraft(problem, v.language)
+          return draft !== null && draft !== v.starter_code
+        })
+        .map((v) => v.language),
+    )
+  }, [problem, variant?.language, code])
 
   // Poll the active submission every second until its status is terminal, then
   // stop (returning false from refetchInterval halts polling). `enabled` keeps it
@@ -144,7 +201,11 @@ function ProblemWorkspace() {
     setSubmissionId(null)
     pollStartedAt.current = Date.now()
     try {
-      const res = await api.post<{ id: string }>(path, { problem_id: problem.id, code })
+      const res = await api.post<{ id: string }>(path, {
+        problem_id: problem.id,
+        code,
+        language: variant?.language,
+      })
       setSubmissionId(res.id)
     } catch (e) {
       setActionError(e instanceof HttpError ? e.message : 'Failed to submit.')
@@ -153,21 +214,28 @@ function ProblemWorkspace() {
     }
   }
 
+  /** Reset only the current language; other languages' drafts are untouched. */
   function resetCode() {
-    if (!problem) return
-    setCode(problem.starter_code)
-    localStorage.removeItem(`code:${problem.slug}`)
+    if (!problem || !variant) return
+    setCode(variant.starter_code)
+    localStorage.removeItem(draftKey(problem.slug, variant.language))
   }
 
-  function loadCode(c: string) {
+  /** Load code (a solution, a past submission) into `into`'s editor, switching
+   * to that language first when it isn't the current one. */
+  function loadCode(c: string, into: Language) {
     if (!problem) return
-    const next = withReferenceComment(c, problem.starter_code)
+    const v = problem.languages.find((l) => l.language === into)
+    if (!v) return
+    const next = withReferenceComment(c, v.starter_code)
+    setLanguage(into)
     setCode(next)
-    localStorage.setItem(`code:${problem.slug}`, next)
+    localStorage.setItem(draftKey(problem.slug, into), next)
+    localStorage.setItem(languageKey(problem.slug), into)
   }
 
   if (isLoading) return <div className="p-6 text-sm text-zinc-500">Loading…</div>
-  if (isError || !problem) return <div className="p-6 text-sm text-rose-400 light:text-rose-600">Problem not found.</div>
+  if (isError || !problem || !variant) return <div className="p-6 text-sm text-rose-400 light:text-rose-600">Problem not found.</div>
 
   return (
     <div className="h-[calc(100vh-3.5rem)] p-2 sm:p-3">
@@ -212,6 +280,24 @@ function ProblemWorkspace() {
                       {problem.statement_md}
                     </ReactMarkdown>
                   </article>
+                  {/* The statement is shared by every language; this is the one
+                      language-specific addendum ("use i64", …), shown for the
+                      language in the editor. */}
+                  {variant.note_md && (
+                    <aside
+                      aria-label={`${LANGUAGE_LABEL[variant.language]} note`}
+                      className="rounded-r border-l-2 border-indigo-500 bg-zinc-900/60 px-3 py-2 text-sm"
+                    >
+                      <div className="mb-0.5 text-[11px] font-semibold uppercase tracking-wide text-indigo-400 light:text-indigo-600">
+                        {LANGUAGE_LABEL[variant.language]} note
+                      </div>
+                      <div className={`prose prose-sm max-w-none ${proseInvert}`}>
+                        <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>
+                          {variant.note_md}
+                        </ReactMarkdown>
+                      </div>
+                    </aside>
+                  )}
                   {problem.kind === 'sql' ? (
                     // The statement above already shows a worked example (schema +
                     // input/result tables, the usual shape of a SQL problem
@@ -253,7 +339,7 @@ function ProblemWorkspace() {
                         <div className="space-y-1 rounded border border-zinc-800 bg-zinc-900/40 p-2 font-mono text-xs">
                           <div>
                             <span className="text-zinc-500">Input: </span>
-                            <span className="text-zinc-300">{formatInput(sc.input, problem.params, problem.kind)}</span>
+                            <span className="text-zinc-300">{formatInput(sc.input, variant.params, problem.kind)}</span>
                           </div>
                           <div>
                             <span className="text-zinc-500">Output: </span>
@@ -262,7 +348,7 @@ function ProblemWorkspace() {
                           {/* A TreeNode/ListNode/GraphNode case's arrays above are
                               the judge's wire format, not something you can read a
                               shape out of — the diagram is the shape. */}
-                          <SampleDiagrams problem={problem} sample={sc} />
+                          <SampleDiagrams problem={problem} variant={variant} sample={sc} />
                         </div>
                       </div>
                     ))
@@ -290,11 +376,13 @@ function ProblemWorkspace() {
                 <Solutions
                   slug={problem.slug}
                   solved={problem.user_status === 'solved'}
-                  language={problem.language}
+                  language={variant.language}
+                  languages={problem.languages.map((v) => v.language)}
                   onLoadCode={loadCode}
+                  onSwitchLanguage={switchLanguage}
                 />
               ) : (
-                <Submissions slug={problem.slug} language={problem.language} onLoadCode={loadCode} />
+                <Submissions slug={problem.slug} multiLanguage={multiLanguage} onLoadCode={loadCode} />
               )}
             </div>
           </section>
@@ -312,9 +400,21 @@ function ProblemWorkspace() {
                   z-40). Don't move this up to `<main>` — that would trap `Modal`'s z-50
                   below the bar too. */}
               <section className={`${CARD} isolate`}>
-                <header className="flex items-center justify-between border-b border-zinc-800 px-3 py-1.5 text-xs">
-                  <span className="text-zinc-500">{LANGUAGE_LABEL[problem.language]}</span>
-                  <div className="flex items-center gap-2">
+                {/* Wraps: with a language switcher, the header can outgrow a phone's
+                    width, and the card clips overflow (Submit would be cut off). */}
+                <header className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1.5 border-b border-zinc-800 px-3 py-1.5 text-xs">
+                  {multiLanguage ? (
+                    <LanguageSwitcher
+                      languages={problem.languages.map((v) => v.language)}
+                      value={variant.language}
+                      edited={edited}
+                      disabled={judging}
+                      onChange={switchLanguage}
+                    />
+                  ) : (
+                    <span className="text-zinc-500">{LANGUAGE_LABEL[variant.language]}</span>
+                  )}
+                  <div className="ml-auto flex items-center gap-2">
                     <button
                       onClick={resetCode}
                       title="Reset to starter code"
@@ -341,7 +441,7 @@ function ProblemWorkspace() {
                 <div className="min-h-0 flex-1 py-2">
                   <Editor
                     height="100%"
-                    language={MONACO_LANGUAGE[problem.language]}
+                    language={MONACO_LANGUAGE[variant.language]}
                     theme={theme === 'dark' ? 'vs-dark' : 'light'}
                     value={code}
                     onChange={onCodeChange}
@@ -387,6 +487,7 @@ function ProblemWorkspace() {
         <SuccessModal
           submission={modalSub}
           problemSlug={problem.slug}
+          multiLanguage={multiLanguage}
           onClose={() => setModalSub(null)}
           onViewSubmissions={() => {
             setLeftTab('submissions')

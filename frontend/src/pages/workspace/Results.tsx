@@ -2,6 +2,7 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import type { CaseResult, Kind, ParamSpec, ProblemDetail, SampleCase, Submission } from '../../api/types'
 import { STATUS_LABEL } from '../../lib/verdict'
+import { LANGUAGE_LABEL } from '../../lib/languages'
 import { formatSqlSeed, isOperationsInput } from './format'
 import { SqlRowsTable } from './SqlRowsTable'
 import { CodeBlock } from './CodeBlock'
@@ -51,6 +52,10 @@ function Verdict({ submission, problem }: { submission: Submission; problem: Pro
   const vd = submission.verdict_detail
   const sampleByOrdinal = new Map(problem.sample_cases.map((s) => [s.ordinal, s]))
   const current = results[active]
+  // Judged as its own language, whatever the editor shows now: the params are
+  // labeled the way that language's signature names them.
+  const variant = problem.languages.find((v) => v.language === submission.language) ?? problem.languages[0]
+  const multiLanguage = problem.languages.length > 1
 
   return (
     <div className="space-y-3">
@@ -64,6 +69,11 @@ function Verdict({ submission, problem }: { submission: Submission; problem: Pro
         >
           {STATUS_LABEL[submission.status] ?? submission.status}
         </span>
+        {multiLanguage && (
+          <span className="rounded-full border border-zinc-800 px-2 py-0.5 text-xs text-zinc-400">
+            {LANGUAGE_LABEL[submission.language]}
+          </span>
+        )}
         {vd && (
           <span className="text-zinc-500">
             {vd.passed}/{vd.total} passed
@@ -99,7 +109,7 @@ function Verdict({ submission, problem }: { submission: Submission; problem: Pro
             <CaseDetail
               result={current}
               sample={sampleByOrdinal.get(current.test_case_id)}
-              params={problem.params}
+              params={variant.params}
               kind={problem.kind}
             />
           )}

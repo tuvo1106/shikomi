@@ -270,11 +270,11 @@ async def test_runtime_percentile_is_cached(session_factory, queue, make_problem
     monkeypatch.setattr(AsyncSession, "scalar", counting_scalar)
 
     async with session_factory() as s:
-        first = await submission_service.runtime_percentile(s, queue, uuid.UUID(pid), 20.0)
+        first = await submission_service.runtime_percentile(s, queue, uuid.UUID(pid), "python", 20.0)
     assert calls == 2  # cache miss: both COUNT(*) scans ran
 
     async with session_factory() as s:
-        second = await submission_service.runtime_percentile(s, queue, uuid.UUID(pid), 20.0)
+        second = await submission_service.runtime_percentile(s, queue, uuid.UUID(pid), "python", 20.0)
     assert second == first
     assert calls == 2  # cache hit: no additional scans
 
@@ -330,9 +330,81 @@ async def test_list_user_submissions(client, make_problem, make_user, make_submi
 
 
 def test_stats_index_exists():
-    """The (problem_id, is_run, status) index the stats queries rely on."""
+    """The (problem_id, language, is_run, status) index the stats queries rely on."""
     index_columns = {tuple(c.name for c in idx.columns) for idx in Submission.__table__.indexes}
-    assert ("problem_id", "is_run", "status") in index_columns
+    assert ("problem_id", "language", "is_run", "status") in index_columns
+
+
+# --- multi-language problems (docs/adr/0005-multi-language-problems.md) --------
+
+async def _submitted_language(session_factory, sid):
+    async with session_factory() as s:
+        return (await s.get(Submission, uuid.UUID(sid))).language
+
+
+async def test_submit_defaults_to_the_problems_first_language(
+        client, session_factory, make_problem, make_user):
+    """A client that sends no language (every client before multi-language
+    problems) gets the problem's default: its first language."""
+    pid, _ = await make_problem(languages=("rust", "python"))
+    _, headers = await make_user()
+    r = await client.post(SUBMIT, headers=headers, json={"problem_id": pid, "code": CODE})
+    assert r.status_code == 202
+    assert await _submitted_language(session_factory, r.json()["id"]) == "rust"
+
+
+async def test_submit_records_the_chosen_language(
+        client, session_factory, make_problem, make_user):
+    pid, _ = await make_problem(languages=("python", "js", "rust"))
+    _, headers = await make_user()
+    r = await client.post(RUN, headers=headers,
+                          json={"problem_id": pid, "code": CODE, "language": "js"})
+    assert r.status_code == 202
+    assert await _submitted_language(session_factory, r.json()["id"]) == "js"
+    got = await client.get(f"/api/v1/submissions/{r.json()['id']}", headers=headers)
+    assert got.json()["language"] == "js"
+
+
+async def test_submit_rejects_a_language_the_problem_does_not_offer(
+        client, queue, make_problem, make_user):
+    pid, _ = await make_problem(languages=("python",))
+    _, headers = await make_user()
+    r = await client.post(SUBMIT, headers=headers,
+                          json={"problem_id": pid, "code": CODE, "language": "rust"})
+    assert r.status_code == 400
+    assert r.json()["code"] == "UNSUPPORTED_LANGUAGE"
+    assert not queue.locks  # rejected before taking the in-flight lock
+
+
+async def test_runtime_percentile_compares_within_one_language(
+        client, make_problem, make_user, make_submission):
+    """A 1ms Rust run and a 40ms Python run are both the fastest *in their
+    language*; pooling them would rank the languages, not the solutions."""
+    pid, _ = await make_problem(languages=("python", "rust"))
+    user, headers = await make_user()
+    await make_submission(user["id"], pid, runtime_ms=50.0, language="python")
+    py_fast = await make_submission(user["id"], pid, runtime_ms=40.0, language="python")
+    await make_submission(user["id"], pid, runtime_ms=1.0, language="rust")
+    rust_slow = await make_submission(user["id"], pid, runtime_ms=2.0, language="rust")
+
+    r = await client.get(f"/api/v1/submissions/{py_fast}", headers=headers)
+    assert r.json()["runtime_percentile"] == 100.0  # fastest Python, despite the Rust runs
+    r = await client.get(f"/api/v1/submissions/{rust_slow}", headers=headers)
+    assert r.json()["runtime_percentile"] == 0.0
+
+    d = (await client.get(f"/api/v1/submissions/{rust_slow}/distribution",
+                          headers=headers)).json()
+    assert (d["total"], d["lo"], d["hi"]) == (2, 1.0, 2.0)
+
+
+async def test_history_lists_each_submissions_language(
+        client, make_problem, make_user, make_submission):
+    pid, _ = await make_problem(languages=("python", "rust"))
+    user, headers = await make_user()
+    await make_submission(user["id"], pid, language="python")
+    await make_submission(user["id"], pid, language="rust")
+    items = (await client.get("/api/v1/problems/pair-sum/submissions", headers=headers)).json()
+    assert sorted(i["language"] for i in items["items"]) == ["python", "rust"]
 
 
 async def test_submit_is_rate_limited(client, queue, make_problem, make_user):

@@ -176,19 +176,39 @@ All tables have `id UUID PRIMARY KEY DEFAULT gen_random_uuid()`, `created_at tim
 | title             | text    | NOT NULL                                                     |
 | difficulty        | text    | `easy` \| `medium` \| `hard`                                 |
 | statement_md      | text    | Problem statement, Markdown                                  |
-| language          | text    | `"python"` (default), `"js"`, `"rust"`, or `"mysql"` (§13) — selects the harness/sandbox image (`judge/harness.py`, `judge/harness.js`, `judge/harness_rs/`, `judge/harness_sql.py`). A `CHECK` constraint enforces the value; `"js"` and `"rust"` only support `kind="function"`, no `ListNode`/`TreeNode`/`CyclicListNode`/`RandomListNode`/`GraphNode` `return_type`/param; `"mysql"` always pairs with `kind="sql"` (a second `CHECK`). |
-| kind              | text    | `"function"` (default), `"operations"` (design/class-replay — a cache, a state machine; §5.3), or `"sql"` (a query against a seeded schema; §13). A `CHECK` constraint enforces exactly one of `function_name`/`class_name` matching `kind` (neither for `"sql"`). |
-| function_name     | text    | NULL for `kind="operations"`/`"sql"`. e.g. `pair_sum`        |
-| class_name        | text    | NULL for `kind="function"`. The class the harness instantiates and replays method calls against for `kind="operations"`. |
-| starter_code      | text    | Shown in the editor, e.g. `def pair_sum(nums, target):\n    ...` |
-| params            | jsonb   | Ordered list: `[{"name": "nums", "type": "List[int]"}, ...]`. Types are display-only hints — **except** `"ListNode"`/`"TreeNode"`/`"CyclicListNode"`/`"RandomListNode"`/`"GraphNode"`/`"Iterator"` (and their `List[...]` forms), which also tell the harness to build that arg from its JSON encoding (§5.3). `"Iterator"` is decode-only — a constructor-arg type for `kind="operations"` problems, never a `return_type`. |
-| return_type       | text    | `""` (plain JSON return, default) or `"ListNode"`/`"TreeNode"`/`"CyclicListNode"`/`"RandomListNode"`/`"GraphNode"` — harness converts the returned node graph back to JSON before comparing (§5.3). |
+| kind              | text    | `"function"` (default), `"operations"` (design/class-replay — a cache, a state machine; §5.3), or `"sql"` (a query against a seeded schema; §13). Shared by every language, because it decides the shape of the (shared) test cases. `CHECK` on the value. |
 | comparison        | jsonb   | See §5.4. e.g. `{"mode": "exact"}`                           |
 | time_limit_ms     | int     | Per test case, default 2000                                  |
 | memory_limit_mb   | int     | Whole run, default 256                                       |
 | is_published      | boolean | default false; an unpublished problem is invisible to every API caller (a draft the operator can load without exposing) |
 | tags              | text[]  | e.g. `{array, hash-table}`                                   |
 | collections       | text[]  | Operator-curated set membership, e.g. `{gang-of-four}` — a problem can be in more than one. Free-form like `tags` (no enum); filterable via `?collection=` (§4.2). |
+
+Nothing language-specific lives on `problems`. A problem is offered in one or more
+languages, one `problem_languages` row each ([ADR-0005](docs/adr/0005-multi-language-problems.md)):
+the statement, `kind`, `comparison`, limits and test cases (plain JSON) are shared, and
+everything below is per language.
+
+#### `problem_languages`
+
+| Column        | Type  | Notes |
+| ------------- | ----- | ----- |
+| problem_id    | UUID  | FK → problems, ON DELETE CASCADE |
+| ordinal       | int   | Order in the switcher; **0 is the default** the workspace opens in and a submission without a language is judged as. UNIQUE (problem_id, ordinal) |
+| language      | text  | `"python"`, `"js"`, `"rust"`, or `"mysql"` (§13) — selects the harness/sandbox image. UNIQUE (problem_id, language); `CHECK` on the value |
+| starter_code  | text  | Shown in the editor, e.g. `def pair_sum(nums, target):\n    ...` |
+| function_name | text  | Set for `kind="function"`, NULL otherwise. Per language because conventions differ (`merge_bookings` / `mergeBookings`) |
+| class_name    | text  | Set for `kind="operations"`, NULL otherwise |
+| params        | jsonb | Ordered list: `[{"name": "nums", "type": "List[int]"}, ...]`. Types are display-only hints in this language — **except** `"ListNode"`/`"TreeNode"`/`"CyclicListNode"`/`"RandomListNode"`/`"GraphNode"`/`"Iterator"` (and their `List[...]` forms), which also tell the Python harness to build that arg from its JSON encoding (§5.3). `"Iterator"` is decode-only — a constructor-arg type for `kind="operations"` problems, never a `return_type`. Every language declares the same number of params, since the cases are positional |
+| return_type   | text  | `""` (plain JSON return, default) or `"ListNode"`/`"TreeNode"`/`"CyclicListNode"`/`"RandomListNode"`/`"GraphNode"` — the Python harness converts the returned node graph back to JSON before comparing (§5.3) |
+| note_md       | text  | A short language-specific addendum to the shared statement (e.g. "times don't fit in an `i32`"), default `''` |
+
+The rules tying a language to `kind` and `comparison` span both tables, so no `CHECK` can
+hold them; `ProblemIn` (§7.1) checks them for every variant, and the seed loader is the only
+writer: `"js"`/`"rust"` only support `kind="function"` with no node-typed params or return;
+`"mysql"` always pairs with `kind="sql"`; a `custom_validator` comparison needs Python to be
+the only language; exactly one of `function_name`/`class_name` matches `kind` (neither for
+`"sql"`); `memory_limit_mb` clears every language's floor (§13).
 
 ### 3.3 `test_cases`
 
@@ -211,11 +231,15 @@ Editorial solutions, authored in the problem's seed file. A problem has zero or 
 | title                   | text  | e.g. `Approach 1: Brute Force`                               |
 | intuition_md            | text  | Markdown: the idea behind the approach                       |
 | algorithm_md            | text  | Markdown: the step-by-step walkthrough; default `''`         |
-| code                    | text  | Reference implementation, rendered in a code viewer          |
 | time_complexity         | text  | LaTeX, e.g. `O(n)`                                           |
 | space_complexity        | text  | LaTeX, e.g. `O(n)`                                           |
 | time_complexity_reason  | text  | Markdown: why that bound holds; default `''`                 |
 | space_complexity_reason | text  | Markdown: why that bound holds; default `''`                 |
+
+The idea and its complexity are shared; the code is per language, in `solution_codes`
+(`solution_id` FK ON DELETE CASCADE, `language`, `code`; UNIQUE (solution_id, language)). A
+solution needn't cover every language the problem offers ("Rust only"), but every language
+must be covered by some solution, so the seed-solution tests (§10.1) prove each one.
 
 ### 3.5 `submissions`
 
@@ -224,11 +248,13 @@ Editorial solutions, authored in the problem's seed file. A problem has zero or 
 | user_id         | UUID   | FK → users                                                  |
 | problem_id      | UUID   | FK → problems                                               |
 | code            | text   | NOT NULL                                                    |
+| language        | text   | NOT NULL. Which of the problem's languages `code` is in; picks the `problem_languages` row that judges it, and scopes the runtime stats (§4.3) |
 | status          | text   | See lifecycle below                                         |
 | verdict_detail  | jsonb  | Per-test results, populated on completion. See §5.3.        |
 | runtime_ms      | float  | Total runtime summed across test cases (so large cases dominate; sub-millisecond matters), nullable |
 | is_run          | boolean| NOT NULL default false. True for "Run" (sample-only) executions; excluded from `user_status` and any future stats. |
 | INDEX           |        | (user_id, problem_id, created_at DESC)                      |
+| INDEX           |        | (problem_id, language, is_run, status) — the stats queries  |
 
 **Status lifecycle:** `pending` → `running` → one of:
 `accepted` | `wrong_answer` | `runtime_error` | `time_limit_exceeded` | `memory_limit_exceeded` | `output_limit_exceeded` | `judge_error`
@@ -362,15 +388,15 @@ sequenceDiagram
 
 | Method | Path               | Response | Notes |
 | ------ | ------------------ | -------- | ----- |
-| GET    | `/problems`        | `200 {items: [{id, slug, title, difficulty, tags, user_status}], total}` | Published only. Query params: `difficulty`, `tag`, `collection`, `search`, `status`, `page`, `page_size` (default 25). |
+| GET    | `/problems`        | `200 {items: [{id, slug, title, difficulty, tags, languages, user_status}], total}` | Published only. Query params: `difficulty`, `tag`, `collection`, `search`, `status`, `page`, `page_size` (default 25). |
 | GET    | `/problems/facets` | `200 {tags: [...], collections: [...]}` | Every distinct tag/collection across published problems, for the filter dropdowns (which can't be built from one page of results). |
-| GET    | `/problems/{slug}` | `200 {id, slug, title, difficulty, statement_md, starter_code, kind, language, function_name, class_name, params, return_type, tags, constraints, sample_cases: [{ordinal, input, expected}], has_solutions: bool, user_status}` | Published only (404 otherwise). Hidden test cases never leave the server. |
+| GET    | `/problems/{slug}` | `200 {id, slug, title, difficulty, statement_md, kind, languages: [{language, starter_code, function_name, class_name, params, return_type, note_md}], tags, constraints, sample_cases: [{ordinal, input, expected}], has_solutions: bool, user_status}` | Published only (404 otherwise). Hidden test cases never leave the server. `languages` is ordered, default first (§3.2). |
 | GET    | `/problems/{slug}/next` | `200 ProblemListItem` or `null` | The next problem worth opening after `slug`: the following one in list order (`title`, `id`), skipping problems the caller has **solved** (attempted ones stay eligible), wrapping to the start; `null` if nothing qualifies. 404 for an unknown/draft slug. Drives the accepted-submit modal's "Next problem" button. |
-| GET    | `/problems/{slug}/solutions` | `200 {items: [{id, ordinal, title, intuition_md, algorithm_md, code, time_complexity, space_complexity, time_complexity_reason, space_complexity_reason}]}` | Published problems only, open to every signed-in user. Separate endpoint so spoiler content is only fetched when the Solutions tab opens (§6.3). |
+| GET    | `/problems/{slug}/solutions` | `200 {items: [{id, ordinal, title, intuition_md, algorithm_md, code: {<language>: code, …}, time_complexity, space_complexity, time_complexity_reason, space_complexity_reason}]}` | Published problems only, open to every signed-in user. `code` covers the languages that approach was written in. Separate endpoint so spoiler content is only fetched when the Solutions tab opens (§6.3). |
 
 **`user_status`** (list and detail endpoints; all problem endpoints require auth): per-user problem state, derived from `submissions` — no separate table:
 
-- `solved` — user has ≥ 1 `accepted` submission for the problem
+- `solved` — user has ≥ 1 `accepted` submission for the problem, in any language
 - `attempted` — user has submissions but none accepted
 - `unsolved` — no submissions
 
@@ -380,9 +406,9 @@ Computed with a LEFT JOIN / lateral aggregate over `submissions` (excluding `is_
 
 | Method | Path                       | Body                          | Response | Notes |
 | ------ | -------------------------- | ----------------------------- | -------- | ----- |
-| POST   | `/submissions`             | `{problem_id, code}`          | `202 {id, status: "pending"}` | Enqueues judge job with `mode=submit`. Code ≤ 64 KB. Two throttles: (a) 1 in-flight submission per user per problem (429 `SUBMISSION_IN_FLIGHT`); (b) per-user rate limit 10/min (429 `RATE_LIMITED` + `Retry-After`). |
-| GET    | `/submissions/{id}`        | —                             | `200 {id, problem_id, status, code, verdict_detail, runtime_ms, is_run, created_at, …}` | Owner only (403 otherwise). Frontend polls this every 1s until terminal status. |
-| POST   | `/run`                     | `{problem_id, code}`          | `202 {id, status: "pending"}` | Same pipeline, `mode=run`: executes **sample cases only**, result stored with `is_run=true` flag, excluded from any future stats. Per-user rate limit 15/min (429 `RATE_LIMITED`); no in-flight lock. |
+| POST   | `/submissions`             | `{problem_id, code, language?}` | `202 {id, status: "pending"}` | Enqueues judge job with `mode=submit`. `language` must be one the problem offers (400 `UNSUPPORTED_LANGUAGE`); omitted means the problem's default. Code ≤ 64 KB. Two throttles: (a) 1 in-flight submission per user per problem (429 `SUBMISSION_IN_FLIGHT`); (b) per-user rate limit 10/min (429 `RATE_LIMITED` + `Retry-After`). |
+| GET    | `/submissions/{id}`        | —                             | `200 {id, problem_id, status, code, language, verdict_detail, runtime_ms, is_run, created_at, runtime_percentile}` | Owner only (403 otherwise). Frontend polls this every 1s until terminal status. `runtime_percentile` (accepted only) compares against accepted submissions **in the same language**: runtimes aren't comparable across languages. |
+| POST   | `/run`                     | `{problem_id, code, language?}` | `202 {id, status: "pending"}` | Same pipeline, `mode=run`: executes **sample cases only**, result stored with `is_run=true` flag, excluded from any future stats. Per-user rate limit 15/min (429 `RATE_LIMITED`); no in-flight lock. |
 
 ### 4.4 Problem authoring (CLI only)
 
@@ -420,7 +446,7 @@ sequenceDiagram
 
     Note over U,J: Submitting a solution — Kubernetes judge-as-Pod path
 
-    U->>W: POST /api/v1/submissions {problem_id, code}
+    U->>W: POST /api/v1/submissions {problem_id, code, language}
     W->>A: reverse-proxy /api/*
     A->>A: auth (JWT) · require_verified · rate limit
     A->>R: SET NX inflight:{user}:{problem} = submission id  (one in-flight per problem)
@@ -437,7 +463,7 @@ sequenceDiagram
     and Worker judges the submission
         R->>K: dequeue judge_submission(id, mode)
         K->>DB: UPDATE status = running
-        K->>DB: load problem + test cases
+        K->>DB: load problem, its variant for the language, test cases
         K->>J: create ConfigMap(payload) + locked-down Pod
         Note right of J: no network · read-only FS · cap-drop ALL<br/>non-root · mem/cpu limits · per-case SIGALRM
         activate J
@@ -725,17 +751,18 @@ The platform executes arbitrary user-submitted Python. This section consolidates
 
 ### 6.2 Submission UX
 
-1. User clicks Submit → POST `/submissions` → get id.
+1. User clicks Submit → POST `/submissions` with the editor's language → get id.
 2. Poll GET `/submissions/{id}` every 1s (TanStack Query `refetchInterval`), stop on terminal status. The stale-submission sweeper (§5.7) normally guarantees every row reaches a terminal status (`judge_error` within about six minutes at worst), and as a backstop the client stops polling after 7 minutes (`POLL_DEADLINE_MS`, just above that bound so a healthy backend always answers first) and shows "Judging is taking longer than expected" with Submit re-enabled, instead of a spinner nobody can resolve. The judging state lasts from the moment the POST returns an id until a terminal status arrives, *including* the gap before the first poll answers. Keying it off the polled status alone once let the pane flash its empty prompt and re-enable the buttons for one round trip, visible as a jitter on every Run/Submit.
 3. Render verdict: green "Accepted" with runtime, or "N/M test cases passed" with each failing case's input / expected / actual / stderr (sample cases show full detail; hidden cases show status only, per §5.3).
-4. Editor content persisted to `localStorage` per problem slug (no server-side drafts).
+4. Editor content persisted to `localStorage` per problem slug **and language** (`code:<slug>:<language>`; no server-side drafts). A draft saved under the older bare `code:<slug>` key is moved to the default language the first time it's read.
+5. **Languages.** A problem offered in several languages gets a segmented switcher in the editor header (a one-language problem keeps its plain label). Switching brings up that language's own draft, so nothing is lost; a dot marks each language whose draft differs from its starter code; Reset only resets the current language; the switcher is disabled while a verdict is pending. The last language used on a problem is remembered (`lang:<slug>`). The selected language's `note_md` shows under the statement, the verdict names the language it was judged in, the Submissions tab gains a Language column (loading a past submission switches to its language), and "Beats X%" names the language it compares against.
 
 ### 6.3 Solutions tab (soft gate)
 
 Solutions are always accessible but treated as spoilers:
 
 1. The Solutions tab shows a spoiler interstitial — "Viewing solutions before solving spoils the problem. Show anyway?" — with a confirm button. If `user_status == "solved"`, skip the interstitial entirely.
-2. Confirming fetches GET `/problems/{slug}/solutions` and renders approaches in order: title, complexity badges (`Time: O(n) · Space: O(n)`), intuition and algorithm (rendered Markdown), then the reference code in a read-only Monaco viewer with a copy button.
+2. Confirming fetches GET `/problems/{slug}/solutions` and renders approaches in order: title, complexity badges (`Time: O(n) · Space: O(n)`), intuition and algorithm (rendered Markdown), then the reference code **in the editor's language**. An approach with no code in that language is labeled with the languages it has ("Rust only") and offers to switch the editor to one of them, rather than showing another language's code unannounced.
 3. The confirmation is remembered per problem in `localStorage` so re-opening the tab doesn't re-prompt.
 4. Tab is hidden entirely when `has_solutions` is false.
 
@@ -846,7 +873,7 @@ One JSON file per problem, containing the problem, its test cases, and its solut
 
 Before loading, run the solutions through the real harness: `SEED_DIR=<path> pytest judge/tests/test_seed_solutions.py` (from the repo root) judges every solution in the directory against *every* one of its problem's test cases, so a wrong reference solution or a mis-set `comparison` mode fails there instead of on a user's first submit. The `.claude/skills/author-problem/` skill encodes the authoring process (test-case sizing calibrated against the slowest shipped solution's actual runtime; schema + harness validation before a problem is called done).
 
-The nine starters are written from scratch and cover every judge path: five `kind: "operations"` Python problems (`design-vending-machine`, `design-undo-redo-editor`, `design-price-feed`, `design-b-tree`, `design-lazy-segment-tree`), one function problem per language (`calm-stretch` in Python, `curry-without-crosstalk` in JavaScript, `merge-booking-windows` in Rust), and one SQL problem (`monthly-top-spender`). Use them as worked examples of the format. A minimal `kind: "function"` file looks like:
+The nine starters are written from scratch and cover every judge path: five `kind: "operations"` Python problems (`design-vending-machine`, `design-undo-redo-editor`, `design-price-feed`, `design-b-tree`, `design-lazy-segment-tree`), one function problem per language (`calm-stretch` in Python, `curry-without-crosstalk` in JavaScript, and `merge-booking-windows`, which is offered in Python, JavaScript **and** Rust as the multi-language example), and one SQL problem (`monthly-top-spender`). Use them as worked examples of the format. A minimal `kind: "function"` file looks like:
 
 ```json
 {
@@ -880,6 +907,31 @@ The nine starters are written from scratch and cover every judge path: five `kin
 ```
 
 Optional fields: `"language"` (`"python"` default, `"js"`, `"rust"`, or `"mysql"` — §13), `"kind"` (`"function"` default, `"operations"`, `"sql"`), `"class_name"` (for `"operations"`), `"return_type"` (a node codec, §5.3), `"constraints"` (a list of Markdown bullets), `"collections"` (operator-curated sets, filterable in the UI).
+
+**Several languages.** The file above is the one-language shorthand: its `language`, `function_name`, `class_name`, `starter_code`, `params` and `return_type` sit at the top level, and `ProblemIn` lifts them into a one-element `languages` list. To offer a problem in several languages, list them instead (default first), and give each solution's `code` as a map; a solution may cover only some languages, but every language needs at least one solution:
+
+```json
+{
+  "title": "Pair Sum",
+  "difficulty": "easy",
+  "statement_md": "…shared by every language…",
+  "languages": [
+    {"language": "python", "function_name": "pair_sum",
+     "starter_code": "def pair_sum(nums: list[int], target: int) -> list[int]:\n    ...",
+     "params": [{"name": "nums", "type": "list[int]"}, {"name": "target", "type": "int"}]},
+    {"language": "rust", "function_name": "pair_sum",
+     "starter_code": "fn pair_sum(nums: Vec<i64>, target: i64) -> Vec<usize> {\n    todo!()\n}\n",
+     "params": [{"name": "nums", "type": "Vec<i64>"}, {"name": "target", "type": "i64"}],
+     "note_md": "Values can exceed an `i32`."}
+  ],
+  "test_cases": ["…shared…"],
+  "solutions": [{"ordinal": 0, "title": "Hash Map", "intuition_md": "…",
+                 "code": {"python": "def pair_sum(…): …", "rust": "fn pair_sum(…) { … }"},
+                 "time_complexity": "O(n)", "space_complexity": "O(n)"}]
+}
+```
+
+Mixing the two forms is an error. Every language is checked against the shared `kind`, `comparison`, limits and judge budget (§3.2), and must declare the same number of params, since the cases are positional. Write statements in language-neutral terms (`n bookings`, not `bookings.len()`) and put anything language-specific in that language's `note_md`.
 
 **Content and rights.** Shikomi ships no third-party problem content. Whatever an operator loads is theirs to have the rights to; the bundled starters are original to this project and MIT-licensed with the code.
 
@@ -1013,7 +1065,7 @@ Every PR runs, as separate jobs: lint (ruff + oxlint), backend unit/API tests wi
 
 ## 11. Status & roadmap
 
-**Shipped:** the judge (Python, JavaScript, Rust, SQL; function, operations and SQL kinds; node codecs), accounts with verified email, hardened auth (rate limit, lockout, password policy, breached-password screening, anti-enumeration, audit log, JWT key rotation, opt-in TOTP two-factor), the workspace (Run/Submit, verdict detail, submission history, runtime distribution, editorial solutions, sample-case diagrams), the operator CLI, a production-shaped Docker Compose stack, and a Helm chart with a per-submission Pod sandbox and KEDA scale-to-zero autoscaling.
+**Shipped:** the judge (Python, JavaScript, Rust, SQL; function, operations and SQL kinds; node codecs; one problem offered in several languages), accounts with verified email, hardened auth (rate limit, lockout, password policy, breached-password screening, anti-enumeration, audit log, JWT key rotation, opt-in TOTP two-factor), the workspace (Run/Submit, verdict detail, submission history, runtime distribution, editorial solutions, sample-case diagrams), the operator CLI, a production-shaped Docker Compose stack, and a Helm chart with a per-submission Pod sandbox and KEDA scale-to-zero autoscaling.
 
 **Roadmap** (live list: `AGENTS.md`):
 - **Single-user mode** — an optional `AUTH_MODE=single` that auto-signs-in one local user, so a solo self-hoster can skip SMTP and registration entirely.
@@ -1032,6 +1084,7 @@ Every PR runs, as separate jobs: lint (ruff + oxlint), backend unit/API tests wi
 - **Design/class problems: `kind: "operations"`.** Beyond one top-level function called once per test case, the harness supports `kind: "operations"` — the user implements a *class*, and the judge instantiates it once per test case and replays a sequence of method calls, comparing the result list (e.g. `["VendingMachine","insertCoin","select"]` / `[[items],[25],["cola"]]` → `[null,"OK",…]`; `judge/harness.py`'s `_run_operations`). This reuses all sandboxing/timeouts/comparison unchanged — only the invocation branch and payload shape differ from function mode. `Problem.kind`/`class_name` (nullable `function_name`, a `CHECK` constraint enforcing exactly one matches `kind`) carry this through the schema/worker (§3.2); the workspace (`format.ts`'s `formatInput`, `Results.tsx`'s `CaseDetail`) renders the op sequence as `op(args) → result` per line instead of a raw JSON dump, gated on the problem's own `kind` rather than sniffing the input's shape (a function-kind problem with two array-typed params, e.g. `merge(intervals, newInterval)`, would otherwise false-positive as an op/args pair). Function-kind problems stay free functions (no cosmetic `class Solution` wrapper — Python doesn't need one). The constructor's own `params` also run through the `ListNode`/`TreeNode` codec (§5.3) — e.g. a `TreeIterator(root: TreeNode)` constructor; a later method call's own args/return value aren't decoded.
 - **The judge grades behaviour, not structure — which bounds what a design-pattern problem can be.** `kind: "operations"` compares the per-op result list and nothing else, so the harness cannot tell *how* a submission is organised. This is exactly right for ordinary design problems (a cache is a cache however you build it), but it's a real limit on design-pattern problems like the Gang of Four starters (authoring conventions: `.claude/skills/author-problem/authored-families.md`): `design-vending-machine` ships two solutions — conditional dispatch on a state flag, and the State pattern proper — and the judge accepts both identically, as it accepts any third structure a user invents. The teaching therefore lives in the statement and the model solutions, not in enforcement, and the tag/collection assert "this pattern is the good answer here", never "you used it". A structural assertion *is* technically reachable — a `custom_validator` receives the live `instance` (§5.3), so it could introspect `type(instance.state)` — and is deliberately **rejected**: it would grade conformance to one author's class layout, failing correct alternative implementations for no behavioural reason, and it's trivially satisfied by naming a class after the pattern without using it. The practical consequence for authoring: patterns with a **behavioural signature** an op-replay can observe (State, Command's undo/redo, Chain of Responsibility's fall-through, Strategy's swappable results, Iterator, Memento) make strong problems, while the purely organisational ones (Facade, Bridge, Template Method, Abstract Factory) have *no* trace in the output at all and are weak as judged problems no matter how they're written — seed those as single illustrative problems, and don't mistake a passing verdict for evidence the learner applied the pattern.
 - **…but structure can be made *behaviour*, by putting it in the spec — which is what the from-scratch data-structure problems do.** The entry above rejects grading structure by *introspection* (a `custom_validator` reading `type(instance.state)`), and that stands. The "implement a B-tree / a lazy segment tree" family (conventions in `.claude/skills/author-problem/authored-families.md`) reaches the same goal from the other side: the shape is promoted into the **public API and the statement**, so the class exposes `height()`, `level_order()`, `serialize()` or `leaves()`, and the harness compares those return values like any others. Nothing about the submission's internals is inspected — a `bisect`-backed sorted list simply has no level order to report. The distinction that keeps the two rules consistent is *whose* convention is being graded: introspection grades conformance to **one author's class layout**, which a correct alternative implementation can fail for no behavioural reason, whereas a spec'd observable grades conformance to **the statement**, which every correct implementation of the structure the statement describes satisfies. That only holds if the statement pins every tie-break the shape depends on (successor vs. predecessor on delete, proactive vs. reactive B-tree splitting, which side an odd split favours); an underspecified rule collapses this back into grading one author's choices. So: right tool for "implement *this* structure", still the wrong tool for "did you use *this* pattern" (GoF), where no such statement-level shape spec exists.
+- **A problem is offered in N languages, with a shared statement and shared test cases** ([ADR-0005](docs/adr/0005-multi-language-problems.md)). Language-specific fields (starter code, function/class name, params, return type, a statement note) moved from `problems` to one `problem_languages` row per language, and solution code to `solution_codes`; submissions record their language. The test cases already were language-neutral JSON, so one set proves every language. *Tradeoffs:* the kind/language rules can no longer be `CHECK` constraints (they span two tables) and are enforced in `ProblemIn` alone, which is safe only because the seed CLI is the one writer; a statement has to be written language-neutrally, with `note_md` for the exceptions; and every language needs a reference solution to be validated. *Rejected:* one problem per language (splits solved status, history and editorials across copies of the same problem), and a JSONB `languages` column on `problems` (no uniqueness per language, and the worker and stats would query into JSON). The legacy single-language file form still loads (lifted into `languages`), so operator problem directories keep working.
 - **arq, not Celery:** less machinery, async-native. If arq becomes limiting, the job payload (§5.1) is trivially portable.
 - **Polling, not WebSockets:** 1s polling on a single submission is negligible load and far simpler. Revisit if contests happen.
 - **Submissions are fully persisted** (code, verdict detail, runtime), which is what the workspace's Submissions tab and runtime distribution read.
@@ -1053,7 +1106,7 @@ Every PR runs, as separate jobs: lint (ruff + oxlint), backend unit/API tests wi
 
 ## 13. Multi-Language Judging
 
-**JavaScript.** Some problems are specifically about JavaScript (array/object method chains, `this` binding, closures, `debounce`/`throttle`) rather than being language-agnostic algorithms that happen to have a Python solution. `problems.language` (`"python"` default, or `"js"`) picks the harness/sandbox: `judge/harness.js` reuses the exact stdin-JSON-in/stdout-JSON-out protocol from `harness.py` (§5.3) — only the compile/exec core differs, via Node's `vm` module instead of CPython's `compile()`/`exec()` — and `judge/Dockerfile.js` (`node:20-slim`) gets the same lockdown posture as the Python image (§5.5), selected per submission by the language's sandbox profile (`app/sandbox.py`'s `profile_for`, one row per language: image, tmpfs size and `exec`, startup slack, function-mode-only, memory floor). Scope is deliberately **function-mode only**: no `kind: "operations"` and no `ListNode`/`TreeNode`/`CyclicListNode`/`RandomListNode`/`GraphNode` codecs on the JS path (`ProblemIn`'s `_function_mode_only_languages` validator enforces this at seed time) — a JS problem that is really about a class hand-rolls a driver function instead.
+**JavaScript.** Some problems are specifically about JavaScript (array/object method chains, `this` binding, closures, `debounce`/`throttle`) rather than being language-agnostic algorithms that happen to have a Python solution. A problem language (`problem_languages.language`, §3.2; `"python"` default, or `"js"`) picks the harness/sandbox: `judge/harness.js` reuses the exact stdin-JSON-in/stdout-JSON-out protocol from `harness.py` (§5.3) — only the compile/exec core differs, via Node's `vm` module instead of CPython's `compile()`/`exec()` — and `judge/Dockerfile.js` (`node:20-slim`) gets the same lockdown posture as the Python image (§5.5), selected per submission by the language's sandbox profile (`app/sandbox.py`'s `profile_for`, one row per language: image, tmpfs size and `exec`, startup slack, function-mode-only, memory floor). Scope is deliberately **function-mode only**: no `kind: "operations"` and no `ListNode`/`TreeNode`/`CyclicListNode`/`RandomListNode`/`GraphNode` codecs on the JS path (`ProblemIn`'s `_function_mode_only_languages` validator enforces this at seed time) — a JS problem that is really about a class hand-rolls a driver function instead.
 
 **Async.** `vm`'s per-case `timeout` (the JS analogue of Python's SIGALRM) only interrupts *synchronous* execution, so a returned Promise needs its own timeout: `harness.js` awaits a thenable result via `awaitIfThenable`, racing it against whatever's left of `time_limit_ms` after the synchronous portion, on a real (host) timer — `setTimeout`/`clearTimeout`/`setInterval`/`clearInterval` are bound into the sandbox for exactly this. A rejected promise maps to `runtime_error` the same as a thrown exception; a promise that doesn't settle in time maps to `time_limit_exceeded` the same as an infinite synchronous loop. `main()` calls `process.exit()` explicitly after writing results so a submission's leaked `setInterval` or forever-pending promise can't hold the container's event loop — and its sandbox slot — open past that.
 
@@ -1069,10 +1122,28 @@ One residual gap, not fully closed by the above: a submission that starves the e
 - **Comparison.** Same modes and semantics as the other harnesses. `unordered` sorts canonical keys (`Json::canonical`, O(n log n)); a pairwise match took ~6s at 100k elements, untimed, which could turn a correct answer into a whole-run TLE. `NaN`/`Infinity`/`-Infinity` parse as floats, the way Python's `json` module writes them, so they stay comparable values, and an infinite answer matches an infinite expectation under `float_tolerance`.
 - **Per-case `memory_limit_exceeded`.** Only the Rust harness can attribute an OOM to a single case, so `worker/aggregate.py` maps that per-case status too. The other languages' OOMs still surface as the container-level exit 137.
 
-**SQL (MariaDB)** — harness, sandbox image, data model, authoring skill, and workspace. SQL problems (window functions, joins) don't fit the function-call model at all — there's no function to call, just a query to run against a seeded schema and a result set to diff — so this was a materially bigger lift than JS, not an incremental extension of it. Engine choice (MariaDB over MySQL 8 and SQLite) is `docs/adr/0002-sql-judge-engine-mysql-vs-mariadb.md`; `problems.language="mysql"` always pairs with the new `kind="sql"` (never any other combination — enforced by `ProblemIn`'s `_sql_kind_and_language_are_paired` validator and the DB-level `ck_problems_sql_kind_mysql_language` check).
+**SQL (MariaDB)** — harness, sandbox image, data model, authoring skill, and workspace. SQL problems (window functions, joins) don't fit the function-call model at all — there's no function to call, just a query to run against a seeded schema and a result set to diff — so this was a materially bigger lift than JS, not an incremental extension of it. Engine choice (MariaDB over MySQL 8 and SQLite) is `docs/adr/0002-sql-judge-engine-mysql-vs-mariadb.md`; a `"mysql"` language always pairs with the new `kind="sql"` (never any other combination — enforced by `ProblemIn`'s `_sql_kind_and_language_are_paired` validator and the DB-level `ck_problems_sql_kind_mysql_language` check).
 
 - **Harness protocol.** `judge/harness_sql.py` speaks the same stdin-JSON-in/stdout-JSON-out protocol as `harness.py`/`harness.js` (§5.3): a test case's `input` is `["<seed DDL/DML script>"]`, `expected` is a row-array list, and row-set comparison reuses the existing `comparison: {"mode": "unordered"}` config verbatim — no new comparison mode was needed. One server instance boots per container invocation (not per test case): each test case gets its own `CREATE DATABASE case_<id>`, seeded fresh, queried once, dropped. Both the seed and query connections authenticate as a `judge`@`localhost` account scoped to `case\_%` databases only (`judge/sql_provision_template.sh`) — never `FILE`/`SUPER`/`PROCESS`/`RELOAD` — and the query connection deliberately lacks the multi-statement capability, so a stacked-query submission (`SELECT 1; DROP TABLE ...`) is rejected by the server itself as a syntax error, never executed.
 - **Sandbox image.** `judge/Dockerfile.sql-mysql` — MariaDB, chosen over MySQL 8 (a fresh MySQL 8 data directory measured 190MB — structurally incompatible with the sandbox's tmpfs budget) and over SQLite (kept as the documented fallback if MariaDB had failed its feasibility spike). The datadir is pre-baked at image build time (`mariadb-install-db` + tuned InnoDB sizing, ~22MB) so the per-submission path only copies it into tmpfs and starts the server — measured cold start ~50-60ms. The `"mysql"` sandbox profile (`app/sandbox.py`) gives it its own image, a 32MB tmpfs (vs. 16MB for python/js — `docker_runner.build_run_args`'/`k8s_runner`'s `tmpfs_size_mb` parameter), and a small wall-clock allowance for that cold start.
-- **Data model.** `problems.language` and `problems.kind` include `"mysql"`/`"sql"` (`Language`/`Kind` literals in `app/schemas/problem.py`, `ck_problems_language`/`ck_problems_kind_name_consistency` CHECK constraints in `app/models/problem.py`).
+- **Data model.** `problem_languages.language` and `problems.kind` include `"mysql"`/`"sql"` (`Language`/`Kind` literals in `app/schemas/problem.py`; `ck_problem_languages_language`/`ck_problems_kind` CHECK constraints, with the pairing checked per variant by `ProblemIn`, §3.2).
 - **Authoring.** `.claude/skills/author-problem/SKILL.md` has a SQL branch (capability scope, field shape, test-case-writing guidance — including the convention that `statement_md` carries the schema doc and a worked example (schema, input tables, result table), while `is_sample` test cases stay the single source of truth the workspace renders from, not a second hand-typed copy). `sql` is in the canonical tag vocabulary.
-- **Frontend.** Monaco picks up its `sql` mode via a 3-way `language` lookup (`Workspace.tsx`'s `MONACO_LANGUAGE`), solution/submission code blocks get real SQL syntax highlighting (`CodeBlock.tsx`), the seed script renders one statement per line instead of a JSON-escaped blob (`format.ts`'s `formatSqlSeed`), and result rows render as a table (`SqlRowsTable.tsx`) instead of a raw array-of-arrays.
+- **Frontend.** Monaco picks up its `sql` mode via the per-language lookup (`lib/languages.ts`'s `MONACO_LANGUAGE`), solution/submission code blocks get real SQL syntax highlighting (`CodeBlock.tsx`), the seed script renders one statement per line instead of a JSON-escaped blob (`format.ts`'s `formatSqlSeed`), and result rows render as a table (`SqlRowsTable.tsx`) instead of a raw array-of-arrays.
+
+**One problem, several languages.** A problem isn't tied to one of the judges above: it lists
+the languages it's offered in (`problem_languages`, §3.2; [ADR-0005](docs/adr/0005-multi-language-problems.md)),
+and each submission records which one it's written in. The worker judges a submission with
+the variant for its language (`worker/judge.py`), so a Python and a Rust submission to the
+same problem run on different images against the same test cases. Because cases are plain JSON
+and compared as values, one case set serves every language; what differs per language is
+only the signature (names, display types, Python codecs), the starter code, and an optional
+statement note. Two consequences worth knowing:
+
+- **Values, not host types.** Each harness compares the returned value to `expected` as
+  that language sees it. Python's `==` distinguishes `(1, 6)` from `[1, 6]`, so a Python
+  variant returns lists where the JSON has arrays (`merge-booking-windows` declares
+  `list[list[int]]`, not `list[tuple[int, int]]`); Rust tuples and JS arrays both serialize
+  to arrays.
+- **Stats are per language.** "Beats X%" and the runtime histogram compare only against
+  accepted submissions in the same language; solved status counts any language.
+

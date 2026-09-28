@@ -2,6 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import { api } from '../../api/client'
 import { Modal } from '../../components/Modal'
 import type { Language, RuntimeDistribution, Submission } from '../../api/types'
+import { beatsText, LANGUAGE_LABEL } from '../../lib/languages'
 import { CodeBlock } from './CodeBlock'
 import { Histogram } from './Histogram'
 import { StatusText } from './StatusText'
@@ -15,14 +16,14 @@ import { relativeTime } from './format'
  */
 export function SubmissionDetailModal({
   submissionId,
-  language,
+  multiLanguage,
   onClose,
   onLoadCode,
 }: {
   submissionId: string
-  language: Language
+  multiLanguage: boolean
   onClose: () => void
-  onLoadCode: (code: string) => void
+  onLoadCode: (code: string, language: Language) => void
 }) {
   const { data: sub, isLoading } = useQuery({
     queryKey: ['submission-detail', submissionId],
@@ -44,12 +45,15 @@ export function SubmissionDetailModal({
               and "2s ago" across lines), keeping each fact on one line. */}
           <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-2 text-sm">
             <StatusText status={sub.status} />
+            {multiLanguage && (
+              <span className="whitespace-nowrap text-zinc-400">{LANGUAGE_LABEL[sub.language]}</span>
+            )}
             {sub.runtime_ms != null && (
               <span className="whitespace-nowrap font-mono text-zinc-500">{sub.runtime_ms} ms</span>
             )}
             <span className="whitespace-nowrap text-zinc-500">{relativeTime(sub.created_at)}</span>
             <button
-              onClick={() => onLoadCode(sub.code)}
+              onClick={() => onLoadCode(sub.code, sub.language)}
               className="ml-auto whitespace-nowrap rounded border border-zinc-700 px-2 py-1 text-xs text-zinc-200 hover:bg-zinc-800"
             >
               Load into editor
@@ -58,9 +62,7 @@ export function SubmissionDetailModal({
           {sub.status === 'accepted' && (
             <>
               <div className="mb-1 text-sm text-zinc-400">
-                {sub.runtime_percentile != null
-                  ? `Beats ${sub.runtime_percentile}% of accepted submissions`
-                  : "You're the first accepted submission!"}
+                {beatsText(sub.runtime_percentile, sub.language, multiLanguage)}
               </div>
               {dist && dist.total > 1 && (
                 <div className="mb-3">
@@ -71,7 +73,7 @@ export function SubmissionDetailModal({
           )}
           {/* The panel itself scrolls (see Modal), so the code block doesn't need
               its own viewport-relative height cap. */}
-          <CodeBlock code={sub.code} language={language} copyable={false} />
+          <CodeBlock code={sub.code} language={sub.language} copyable={false} />
         </>
       )}
     </Modal>

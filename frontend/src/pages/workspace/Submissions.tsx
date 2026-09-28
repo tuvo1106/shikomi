@@ -3,19 +3,27 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Trash2 } from 'lucide-react'
 import { api } from '../../api/client'
 import type { Language, SubmissionListResponse } from '../../api/types'
+import { LANGUAGE_LABEL } from '../../lib/languages'
 import { ConfirmModal } from '../../components/ConfirmModal'
 import { StatusText } from './StatusText'
 import { SubmissionDetailModal } from './SubmissionDetailModal'
 import { relativeTime } from './format'
 
+/**
+ * The Submissions tab: this user's Submit history for the problem, newest first.
+ *
+ * On a multi-language problem each row shows its language, and loading a past
+ * submission opens it in that language's editor (switching languages), since
+ * code only makes sense in the language it was written in.
+ */
 export function Submissions({
   slug,
-  language,
+  multiLanguage,
   onLoadCode,
 }: {
   slug: string
-  language: Language
-  onLoadCode: (code: string) => void
+  multiLanguage: boolean
+  onLoadCode: (code: string, language: Language) => void
 }) {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [pendingDelete, setPendingDelete] = useState<string | null>(null)
@@ -42,6 +50,7 @@ export function Submissions({
         <thead className="text-left text-xs uppercase tracking-wide text-zinc-500">
           <tr>
             <th className="py-1 font-medium">Status</th>
+            {multiLanguage && <th className="py-1 font-medium">Language</th>}
             <th className="py-1 font-medium">Runtime</th>
             <th className="py-1 font-medium">Submitted</th>
             <th className="py-1"></th>
@@ -57,6 +66,7 @@ export function Submissions({
               <td className="py-1.5">
                 <StatusText status={s.status} />
               </td>
+              {multiLanguage && <td className="py-1.5 text-zinc-400">{LANGUAGE_LABEL[s.language]}</td>}
               <td className="py-1.5 font-mono text-zinc-400">
                 {s.runtime_ms != null ? `${s.runtime_ms} ms` : '—'}
               </td>
@@ -80,10 +90,10 @@ export function Submissions({
       {selectedId && (
         <SubmissionDetailModal
           submissionId={selectedId}
-          language={language}
+          multiLanguage={multiLanguage}
           onClose={() => setSelectedId(null)}
-          onLoadCode={(code) => {
-            onLoadCode(code)
+          onLoadCode={(code, language) => {
+            onLoadCode(code, language)
             setSelectedId(null)
           }}
         />

@@ -89,15 +89,24 @@ async def judge_submission(ctx, submission_id: str, mode: str) -> None:
                 return
             sub.status = "running"  # keep the loaded object in step with the row
 
+            # The submission's language picks which variant (signature, judge) applies.
+            # The API only accepts a language the problem offers, but a re-seed can
+            # drop one while a submission in it is queued; that's a judge_error, not
+            # a guess at another language.
+            variant = next((v for v in problem.languages if v.language == sub.language), None)
+            if variant is None:
+                raise RuntimeError(
+                    f"problem {problem_id} no longer offers language {sub.language!r}")
+
             cases = sorted(
                 (tc for tc in problem.test_cases if mode == "submit" or tc.is_sample),
                 key=lambda t: t.ordinal)
             verdict = await run_judgement(
-                code=sub.code, function_name=problem.function_name,
+                code=sub.code, function_name=variant.function_name,
                 comparison=problem.comparison, time_limit_ms=problem.time_limit_ms,
                 memory_limit_mb=problem.memory_limit_mb,
-                params=problem.params, return_type=problem.return_type,
-                kind=problem.kind, class_name=problem.class_name, language=problem.language,
+                params=variant.params, return_type=variant.return_type,
+                kind=problem.kind, class_name=variant.class_name, language=variant.language,
                 test_cases=[{"id": tc.ordinal, "input": tc.input, "expected": tc.expected}
                             for tc in cases],
                 container_name=f"judge-{submission_id}")

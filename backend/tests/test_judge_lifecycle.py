@@ -63,8 +63,10 @@ def test_the_whole_seed_catalog_fits_with_room_to_spare():
     root = pathlib.Path(__file__).resolve().parents[2] / "seed" / "problems"
     for path in glob.glob(str(root / "*.json")):
         d = json.load(open(path))
-        assert jb.fits_job_timeout(len(d.get("test_cases", [])), d.get("time_limit_ms", 2000),
-                                   d.get("language", "python")), path
+        languages = [v["language"] for v in d.get("languages", [])] or [d.get("language", "python")]
+        for language in languages:
+            assert jb.fits_job_timeout(len(d.get("test_cases", [])),
+                                       d.get("time_limit_ms", 2000), language), path
 
 
 def test_a_live_sandbox_can_never_be_older_than_the_sweep_threshold():
@@ -121,7 +123,7 @@ class FakeRedis(ScriptedRedis):
 async def _pending(session_factory, user_id, problem_id):
     async with session_factory() as s:
         sub = Submission(user_id=uuid.UUID(user_id), problem_id=uuid.UUID(problem_id),
-                         code="x", status="pending")
+                         code="x", language="python", status="pending")
         s.add(sub)
         await s.commit()
         await s.refresh(sub)

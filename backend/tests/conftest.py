@@ -16,7 +16,16 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app import breached_passwords
 from app.db import get_session
 from app.main import app
-from app.models import Base, Problem, Solution, Submission, TestCase, User
+from app.models import (
+    Base,
+    Problem,
+    ProblemLanguage,
+    Solution,
+    SolutionCode,
+    Submission,
+    TestCase,
+    User,
+)
 from app.queue import get_queue
 from fake_redis import ScriptedRedis
 from worker import accounts as worker_accounts
@@ -116,12 +125,12 @@ class FakeQueue:
         self.login_failures.pop(email.lower(), None)
         self.login_locks.pop(email.lower(), None)
 
-    async def get_cached_percentile(self, problem_id, runtime_ms):
-        raw = await self.redis.get(f"percentile:{problem_id}:{runtime_ms}")
+    async def get_cached_percentile(self, problem_id, language, runtime_ms):
+        raw = await self.redis.get(f"percentile:{problem_id}:{language}:{runtime_ms}")
         return float(raw) if raw is not None else None
 
-    async def set_cached_percentile(self, problem_id, runtime_ms, value):
-        await self.redis.set(f"percentile:{problem_id}:{runtime_ms}", value)
+    async def set_cached_percentile(self, problem_id, language, runtime_ms, value):
+        await self.redis.set(f"percentile:{problem_id}:{language}:{runtime_ms}", value)
 
     async def ping(self):
         if self.fail_ping:
@@ -254,19 +263,26 @@ async def user_headers(make_user):
 
 @pytest_asyncio.fixture
 def make_problem(session_factory):
-    """Insert a problem with one sample + one hidden test case (and optional solution)."""
+    """Insert a problem with one sample + one hidden test case (and optional solution).
+
+    `languages` lists the languages it's offered in, default first; each gets a
+    `pair_sum` variant (and, with solutions, that language's code).
+    """
     async def _make(slug="pair-sum", published=True, with_solutions=True,
-                    title="Pair Sum", collections=None, tags=None):
+                    title="Pair Sum", collections=None, tags=None, languages=("python",)):
         async with session_factory() as s:
             problem = Problem(
                 slug=slug, title=title, difficulty="easy", statement_md="Add two.",
-                function_name="pair_sum", starter_code="def pair_sum(nums, target): ...",
-                params=[{"name": "nums", "type": "List[int]"},
-                        {"name": "target", "type": "int"}],
                 comparison={"mode": "exact"}, is_published=published,
                 tags=tags or ["array"], collections=collections or [])
             s.add(problem)
             await s.flush()
+            for i, lang in enumerate(languages):
+                s.add(ProblemLanguage(
+                    problem_id=problem.id, ordinal=i, language=lang, function_name="pair_sum",
+                    starter_code=f"{lang}: pair_sum(nums, target)",
+                    params=[{"name": "nums", "type": "List[int]"},
+                            {"name": "target", "type": "int"}]))
             s.add(TestCase(problem_id=problem.id, ordinal=0, input=[[1, 6], 7],
                            expected=[0, 1], is_sample=True))
             s.add(TestCase(problem_id=problem.id, ordinal=1, input=[[5, 5], 10],
@@ -274,7 +290,8 @@ def make_problem(session_factory):
             if with_solutions:
                 s.add(Solution(problem_id=problem.id, ordinal=0, title="Hash Map",
                                intuition_md="Use a dict.", algorithm_md="Scan once.",
-                               code="def pair_sum(): ...",
+                               codes=[SolutionCode(language=lang, code=f"{lang}: pair_sum")
+                                      for lang in languages],
                                time_complexity="O(n)", space_complexity="O(n)"))
             await s.commit()
             return str(problem.id), slug
@@ -283,9 +300,10 @@ def make_problem(session_factory):
 
 @pytest_asyncio.fixture
 def make_submission(session_factory):
-    async def _make(user_id, problem_id, status="accepted", is_run=False, runtime_ms=None):
+    async def _make(user_id, problem_id, status="accepted", is_run=False, runtime_ms=None,
+                    language="python"):
         async with session_factory() as s:
-            sub = Submission(user_id=user_id, problem_id=problem_id, code="x",
+            sub = Submission(user_id=user_id, problem_id=problem_id, code="x", language=language,
                              status=status, is_run=is_run, runtime_ms=runtime_ms)
             s.add(sub)
             await s.commit()

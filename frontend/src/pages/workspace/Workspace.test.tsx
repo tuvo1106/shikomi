@@ -16,15 +16,24 @@ vi.mock('react-markdown', () => ({
 
 import Workspace from './Workspace'
 
+const variant = (language: string, starter_code: string, note_md = '') => ({
+  language,
+  starter_code,
+  function_name: 'pair_sum',
+  class_name: null,
+  params: [],
+  return_type: '',
+  note_md,
+})
+
 const PROBLEM = {
   id: 'p1',
   slug: 'pair-sum',
   title: 'Pair Sum',
   difficulty: 'easy',
   statement_md: 'Add two numbers.',
-  starter_code: 'def pair_sum(): ...',
-  function_name: 'pair_sum',
-  params: [],
+  kind: 'function',
+  languages: [variant('python', 'def pair_sum(): ...')],
   tags: ['array'],
   constraints: ['`2 <= nums.length <= 10^4`'],
   sample_cases: [],
@@ -58,7 +67,7 @@ describe('Workspace', () => {
           return Promise.resolve(
             json({
               id: 'sub1',
-              problem_id: 'p1',
+              problem_id: 'p1', language: 'python',
               status: 'accepted',
               is_run: false,
               runtime_ms: 5,
@@ -91,8 +100,8 @@ describe('Workspace', () => {
           return Promise.resolve(
             json({
               items: [
-                { id: 's1', status: 'accepted', runtime_ms: 5, created_at: new Date().toISOString() },
-                { id: 's2', status: 'wrong_answer', runtime_ms: null, created_at: new Date().toISOString() },
+                { id: 's1', status: 'accepted', language: 'python', runtime_ms: 5, created_at: new Date().toISOString() },
+                { id: 's2', status: 'wrong_answer', language: 'python', runtime_ms: null, created_at: new Date().toISOString() },
               ],
             }),
           )
@@ -100,7 +109,7 @@ describe('Workspace', () => {
           return Promise.resolve(
             json({
               id: 's1',
-              problem_id: 'p1',
+              problem_id: 'p1', language: 'python',
               status: 'accepted',
               code: 'print("hi")',
               verdict_detail: null,
@@ -125,7 +134,9 @@ describe('Workspace', () => {
   it('keeps the starter code\'s reference comment when loading a submission into the editor', async () => {
     const listNodeProblem = {
       ...PROBLEM,
-      starter_code: '# Definition for singly-linked list.\n# class ListNode:\n#     pass\n\ndef f(): ...',
+      languages: [
+        variant('python', '# Definition for singly-linked list.\n# class ListNode:\n#     pass\n\ndef f(): ...'),
+      ],
     }
     vi.stubGlobal(
       'fetch',
@@ -133,13 +144,13 @@ describe('Workspace', () => {
         const url = String(input)
         if (url.includes('/problems/pair-sum/submissions'))
           return Promise.resolve(
-            json({ items: [{ id: 's1', status: 'accepted', runtime_ms: 5, created_at: new Date().toISOString() }] }),
+            json({ items: [{ id: 's1', status: 'accepted', language: 'python', runtime_ms: 5, created_at: new Date().toISOString() }] }),
           )
         if (url.includes('/submissions/s1'))
           return Promise.resolve(
             json({
               id: 's1',
-              problem_id: 'p1',
+              problem_id: 'p1', language: 'python',
               status: 'accepted',
               code: 'def f():\n    return None',
               verdict_detail: null,
@@ -180,7 +191,7 @@ describe('Workspace', () => {
                   title: 'Hash Map',
                   intuition_md: 'Use a dict.',
                   algorithm_md: 'Scan once.',
-                  code: 'def pair_sum(): ...',
+                  code: { python: 'def pair_sum(): ...' },
                   time_complexity: 'O(n)',
                   space_complexity: 'O(n)',
                   time_complexity_reason: 'One pass.',
@@ -241,7 +252,7 @@ describe('Workspace polling deadline', () => {
         if (url.includes('/submissions/stuck')) {
           polls++
           return Promise.resolve(
-            json({ id: 'stuck', problem_id: 'p1', status: 'running', is_run: false, created_at: 'now' }),
+            json({ id: 'stuck', problem_id: 'p1', language: 'python', status: 'running', is_run: false, created_at: 'now' }),
           )
         }
         return Promise.resolve(json({}, 404))
@@ -281,7 +292,7 @@ describe('Workspace across problems', () => {
         if (url.includes('/submissions/sub1'))
           return Promise.resolve(
             json({
-              id: 'sub1', problem_id: 'p1', status: 'accepted', is_run: false, runtime_ms: 5,
+              id: 'sub1', problem_id: 'p1', language: 'python', status: 'accepted', is_run: false, runtime_ms: 5,
               created_at: 'now',
               verdict_detail: { results: [], passed: 2, total: 2 },
             }),
@@ -358,7 +369,7 @@ describe('Workspace judging state', () => {
     await act(async () => {
       releasePoll(
         json({
-          id: 'slow', problem_id: 'p1', status: 'wrong_answer', is_run: false, created_at: 'now',
+          id: 'slow', problem_id: 'p1', language: 'python', status: 'wrong_answer', is_run: false, created_at: 'now',
           verdict_detail: { results: [{ test_case_id: 0, status: 'wrong_answer', runtime_ms: 1 }], passed: 0, total: 1 },
         }),
       )
@@ -392,5 +403,129 @@ describe('Workspace judging state', () => {
     })
     expect(await screen.findByText(/taking longer than expected/)).toBeInTheDocument()
     expect(screen.getByText('Submit')).not.toBeDisabled()
+  })
+})
+
+describe('Workspace languages', () => {
+  const MULTI = {
+    ...PROBLEM,
+    languages: [
+      variant('python', 'def pair_sum(): ...'),
+      variant('js', 'var pairSum = function() {};'),
+      variant('rust', 'fn pair_sum() {}', 'Use `i64`.'),
+    ],
+  }
+
+  /** Serve `problem`; record every Run/Submit body so a test can read the language sent. */
+  function serve(problem: object) {
+    const posted: Array<Record<string, unknown>> = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: string, init?: RequestInit) => {
+        const url = String(input)
+        if (init?.method === 'POST') {
+          posted.push(JSON.parse(String(init.body)))
+          return Promise.resolve(json({ id: 'sub1', status: 'pending' }, 202))
+        }
+        if (url.includes('/submissions/sub1'))
+          return Promise.resolve(
+            json({ id: 'sub1', problem_id: 'p1', language: 'rust', status: 'wrong_answer', is_run: true,
+              code: '', created_at: 'now', verdict_detail: { results: [], passed: 0, total: 1 } }),
+          )
+        if (url.includes('/problems/pair-sum')) return Promise.resolve(json(problem))
+        return Promise.resolve(json({}, 404))
+      }),
+    )
+    return posted
+  }
+
+  it('shows a plain label, not a switcher, for a one-language problem', async () => {
+    serve(PROBLEM)
+    renderWorkspace()
+    expect(await screen.findByText('Python3')).toBeInTheDocument()
+    expect(screen.queryByRole('group', { name: 'Language' })).not.toBeInTheDocument()
+  })
+
+  it('keeps a separate draft per language across switches', async () => {
+    localStorage.setItem('code:pair-sum:python', 'my python draft')
+    serve(MULTI)
+    renderWorkspace()
+
+    const editor = await screen.findByTestId('editor')
+    expect(editor).toHaveValue('my python draft')
+    expect(screen.getByRole('button', { name: 'Python3' })).toHaveAttribute('aria-pressed', 'true')
+    // The dot (in the title) marks the edited draft only.
+    expect(screen.getByTitle('Python3 (edited)')).toBeInTheDocument()
+    expect(screen.getByTitle('Rust')).toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Rust' }))
+    expect(screen.getByTestId('editor')).toHaveValue('fn pair_sum() {}')
+    await userEvent.click(screen.getByRole('button', { name: 'Python3' }))
+    expect(screen.getByTestId('editor')).toHaveValue('my python draft')
+  })
+
+  it('shows the selected language\'s note and sends its language on Run', async () => {
+    const posted = serve(MULTI)
+    renderWorkspace()
+    await screen.findByText('Pair Sum')
+    expect(screen.queryByText('Rust note')).not.toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Rust' }))
+    expect(screen.getByText('Rust note')).toBeInTheDocument()
+    expect(screen.getByText('Use `i64`.')).toBeInTheDocument()
+
+    await userEvent.click(screen.getByText('Run'))
+    await screen.findByText('Wrong Answer')
+    expect(posted[0]).toMatchObject({ problem_id: 'p1', code: 'fn pair_sum() {}', language: 'rust' })
+    // The verdict names the language it was judged in.
+    expect(screen.getAllByText('Rust').length).toBeGreaterThan(1)
+  })
+
+  it('shows solutions in the editor language and offers to switch when one is missing', async () => {
+    const solution = (id: string, title: string, code: Record<string, string>) => ({
+      id, ordinal: 0, title, intuition_md: 'i', algorithm_md: '', code,
+      time_complexity: 'O(n)', space_complexity: 'O(1)', time_complexity_reason: '', space_complexity_reason: '',
+    })
+    localStorage.setItem('sol:pair-sum', '1') // past the spoiler gate
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: string) => {
+        const url = String(input)
+        if (url.includes('/problems/pair-sum/solutions'))
+          return Promise.resolve(json({ items: [
+            solution('a', 'Sweep', { python: 'py sweep', js: 'js sweep', rust: 'rs sweep' }),
+            solution('b', 'Compact', { rust: 'rs compact' }),
+          ] }))
+        if (url.includes('/problems/pair-sum')) return Promise.resolve(json({ ...MULTI, has_solutions: true }))
+        return Promise.resolve(json({}, 404))
+      }),
+    )
+    renderWorkspace()
+    await screen.findByText('Pair Sum')
+    await userEvent.click(screen.getByText('Solutions'))
+
+    expect(await screen.findByText('py sweep')).toBeInTheDocument()
+    expect(screen.getByText('Rust only')).toBeInTheDocument()
+    expect(screen.getByText('No Python3 version of this approach.')).toBeInTheDocument()
+
+    await userEvent.click(screen.getByText('Switch to Rust'))
+    expect(await screen.findByText('rs compact')).toBeInTheDocument()
+    expect(screen.getByTestId('editor')).toHaveValue('fn pair_sum() {}') // the switch is the editor's
+  })
+
+  it('reopens in the language last used on the problem', async () => {
+    localStorage.setItem('lang:pair-sum', 'js')
+    serve(MULTI)
+    renderWorkspace()
+    expect(await screen.findByTestId('editor')).toHaveValue('var pairSum = function() {};')
+  })
+
+  it('moves a draft saved before languages existed into the default language', async () => {
+    localStorage.setItem('code:pair-sum', 'old draft')
+    serve(MULTI)
+    renderWorkspace()
+    expect(await screen.findByTestId('editor')).toHaveValue('old draft')
+    expect(localStorage.getItem('code:pair-sum:python')).toBe('old draft')
+    expect(localStorage.getItem('code:pair-sum')).toBeNull()
   })
 })

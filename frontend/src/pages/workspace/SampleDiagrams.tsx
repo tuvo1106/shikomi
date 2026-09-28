@@ -7,7 +7,7 @@
  * both are on screen (`Workspace.tsx`). Nothing renders for a problem with no
  * node-typed params, which is most of the catalog.
  */
-import type { ProblemDetail, SampleCase } from '../../api/types'
+import type { LanguageVariant, ProblemDetail, SampleCase } from '../../api/types'
 import { NodeDiagram } from './NodeDiagram'
 import { decodeExpected, decodeInput, nodeParams, type VizGraph } from './nodeGraph'
 
@@ -23,12 +23,23 @@ function label(name: string, graphs: VizGraph[], raw: unknown): Labeled[] {
   }))
 }
 
-export function SampleDiagrams({ problem, sample }: { problem: ProblemDetail; sample: SampleCase }) {
+/** `variant` supplies the param/return types to decode against. Node types are
+ * Python-harness codecs, so in practice only a Python variant ever draws
+ * anything (`ProblemIn` rejects them for JS and Rust). */
+export function SampleDiagrams({
+  problem,
+  variant,
+  sample,
+}: {
+  problem: ProblemDetail
+  variant: LanguageVariant
+  sample: SampleCase
+}) {
   const diagrams: Labeled[] = [
-    ...nodeParams(problem.params, problem.kind).flatMap((p) =>
+    ...nodeParams(variant.params, problem.kind).flatMap((p) =>
       label(p.name, decodeInput(p.type, sample.input[p.index]), sample.input[p.index]),
     ),
-    ...label('output', decodeExpected(problem.return_type, sample.expected), sample.expected),
+    ...label('output', decodeExpected(variant.return_type, sample.expected), sample.expected),
   ].filter((d) => d.graph.nodes.length > 0)
 
   if (diagrams.length === 0) return null

@@ -23,7 +23,7 @@ from app.audit import audit
 from app.config import get_settings
 from app.db import SessionLocal
 from app.models import User
-from app.schemas.problem import ProblemFile
+from app.schemas.problem import LEGACY_LANGUAGE_FIELDS, ProblemFile
 from app.security import hash_password
 from app.services import problem_service
 
@@ -54,7 +54,9 @@ def _load_problem_files(seed_dir: pathlib.Path) -> tuple[list[ProblemFile], list
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValidationError) as exc:
             errors.append(f"{path.name}: {exc}")
             continue
-        unknown = sorted(set(raw) - set(ProblemFile.model_fields))
+        # The single-language fields are still accepted at the top level (ProblemIn
+        # lifts them into `languages`), so they aren't "unknown".
+        unknown = sorted(set(raw) - set(ProblemFile.model_fields) - set(LEGACY_LANGUAGE_FIELDS))
         if unknown:
             print(f"  warning: {path.name}: ignoring unknown keys {unknown}", file=sys.stderr)
         slug = problem.slug or problem_service.slugify(problem.title)

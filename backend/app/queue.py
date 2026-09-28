@@ -194,14 +194,17 @@ class Queue:
     # of it (or another submission with an identical runtime) reuse the result
     # for a short TTL instead of re-scanning every time.
 
-    async def get_cached_percentile(self, problem_id, runtime_ms) -> float | None:
-        """Cached percentile for (problem_id, runtime_ms), or None on a miss."""
-        raw = await self.redis.get(f"percentile:{problem_id}:{runtime_ms}")
+    async def get_cached_percentile(self, problem_id, language, runtime_ms) -> float | None:
+        """Cached percentile for (problem_id, language, runtime_ms), or None on a miss.
+
+        The language is part of the key because percentiles are per language.
+        """
+        raw = await self.redis.get(f"percentile:{problem_id}:{language}:{runtime_ms}")
         return float(raw) if raw is not None else None
 
-    async def set_cached_percentile(self, problem_id, runtime_ms, value: float) -> None:
+    async def set_cached_percentile(self, problem_id, language, runtime_ms, value: float) -> None:
         """Cache a freshly computed percentile (see `get_cached_percentile`)."""
-        await self.redis.set(f"percentile:{problem_id}:{runtime_ms}", value,
+        await self.redis.set(f"percentile:{problem_id}:{language}:{runtime_ms}", value,
                              ex=PERCENTILE_CACHE_TTL_SECONDS)
 
     async def ping(self) -> bool:

@@ -108,7 +108,7 @@ async def test_spares_unverified_account_with_submissions(
     pid, _ = await make_problem()
     async with session_factory() as s:
         s.add(Submission(user_id=user["id"], problem_id=pid,
-                         code="x", status="accepted"))
+                         code="x", language="python", status="accepted"))
         await s.commit()
     await _age(session_factory, "legacy@example.com", TTL * 100)
 
