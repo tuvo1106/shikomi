@@ -6,13 +6,22 @@ import { ThemeToggle } from './ThemeToggle'
 import { UserMenu } from './UserMenu'
 import { NAV_LINKS } from './navLinks'
 
+/**
+ * A full-height nav tab whose active state is a 2px underline at the bar's bottom edge.
+ *
+ * Its text has to share a baseline with the brand beside it, which takes two things.
+ * The matching transparent top border: with a bottom border alone the text is centered
+ * in a box 2px shorter than the bar, 1px high. And `pt-0.5`: the tab's 14px text,
+ * centered, puts its baseline 1px above the 16px brand's, and 2px of top padding moves
+ * the center down that 1px.
+ */
 function NavItem({ to, end, children }: { to: string; end?: boolean; children: ReactNode }) {
   return (
     <NavLink
       to={to}
       end={end}
       className={({ isActive }) =>
-        `flex h-full items-center border-b-2 px-1.5 text-sm transition-colors sm:px-3 ${
+        `flex h-full items-center border-y-2 border-t-transparent px-1.5 pt-0.5 text-sm transition-colors sm:px-3 ${
           isActive
             ? 'border-indigo-500 text-zinc-100'
             : 'border-transparent text-zinc-400 hover:text-zinc-100'
