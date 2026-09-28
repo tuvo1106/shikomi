@@ -33,11 +33,11 @@
 //!    harness also marks itself non-dumpable, which refuses same-uid access to
 //!    its `/proc/1/environ` (readable without it; `/proc/1/mem` was already
 //!    refused by Docker's defaults, measured).
-//!    **Caveat:** that holds on the Docker runner, where the payload arrives on
-//!    stdin. The k8s runner mounts it as a file (JUDGE_PAYLOAD_FILE), and that
-//!    file stays readable to the child at its fixed path. The harness can't
-//!    hide it: the mount is read-only and the child runs as the same uid. The
-//!    Python harness has the same exposure (AGENTS.md TODO).
+//!    On k8s the payload arrives as a file (JUDGE_PAYLOAD_FILE) rather than on
+//!    stdin, but an init container copies it into a writable volume, so the
+//!    runner mounts a file the harness could delete before running the
+//!    submission if it needed to; this harness never exposes it to a case's
+//!    process anyway (the child gets only the input, over stdin).
 //!
 //! Limits applied to each case's process: wall time `time_limit_ms` (enforced
 //! here, with SIGKILL), address space `memory_limit_mb` (`RLIMIT_AS`, so an

@@ -335,6 +335,19 @@ and `playwright`.
   by `test_the_bundled_starters_validate` (backend/tests/test_cli.py). A rule that reads a
   node-typed `expected` must remember a `CyclicListNode` answer is an index, not a list:
   that exact slip was caught this way.
+- **The Python and JS harnesses run the submission in a child process** (like Rust),
+  not in the harness itself. The trusted parent parses the payload, holds every
+  case's `expected`, decides pass/fail for fixed-answer modes, and alone writes the
+  `{"results": ...}` report; the child gets only the submission and each case's
+  input, and its stdout goes to /dev/null. So a submission can't read the answers
+  out of memory or forge the report. Two consequences when editing a harness: keep
+  `expected` (and any secret) out of the child (`_child_setup`/`childSetup` receive
+  no `expected`), and never make the child's own stdout the channel the parent
+  parses. `worker/aggregate.py` also refuses a report that doesn't have one row per
+  case sent (defence in depth). An operations `custom_validator` is the one thing
+  that still runs in the child (it calls into the live object), so such a problem
+  must not rely on `expected` being hidden from the submission.
+
 - **Rust calls each op by its snake_case name.** The shared cases spell an op once for
   every language (`getState`), and the Rust glue calls `get_state`. The mapping exists
   twice: harness.rs `method_name`, which the judge runs, and `app/sandbox.py`
@@ -370,15 +383,6 @@ slice ships, delete its entry here.
   cert-manager TLS, a **gVisor/Kata node pool** (`runtimeClassName`) + a
   policy-enforcing CNI before untrusted users, and wiring kind into CI for the
   Playwright job.
-
-- **Keep the k8s judge payload away from submissions:** the k8s runner mounts the
-  payload (every hidden case's `expected`) as a ConfigMap file at a fixed path,
-  and user code runs as the same uid as the harness, so a Python or Rust
-  submission can read it and return the answers. No harness can hide it from
-  inside (read-only mount, no privileges). It needs a runner change: deliver
-  the payload over the Pod's stdin (attach), or have an init step hand it to the
-  harness and then remove the file from a volume the main container can't
-  re-read. The Docker runner is unaffected (stdin only).
 
 - **Rust judge follow-ups** (v1 shipped,
   [ADR-0004](docs/adr/0004-rust-judge-compile-in-sandbox.md); every node codec and
