@@ -308,6 +308,15 @@ slice ships, delete its entry here.
   `PROBLEMS_DIR`), which caps at 1 MiB — a real problem set needs a PVC, an
   init-container `git clone`, or an image layer instead.
 
+- **Rust judge:** spike done, design proposed in
+  [ADR-0004](docs/adr/0004-rust-judge-compile-in-sandbox.md) (probes in
+  `judge/spike_rust/`, to be deleted once `harness_rs` lands). v1 = function mode only:
+  `judge/Dockerfile.rust` with a pre-built JSON prelude rlib, a `main.rs` generator
+  from `params`, per-case child processes, a `compile_error` verdict, and a
+  Rust-only tmpfs `exec` flag in both runners. Open questions: the type-string →
+  Rust type table, a `memory_limit_mb` floor so rustc can't fail to compile, and
+  compile time under gVisor. Operations mode needs method signatures in `ProblemIn`.
+
 - **Auth roadmap:** revisit session strategy (currently JWT-in-memory access +
   httpOnly refresh cookie — consider server-side sessions / cookie-based access
   tokens); two-factor follow-ups: a "remember this device" option and

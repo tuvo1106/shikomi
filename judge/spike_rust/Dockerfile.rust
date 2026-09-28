@@ -1,0 +1,12 @@
+# SPIKE ONLY — Rust judge feasibility probe (not wired into the worker).
+FROM rust:1-slim
+COPY prelude.rs user.rs main_gen.rs measure.sh adversarial.sh main_iso.rs iso.sh /opt/spike/
+# Pre-build the prelude rlib per opt level at image build time, so the
+# per-submission compile only touches the user's code + the generated main.
+RUN for o in 0 1 2; do mkdir -p /opt/judge/lib/O$o && \
+      rustc --edition 2021 --crate-type lib --crate-name prelude -C opt-level=$o \
+        -o /opt/judge/lib/O$o/libprelude.rlib /opt/spike/prelude.rs; done && \
+    chmod +x /opt/spike/measure.sh
+# rust:slim has no uid-1000 user; judging's --user 1000:1000 needs HOME somewhere writable-ish.
+ENV HOME=/tmp CARGO_HOME=/tmp/.cargo
+ENTRYPOINT ["/opt/spike/measure.sh"]
