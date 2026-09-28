@@ -379,8 +379,12 @@ const KEYWORDS: &[&str] = &[
 /// name as written). An acronym stays one word (`toJSON` → `to_json`). `None`
 /// if the op name isn't an identifier, or maps to a name Rust can't declare.
 ///
-/// backend `app/schemas/problem.py` `rust_method_name` mirrors this, so seed
-/// validation can refuse two ops that would map to the same method.
+/// `new` is refused too: it's the constructor the glue calls, and one `impl`
+/// can't also have a method of that name.
+///
+/// backend `app/sandbox.py` `rust_method_name` mirrors this, so seed validation
+/// can refuse the same ops, and two ops that would map to the same method.
+/// Both sides are tested against one table, `judge/tests/rust_method_names.json`.
 fn method_name(op: &str) -> Option<String> {
     if !is_identifier(op) {
         return None;
@@ -405,7 +409,7 @@ fn method_name(op: &str) -> Option<String> {
         }
     }
     match out.as_str() {
-        "self" | "super" | "crate" | "Self" | "_" => None,
+        "self" | "super" | "crate" | "Self" | "_" | "new" => None,
         kw if KEYWORDS.contains(&kw) => Some(format!("r#{}", kw)),
         _ => Some(out),
     }
@@ -707,10 +711,16 @@ fn compile(timeout: Duration, hint: impl Fn(&str) -> String) -> Result<(), Strin
 /// points half at glue the user never wrote. Matched on rustc's own wording for
 /// that collision, so it can't fire for anything else (a node name that only
 /// appears in a comment, or a wrong signature).
+///
+/// A duplicate `new` is only blamed on a node struct when rustc's excerpt shows
+/// the glue's own `new` for one: in operations mode the likelier cause is the
+/// user's class defining `new` twice, which rustc's own message already explains.
 fn node_hint(diag: &str) -> &'static str {
     let redefined =
         NODE_STRUCTS.iter().any(|n| diag.contains(&format!("the name `{}` is defined multiple times", n.name)));
-    if redefined || diag.contains("duplicate definitions with name `new`") {
+    let node_new = diag.contains("duplicate definitions with name `new`")
+        && NODE_STRUCTS.iter().any(|n| diag.contains(&format!("pub fn new(val: i32) -> Self {{ {} {{", n.name)));
+    if redefined || node_new {
         "\n\nHint: the judge already defines the node struct (the one described in the \
          starter's comment). Remove your own definition and its `new`. You can still add \
          other methods or trait impls (`impl Ord for ListNode`) to the judge's struct."
@@ -726,7 +736,14 @@ fn node_hint(diag: &str) -> &'static str {
 /// on rustc's own wording, like `node_hint`.
 fn ops_hint(diag: &str, class_name: &str, ops: &[(String, String)]) -> String {
     let mut hints = Vec::new();
-    let missing = |name: &str| diag.contains(&format!("named `{}` found for struct `{}`", name, class_name));
+    // rustc names the item as declared (`r#type` for a keyword) and says "struct" or
+    // "enum" depending on how the class is declared, so try each spelling.
+    let missing = |name: &str| {
+        let bare = name.trim_start_matches("r#");
+        [bare.to_string(), format!("r#{}", bare)].iter().any(|n| {
+            ["struct", "enum"].iter().any(|k| diag.contains(&format!("named `{}` found for {} `{}`", n, k, class_name)))
+        })
+    };
     if missing("new") {
         hints.push(format!(
             "the judge builds the object with `{}::new(...)`, called with the test case's \
@@ -735,12 +752,12 @@ fn ops_hint(diag: &str, class_name: &str, ops: &[(String, String)]) -> String {
         ));
     }
     for (op, method) in ops {
-        let method = method.trim_start_matches("r#");
-        if op != method && missing(method) {
+        let shown = method.trim_start_matches("r#");
+        if op != shown && missing(method) {
             hints.push(format!(
                 "the test cases call `{}`, which the judge calls as the Rust method `{}` (op \
                  names are converted to snake_case).",
-                op, method
+                op, shown
             ));
         }
     }

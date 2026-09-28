@@ -12,6 +12,7 @@ the image has (rust_runner.py). Build it first:
     docker build -f judge/Dockerfile.rust -t shikomi-judge-rust:latest judge/
 """
 import json
+import pathlib
 import time
 
 import pytest
@@ -1017,21 +1018,75 @@ def test_operations_only_dispatch_ops_the_cases_use():
     assert res[0]["status"] == "passed"
 
 
-def test_operations_method_names_match_the_backend_mirror():
-    """harness.rs `method_name` and backend `rust_method_name` must agree, or seed
-    validation would pass an op the judge then can't dispatch (or refuse a good one).
-    Each method returns its own name, so the replay shows which one each op reached."""
-    from app.sandbox import rust_method_name
+METHOD_NAMES = json.loads((pathlib.Path(__file__).parent / "rust_method_names.json").read_text())["names"]
 
-    ops = ["push", "getState", "insertCoin", "toJSON", "parseHTTPHeader", "get2nd", "level2Up",
-           "already_snake", "type", "matchAll", "XMLHttp"]
-    methods = [rust_method_name(op) for op in ops]
-    body = "\n".join(f'    fn {m}(&self) -> &\'static str {{ "{m}" }}'.replace("&'static str", "String")
-                     .replace(f'"{m}" }}', f'"{m}".to_string() }}') for m in methods)
+
+def test_operations_method_names_follow_the_shared_table():
+    """harness.rs `method_name` against judge/tests/rust_method_names.json, the table
+    backend tests hold `app/sandbox.py`'s `rust_method_name` to as well. Each method
+    returns its own name, so the replay shows which one each op reached."""
+    mapped = {op: m for op, m in METHOD_NAMES.items() if m is not None}
+    body = "\n".join(f'    fn {m}(&self) -> String {{ "{m}".to_string() }}' for m in mapped.values())
     code = f"struct Names;\n\nimpl Names {{\n    fn new() -> Self {{ Names }}\n{body}\n}}\n"
-    res = rust_results(ops_payload(code, [ops_case(0, [[]] + [(op, []) for op in ops], methods,
+    res = rust_results(ops_payload(code, [ops_case(0, [[]] + [(op, []) for op in mapped], list(mapped.values()),
                                                    class_name="Names")], class_name="Names"))
     assert res[0]["status"] == "passed", res[0]
+
+
+@pytest.mark.parametrize("op", sorted(op for op, m in METHOD_NAMES.items() if m is None))
+def test_operations_refused_op_names_are_a_judge_fault(op):
+    """An op the table refuses never reaches generated source. Seed validation
+    refuses it first; the harness's backstop is a judge fault (exit 3, no results)."""
+    pl = ops_payload(EDITOR, [ops_case(0, [[], (op, [])], [None])])
+    proc = run_rust_container(json.dumps(pl))
+    assert proc.returncode == 3 and proc.stdout == "", proc.stderr
+
+
+def test_operations_duplicate_new_gets_no_node_struct_hint():
+    """With no node struct declared, a duplicate `new` is the user's own, and the
+    node-struct hint would send them looking for a struct that doesn't exist."""
+    code = EDITOR + "\nimpl Editor {\n    fn new() -> Self { todo!() }\n}\n"
+    res = rust_results(ops_payload(code, [ops_case(0, [[], ("undo", [])], [""])]))
+    assert "duplicate definitions with name `new`" in res[0]["error"]
+    assert "node struct" not in res[0]["error"]
+
+
+def test_operations_hint_covers_enum_classes_and_keyword_methods():
+    code = """enum Machine { On }
+
+impl Machine {
+    fn new() -> Self { Machine::On }
+    fn Type(&self) -> i32 { 1 }
+}
+"""
+    res = rust_results(ops_payload(code, [ops_case(0, [[], ("Type", [])], [1], class_name="Machine")],
+                                   class_name="Machine"))
+    assert "the test cases call `Type`, which the judge calls as the Rust method `type`" in res[0]["error"]
+
+
+def test_operations_object_is_never_dropped_on_an_error():
+    """`ops::replay` never drops the object, error paths included (the same reason
+    `ret` leaks return values). A `Drop` that panics makes a drop visible: it would
+    replace the argument-count error with a panic."""
+    code = """struct Loud;
+
+impl Drop for Loud {
+    fn drop(&mut self) { panic!("dropped"); }
+}
+
+impl Loud {
+    fn new() -> Self { Loud }
+    fn size(&self, _x: i32) -> i32 { 0 }
+}
+"""
+    res = rust_results(ops_payload(code, [
+        ops_case(0, [[], ("size", [])], [0], class_name="Loud"),
+        ops_case(1, [[], ("size", [1])], [0], class_name="Loud"),
+    ], class_name="Loud"))
+    assert res[0]["status"] == "runtime_error"
+    assert res[0]["error"] == ("could not decode the test case: `size`: takes 1 argument "
+                               "but the test case passes 0")
+    assert res[1]["status"] == "passed"  # the success path doesn't drop it either
 
 
 def test_operations_case_shape_errors_are_decode_errors():

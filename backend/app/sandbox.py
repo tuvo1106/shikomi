@@ -120,14 +120,18 @@ def rust_method_name(op: str) -> str | None:
     """The Rust method an operations case's op name calls, or None if there can't
     be one. The name goes to snake_case (`getState` -> `get_state`, `toJSON` ->
     `to_json`), since the cases are shared and Rust methods are snake_case; a
-    reserved word gets the raw-identifier prefix (`type` -> `r#type`).
+    reserved word gets the raw-identifier prefix (`type` -> `r#type`). `new` is
+    refused: it's the constructor the glue calls, and one `impl` can't also have a
+    method of that name.
 
     A mirror of judge/harness_rs/harness.rs `method_name`, which is what the judge
     actually runs. Seed validation (`ProblemFile._ops_are_rust_methods`) uses it to
     refuse an op the Rust glue couldn't dispatch, or two ops that would land on one
     method, before a submission ever compiles. It lives here rather than in
     `app.schemas` so judge/tests/test_rust_protocol.py can import it without
-    pydantic and check it against the real harness.
+    pydantic. Both implementations are tested against one table,
+    judge/tests/rust_method_names.json, and backend tests check that the keyword
+    list matches harness.rs `KEYWORDS`.
     """
     if not _IDENTIFIER.fullmatch(op):
         return None
@@ -143,6 +147,6 @@ def rust_method_name(op: str) -> str | None:
         else:
             out.append(c)
     name = "".join(out)
-    if name in {"self", "super", "crate", "Self", "_"}:
+    if name in {"self", "super", "crate", "Self", "_", "new"}:
         return None
     return f"r#{name}" if name in _RUST_KEYWORDS else name

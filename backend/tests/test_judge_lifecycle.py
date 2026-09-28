@@ -8,17 +8,19 @@ Three failure modes, each easy to miss:
 * one worker replica's sweep reaping another replica's live sandbox.
 """
 import asyncio
+import json
+import pathlib
+import re
 import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
-import re
-
 import pytest
 from pydantic import ValidationError
 
 from app import judge_budget as jb
+from app import sandbox as sandbox_mod
 from app.sandbox import rust_method_name
 from app.schemas.problem import ProblemFile
 from app.queue import inflight_key
@@ -460,16 +462,30 @@ def test_rust_supports_operations_mode():
     ProblemFile.model_validate(_rust_ops_file(["push", "getState"], ["type"]))
 
 
-@pytest.mark.parametrize("op, method", [
-    ("push", "push"), ("getState", "get_state"), ("insertCoin", "insert_coin"),
-    ("toJSON", "to_json"), ("parseHTTPHeader", "parse_http_header"), ("get2nd", "get2nd"),
-    ("level2Up", "level2_up"), ("already_snake", "already_snake"), ("type", "r#type"),
-    ("Self", None), ("self", None), ("_", None), ("has-dash", None), ("9lives", None),
-])
+_REPO = pathlib.Path(__file__).resolve().parents[2]
+_METHOD_NAMES = json.loads((_REPO / "judge/tests/rust_method_names.json").read_text())["names"]
+
+
+@pytest.mark.parametrize("op, method", sorted(_METHOD_NAMES.items()))
 def test_rust_method_name_mirrors_the_harness(op, method):
-    """The same table as judge/tests/test_rust_protocol.py's, which runs the real
-    harness.rs `method_name`, so the two implementations can't drift apart."""
+    """The table judge/tests/test_rust_protocol.py also runs through the real
+    harness.rs `method_name`, so the two implementations are held to one spec."""
     assert rust_method_name(op) == method
+
+
+def test_rust_keyword_list_matches_the_harness():
+    """harness.rs `KEYWORDS` and `_RUST_KEYWORDS` decide which ops get `r#`. The
+    Docker test can only exercise a few keywords, so the lists are compared here,
+    where CI always runs."""
+    source = (_REPO / "judge/harness_rs/harness.rs").read_text()
+    block = re.search(r"const KEYWORDS: &\[&str\] = &\[(.*?)\];", source, re.S)
+    assert block, "KEYWORDS not found in harness.rs"
+    assert set(re.findall(r'"([^"]+)"', block.group(1))) == set(sandbox_mod._RUST_KEYWORDS)
+
+
+def test_rust_refuses_an_op_named_like_the_constructor():
+    with pytest.raises(ValidationError, match="op 'new' can't be a Rust method name"):
+        ProblemFile.model_validate(_rust_ops_file(["push", "new"]))
 
 
 def test_rust_refuses_an_op_that_cant_be_a_method():

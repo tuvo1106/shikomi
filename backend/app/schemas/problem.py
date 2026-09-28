@@ -164,13 +164,22 @@ def _is_index(x: Any, size: int) -> bool:
     return isinstance(x, int) and not isinstance(x, bool) and 0 <= x < size
 
 
+def _operations_case(case_input: Any) -> tuple[list, list]:
+    """An operations case's `(ops, args)`: `input` is `[ops, args]`, with `ops[0]`
+    the class name and `args[0]` the constructor's argument list. Either is [] for
+    a case that isn't shaped so (the harness reports that case; the validators that
+    read ops or constructor args just find nothing to check)."""
+    if isinstance(case_input, list) and len(case_input) == 2:
+        ops, args = case_input
+        return (ops if isinstance(ops, list) else [], args if isinstance(args, list) else [])
+    return [], []
+
+
 def _operations_ctor_args(case_input: Any) -> list:
-    """An operations case's constructor arguments (`input` is `[ops, args]`, and
-    `args[0]` is the constructor's list), or [] for a case that isn't shaped so."""
-    if isinstance(case_input, list) and len(case_input) == 2 and isinstance(case_input[1], list):
-        first = case_input[1][0] if case_input[1] else []
-        return first if isinstance(first, list) else []
-    return []
+    """An operations case's constructor arguments, or [] (see `_operations_case`)."""
+    _, args = _operations_case(case_input)
+    first = args[0] if args else []
+    return first if isinstance(first, list) else []
 
 
 def _malformed_node_wire(node_type: str, wire: Any) -> str | None:
@@ -521,12 +530,13 @@ class ProblemFile(ProblemIn):
         # (harness.rs `operations_glue`), after mapping it to snake_case. An op that
         # can't be a Rust identifier, or two ops that map to the same method
         # (`getState` and `get_state`), would fail every Rust submission; caught here.
+        # So would an op named `new`, the constructor's name (`rust_method_name`).
         if self.kind != "operations" or not any(v.language == "rust" for v in self.languages):
             return self
         methods: dict[str, str] = {}
         for tc in self.test_cases:
-            ops = tc.input[0] if isinstance(tc.input, list) and tc.input else []
-            for op in ops[1:] if isinstance(ops, list) else []:
+            ops, _ = _operations_case(tc.input)
+            for op in ops[1:]:
                 method = rust_method_name(op) if isinstance(op, str) else None
                 if method is None:
                     raise ValueError(f"test case {tc.ordinal}: op {op!r} can't be a Rust method name")

@@ -1354,9 +1354,10 @@ pub mod ops {
     /// case's op name to a `call`, or returns `None` for a name it doesn't know.
     /// The glue generates `dispatch` from the op names the payload's cases use.
     ///
-    /// The object is never dropped, for the same reason `ret` never drops a
-    /// return value: freeing a long linked structure recurses once per node, and
-    /// the process exits after this case anyway.
+    /// The object is never dropped, on any path (it's held in a `ManuallyDrop`),
+    /// for the same reason `ret` never drops a return value: freeing a long linked
+    /// structure recurses once per node, which could overflow the stack after a
+    /// clear error was already found, and the process exits after this case anyway.
     pub fn replay<S, K, C, D>(case: &[Json], new: C, mut dispatch: D) -> Result<Json, Fail>
     where
         C: Constructor<S, K>,
@@ -1373,7 +1374,9 @@ pub mod ops {
                 args.len()
             )));
         }
-        let mut obj = new.construct(arg_list(args, 0)?).map_err(|e| at("the constructor `new`", e))?;
+        let mut obj = std::mem::ManuallyDrop::new(
+            new.construct(arg_list(args, 0)?).map_err(|e| at("the constructor `new`", e))?,
+        );
         let mut out = Vec::with_capacity(ops.len());
         out.push(Json::Null);
         for i in 1..ops.len() {
@@ -1381,12 +1384,11 @@ pub mod ops {
                 Json::Str(op) => op.as_str(),
                 other => return Err(Fail::Decode(format!("operation {} is not a name: {}", i + 1, other.dump()))),
             };
-            match dispatch(&mut obj, op, arg_list(args, i)?) {
+            match dispatch(&mut *obj, op, arg_list(args, i)?) {
                 Some(result) => out.push(result?),
                 None => return Err(Fail::Decode(format!("unknown operation {:?}", op))),
             }
         }
-        std::mem::forget(obj);
         Ok(Json::Arr(out))
     }
 }

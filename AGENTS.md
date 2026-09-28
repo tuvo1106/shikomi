@@ -338,9 +338,10 @@ and `playwright`.
 - **Rust calls each op by its snake_case name.** The shared cases spell an op once for
   every language (`getState`), and the Rust glue calls `get_state`. The mapping exists
   twice: harness.rs `method_name`, which the judge runs, and `app/sandbox.py`
-  `rust_method_name`, which seed validation uses to refuse ops that can't map or that
-  collide. Change both together; `test_operations_method_names_match_the_backend_mirror`
-  (Docker-marked) runs one against the other.
+  `rust_method_name`, which seed validation uses to refuse ops that can't map, that
+  collide, or that map to `new` (the constructor). Change both together: both are held
+  to one table, `judge/tests/rust_method_names.json` (a backend test and a Docker-marked
+  harness test), and a backend test compares the two keyword lists.
 - **Rust node structs are generated per problem.** The glue defines only the node
   structs the Rust variant declares (harness.rs `node_structs`), in the user's crate. A
   Rust test payload that uses `ListNode` must declare it in `params`/`return_type`, or the
