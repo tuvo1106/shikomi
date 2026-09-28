@@ -59,13 +59,23 @@ impl PartialEq for Json {
             (Num(a), Num(b)) => a == b || (a.is_nan() && b.is_nan()),
             // Cross-representation numbers compare by value; bool never equals a
             // number (unlike Python's True == 1). harness.js is strict too.
-            (Int(a), Num(b)) | (Num(b), Int(a)) => (*a as f64) == *b,
+            (Int(a), Num(b)) | (Num(b), Int(a)) => int_equals_float(*a, *b),
             (Str(a), Str(b)) => a == b,
             (Arr(a), Arr(b)) => a == b,
             (Obj(a), Obj(b)) => a == b,
             _ => false,
         }
     }
+}
+
+/// Exact integer-vs-float equality. The obvious `a as f64 == b` rounds `a`
+/// first, and above 2^53 neighbouring integers share an f64, so a wrong
+/// 9007199254740993 would equal an expected 9007199254740992.0. Instead, a
+/// float equals an integer only if it's a whole number inside i64's range that
+/// converts to *exactly* that integer.
+fn int_equals_float(a: i64, b: f64) -> bool {
+    // 2^63 as f64 is exact; i64's range is [-2^63, 2^63).
+    b.fract() == 0.0 && b >= -9_223_372_036_854_775_808.0 && b < 9_223_372_036_854_775_808.0 && b as i64 == a
 }
 
 impl Json {

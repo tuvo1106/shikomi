@@ -203,9 +203,12 @@ async def test_run_judgement_dispatches_rust_to_its_image_with_an_exec_tmpfs(mon
     assert captured["image"] == judging_mod.settings.judge_image_rust
     assert captured["tmpfs_size_mb"] == 32
     assert captured["tmpfs_exec"] is True
-    # WALL_CLOCK_SLACK_S (10) + STARTUP_SLACK_S_BY_LANGUAGE["rust"] (10) + 1 case * 2s
-    assert captured["wall_timeout_s"] == pytest.approx(2 + 10 + 10)
+    # WALL_CLOCK_SLACK_S (10) + STARTUP_SLACK_S_BY_LANGUAGE["rust"] (10 + 2) + 1 case * 2s
+    assert captured["wall_timeout_s"] == pytest.approx(2 + 10 + 12)
     assert captured["payload"]["memory_limit_mb"] == 256
+    # The harness's compile deadline comes from the same constant the budget reserves.
+    from app.judge_budget import RUST_COMPILE_TIMEOUT_S
+    assert captured["payload"]["compile_timeout_s"] == RUST_COMPILE_TIMEOUT_S
 
 
 async def _make_pending(session_factory, user_id, problem_id, code="x", is_run=False):

@@ -25,10 +25,17 @@ WALL_CLOCK_SLACK_S = 10  # backstop above the harness's own per-case SIGALRM (§
 # boots more than an interpreter (today: "mysql" — judge/sql_entrypoint.sh copies the pre-baked
 # datadir into tmpfs and starts mariadbd before the harness even begins). ADR-0002's Phase 0
 # spike measured ~0.05-0.06s in practice; this is a generous multiple of that; python/js pay 0.
-# "rust" compiles the submission first: ~0.15s normally, but judge/harness_rs/harness.rs lets
-# rustc run up to COMPILE_TIMEOUT (10s) before giving up, so the budget reserves all of it
-# (ADR-0004).
-STARTUP_SLACK_S_BY_LANGUAGE = {"mysql": 2, "rust": 10}
+# "rust" compiles the submission first: ~0.15s normally, but rustc may run up to
+# RUST_COMPILE_TIMEOUT_S before the harness gives up, so the budget reserves all of it plus a
+# margin for the harness's own startup and payload parsing (ADR-0004).
+#
+# The worker sends RUST_COMPILE_TIMEOUT_S to the harness in the payload (`compile_timeout_s`,
+# worker/judging.py), so this one constant is both the harness's deadline and the budget's
+# reserve. Two hand-copied numbers would silently drift the first time someone raised one
+# (say, for gVisor's slower syscalls), and a slow compile would then eat the cases' budget and
+# read as a whole-submission time_limit_exceeded.
+RUST_COMPILE_TIMEOUT_S = 10
+STARTUP_SLACK_S_BY_LANGUAGE = {"mysql": 2, "rust": RUST_COMPILE_TIMEOUT_S + 2}
 
 # After the wall-clock kill the runner drains output (up to 5s) and the job writes the verdict
 # to Postgres; that has to fit inside the job timeout too.

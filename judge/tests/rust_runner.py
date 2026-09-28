@@ -9,11 +9,14 @@ The flags mirror worker/judging.py for language "rust": a 32MB tmpfs mounted
 `exec`, since the harness runs the binary it just compiled there (ADR-0004).
 """
 import json
+import os
 import pathlib
 import subprocess
 import sys
 
-IMAGE = "shikomi-judge-rust:latest"
+# RUST_IMAGE lets a run target another build, e.g. a pre-fix image to prove a
+# regression test actually fails without its fix.
+IMAGE = os.environ.get("RUST_IMAGE", "shikomi-judge-rust:latest")
 BACKEND = pathlib.Path(__file__).resolve().parents[2] / "backend"
 
 

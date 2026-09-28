@@ -460,7 +460,10 @@ def test_rust_memory_limit_must_leave_room_for_rustc():
     ProblemFile.model_validate(_file(1, language="python", memory_limit_mb=64))  # unaffected
 
 
-def test_rust_budget_reserves_the_compile_timeout():
-    # The harness lets rustc run up to 10s (harness.rs COMPILE_TIMEOUT); the wall
-    # budget must cover it or a slow compile would read as a whole-run TLE.
-    assert jb.wall_budget_s(1, 2000, "rust") == pytest.approx(2 + 10 + 10)
+def test_rust_budget_reserves_the_compile_timeout_with_margin():
+    # The worker sends RUST_COMPILE_TIMEOUT_S as the harness's rustc deadline; the wall
+    # budget must cover all of it (plus harness startup) or a slow compile would read
+    # as a whole-run TLE.
+    assert jb.STARTUP_SLACK_S_BY_LANGUAGE["rust"] > jb.RUST_COMPILE_TIMEOUT_S
+    assert jb.wall_budget_s(1, 2000, "rust") == pytest.approx(
+        2 + jb.WALL_CLOCK_SLACK_S + jb.RUST_COMPILE_TIMEOUT_S + 2)

@@ -25,8 +25,17 @@
 //!    allocation failure, `std::process::exit` or an infinite loop would each
 //!    lose *every* case's result. The spike measured all of these. A process
 //!    per case contains each failure to its own case for ~1.3ms of spawn
-//!    overhead. It also keeps `expected` out of reach: the child gets only the
-//!    input, and the comparison happens here in the trusted process.
+//!    overhead. It also keeps `expected` away from the submission: the child
+//!    gets only the input (on stdin, with a scrubbed environment), and the
+//!    comparison happens here in the trusted process. As defense in depth the
+//!    harness also marks itself non-dumpable, which refuses same-uid access to
+//!    its `/proc/1/environ` (readable without it; `/proc/1/mem` was already
+//!    refused by Docker's defaults, measured).
+//!    **Caveat:** that holds on the Docker runner, where the payload arrives on
+//!    stdin. The k8s runner mounts it as a file (JUDGE_PAYLOAD_FILE), and that
+//!    file stays readable to the child at its fixed path. The harness can't
+//!    hide it: the mount is read-only and the child runs as the same uid. The
+//!    Python harness has the same exposure (AGENTS.md TODO).
 //!
 //! Limits applied to each case's process: wall time `time_limit_ms` (enforced
 //! here, with SIGKILL), address space `memory_limit_mb` (`RLIMIT_AS`, so an
@@ -55,11 +64,25 @@ use std::time::{Duration, Instant};
 const TRUNC: usize = 4096; // per-field cap for output/stdout/error (DESIGN.md §5.3)
 const WORK: &str = "/tmp/judge";
 const PRELUDE_DIR: &str = "/opt/judge/lib";
-/// rustc's own hard stop. ADR-0004 measured ~150ms for a normal submission;
-/// the slowest hostile input it tried (a `const fn` loop) hit rustc's own
-/// const-eval limit at 1.7s. The worker's wall budget reserves time for this
-/// (`STARTUP_SLACK_S_BY_LANGUAGE["rust"]`, backend/app/judge_budget.py).
-const COMPILE_TIMEOUT: Duration = Duration::from_secs(10);
+/// rustc's hard stop when the payload doesn't carry one. The worker sends
+/// `compile_timeout_s` from backend/app/judge_budget.py's
+/// `RUST_COMPILE_TIMEOUT_S`, the same number its wall budget reserves, so the
+/// two can't drift apart. ADR-0004 measured ~150ms for a normal submission; the
+/// slowest hostile input it tried (a `const fn` loop) hit rustc's own
+/// const-eval limit at 1.7s.
+const DEFAULT_COMPILE_TIMEOUT_S: u64 = 10;
+/// The real toolchain binary, by absolute path. The rust base image puts
+/// rustup's proxy (`/usr/local/cargo/bin/rustc`) first on PATH, and the proxy
+/// re-resolves the toolchain on every call; judge/Dockerfile.rust links the
+/// real binary here.
+const RUSTC: &str = "/usr/local/bin/rustc";
+/// The whole environment a case's process gets. Nothing is inherited, so
+/// runner-specific variables (JUDGE_PAYLOAD_FILE on k8s) never reach it.
+const CASE_ENV: [(&str, &str); 3] = [
+    ("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"),
+    ("HOME", "/tmp"),
+    ("TMPDIR", "/tmp"),
+];
 const CASE_STACK_BYTES: u64 = 64 << 20;
 
 // libc's kill/setrlimit, declared by hand: std already links libc, and
@@ -75,7 +98,9 @@ unsafe extern "C" {
     fn setrlimit(resource: i32, rlim: *const RLimit) -> i32;
     fn setpgid(pid: i32, pgid: i32) -> i32;
     fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
+    fn prctl(option: i32, arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> i32;
 }
+const PR_SET_DUMPABLE: i32 = 4;
 const WNOHANG: i32 = 1;
 const SIGKILL: i32 = 9;
 const SIGSEGV: i32 = 11;
@@ -276,9 +301,18 @@ fn glue(function_name: &str, arity: usize) -> String {
 
 /// Compile `solution.rs` in WORK. `Err` carries the message for the single
 /// runtime_error row.
-fn compile() -> Result<(), String> {
+fn compile(timeout: Duration) -> Result<(), String> {
     let stderr_path = Path::new(WORK).join("rustc.stderr");
-    let child = Command::new("rustc")
+    let mut cmd = Command::new(RUSTC);
+    // Own process group, so a timeout kills the linker rustc spawned along with
+    // rustc itself (`end_case` below), not just rustc's pid.
+    unsafe {
+        cmd.pre_exec(|| {
+            setpgid(0, 0);
+            Ok(())
+        });
+    }
+    let child = cmd
         .current_dir(WORK) // relative path, so diagnostics read "solution.rs:3:5"
         .args(["--edition", "2024", "--crate-type", "bin", "--crate-name", "solution"])
         // opt-level=1: nearly all of O2's runtime on algorithmic code, ~140ms cheaper to
@@ -294,16 +328,22 @@ fn compile() -> Result<(), String> {
         .stderr(fs::File::create(&stderr_path).map_err(|e| format!("judge: {}", e))?)
         .spawn()
         .map_err(|e| format!("judge: could not start rustc: {}", e))?;
-    match supervise(child, Instant::now(), COMPILE_TIMEOUT) {
-        Exit::TimedOut => Err(format!("Compilation timed out after {}s", COMPILE_TIMEOUT.as_secs())),
+    let pid = child.id() as i32;
+    let exit = supervise(child, Instant::now(), timeout);
+    end_case(pid);
+    let diag = fs::read_to_string(&stderr_path).unwrap_or_default();
+    match exit {
+        Exit::TimedOut => Err(format!("Compilation timed out after {}s", timeout.as_secs())),
         Exit::Finished(status, _) if status.success() => Ok(()),
-        Exit::Finished(status, _) if status.signal() == Some(SIGKILL) => {
+        // The memory cgroup's OOM killer picks the biggest process, which is often
+        // the linker rustc spawned rather than rustc. rustc then exits normally,
+        // reporting "linking with `cc` failed: ... signal: 9 (SIGKILL)".
+        Exit::Finished(status, _)
+            if status.signal() == Some(SIGKILL) || diag.contains("signal: 9 (SIGKILL)") =>
+        {
             Err("Compilation ran out of memory".into())
         }
-        Exit::Finished(_, _) => {
-            let diag = fs::read_to_string(&stderr_path).unwrap_or_default();
-            Err(format!("Compile error:\n{}", diag.trim_end()))
-        }
+        Exit::Finished(_, _) => Err(format!("Compile error:\n{}", diag.trim_end())),
     }
 }
 
@@ -317,7 +357,9 @@ fn run_case(tc: &Json, time_limit: Duration, memory_bytes: Option<u64>, comparis
     let _ = fs::remove_file(&result_path);
 
     let mut cmd = Command::new(work.join("solution"));
-    cmd.env(shikomi_prelude::RESULT_ENV, &result_path)
+    cmd.env_clear()
+        .envs(CASE_ENV)
+        .env(shikomi_prelude::RESULT_ENV, &result_path)
         .stdin(Stdio::piped())
         // Files, not pipes: a pipe must be drained while the child runs, or a chatty
         // submission blocks on a full pipe and reads as a false time_limit_exceeded.
@@ -345,15 +387,24 @@ fn run_case(tc: &Json, time_limit: Duration, memory_bytes: Option<u64>, comparis
         Ok(c) => c,
         Err(e) => return CaseResult::error_row(id, format!("judge: could not start the program: {}", e)),
     };
+    // Feed the input from a thread, so the deadline below is already running
+    // while we write. A write larger than the pipe buffer (64KB) blocks until
+    // the child reads, and a child that never reads (e.g. one stalled in a static
+    // constructor before `main`) would otherwise block the harness with no
+    // deadline at all. Killing the child breaks the pipe, which ends the write
+    // with EPIPE (Rust ignores SIGPIPE), so the thread always finishes.
     let input = tc.get("input").dump();
-    if let Some(mut stdin) = child.stdin.take() {
-        // Ignore EPIPE: a program that exits without reading its input is judged
-        // by how it exited, not by our write failing.
-        let _ = stdin.write_all(input.as_bytes());
-    } // dropping stdin closes it, so the child's read_to_string sees EOF
+    let writer = child.stdin.take().map(|mut stdin| {
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(input.as_bytes());
+        }) // dropping stdin at the end closes it, so the child's read sees EOF
+    });
     let pid = child.id() as i32;
     let exit = supervise(child, start, time_limit);
     end_case(pid);
+    if let Some(w) = writer {
+        let _ = w.join();
+    }
     let stdout = read_capped(&out_path);
 
     let (status, took) = match exit {
@@ -473,7 +524,11 @@ fn run(payload: &Json) -> Vec<CaseResult> {
     {
         return vec![CaseResult::error_row(first_id, format!("judge: could not write the source: {}", e))];
     }
-    if let Err(e) = compile() {
+    let compile_timeout = Duration::from_secs(match payload.get("compile_timeout_s") {
+        Json::Int(n) if *n > 0 => *n as u64,
+        _ => DEFAULT_COMPILE_TIMEOUT_S,
+    });
+    if let Err(e) = compile(compile_timeout) {
         // One row, reported against the real case count by the aggregator
         // (0/N), the same as a Python SyntaxError.
         return vec![CaseResult::error_row(first_id, e)];
@@ -503,6 +558,13 @@ fn run(payload: &Json) -> Vec<CaseResult> {
 }
 
 fn main() {
+    // Non-dumpable: the kernel then refuses same-uid, non-root access to this
+    // process's /proc/<pid>/environ, /mem and ptrace. A case's process runs as the
+    // same uid 1000 as this one, which holds the whole payload. Measured without
+    // it: /proc/1/environ was readable, while /proc/1/mem was already refused
+    // under Docker's defaults. This makes the refusal ours rather than the
+    // runtime's (defense in depth).
+    unsafe { prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) };
     let raw = match std::env::var("JUDGE_PAYLOAD_FILE") {
         Ok(path) => fs::read_to_string(path),
         Err(_) => {

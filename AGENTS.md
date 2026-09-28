@@ -213,6 +213,15 @@ and `playwright`.
   stopped — under CI load that state update can lag a beat. A test asserting a
   killed container is gone via a single immediate `docker ps` check (rather than
   a short poll) is a latent flake — hit this in `test_sweep_orphans_kills_leftovers`.
+- **`RLIMIT_AS` caps virtual address space, not resident memory.** The Rust
+  harness sets it to the problem's whole `memory_limit_mb` for each case, which
+  makes single-threaded allocation bombs a clean per-case
+  `memory_limit_exceeded`. A multithreaded submission, though, reserves a 64MB
+  glibc malloc arena per thread plus each thread's stack, so at a 128MB limit it
+  can "run out" with a few MB resident. Recursion that grows the 64MB stack into
+  the ceiling faults as SIGSEGV ("segmentation fault") rather than a clean
+  stack-overflow message. Fine for single-threaded algorithm problems. Revisit
+  (a per-case cgroup, or an RSS watchdog) if Rust problems start using threads.
 - **Docker's `--tmpfs` is `noexec` by default.** Any harness that writes a
   binary into `/tmp` and runs it (today only Rust) needs
   `build_run_args(tmpfs_exec=True)` (`TMPFS_EXEC_LANGUAGES` in
@@ -325,6 +334,15 @@ slice ships, delete its entry here.
   Playwright job. Problems reach the migrate hook as a ConfigMap (`scripts/k8s-up.sh`,
   `PROBLEMS_DIR`), which caps at 1 MiB — a real problem set needs a PVC, an
   init-container `git clone`, or an image layer instead.
+
+- **Keep the k8s judge payload away from submissions:** the k8s runner mounts the
+  payload (every hidden case's `expected`) as a ConfigMap file at a fixed path,
+  and user code runs as the same uid as the harness, so a Python or Rust
+  submission can read it and return the answers. No harness can hide it from
+  inside (read-only mount, no privileges). It needs a runner change: deliver
+  the payload over the Pod's stdin (attach), or have an init step hand it to the
+  harness and then remove the file from a volume the main container can't
+  re-read. The Docker runner is unaffected (stdin only).
 
 - **Rust judge follow-ups** (v1 shipped, [ADR-0004](docs/adr/0004-rust-judge-compile-in-sandbox.md)):
   `kind: "operations"` for Rust. That needs machine-readable method signatures in

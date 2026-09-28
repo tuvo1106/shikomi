@@ -6,7 +6,7 @@ and Submit, so the two always judge identically. See DESIGN.md §5.2, §5.3.
 import json
 
 from app.config import get_settings
-from app.judge_budget import wall_budget_s
+from app.judge_budget import RUST_COMPILE_TIMEOUT_S, wall_budget_s
 from worker import runner
 from worker.aggregate import Verdict, aggregate, parse_harness_output
 
@@ -83,6 +83,9 @@ async def run_judgement(*, code, comparison, time_limit_ms, memory_limit_mb,
     cgroup limit. The Rust harness applies it per case as `RLIMIT_AS`, so an
     allocation bomb fails that one case as `memory_limit_exceeded` instead of
     drawing the container OOM killer (ADR-0004). The other harnesses ignore it.
+    `compile_timeout_s` is likewise Rust-only: the same constant the wall
+    budget reserves for compiling (app/judge_budget.py), sent so the harness's
+    deadline and the budget can't drift apart.
     """
     payload = json.dumps({
         "function_name": function_name,
@@ -91,6 +94,7 @@ async def run_judgement(*, code, comparison, time_limit_ms, memory_limit_mb,
         "comparison": comparison,
         "time_limit_ms": time_limit_ms,
         "memory_limit_mb": memory_limit_mb,
+        "compile_timeout_s": RUST_COMPILE_TIMEOUT_S,
         "params": params or [],
         "return_type": return_type,
         "kind": kind,

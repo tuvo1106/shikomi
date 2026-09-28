@@ -28,7 +28,7 @@ import sys
 
 import pytest
 
-from rust_runner import run_rust_container
+from rust_runner import rust_results
 from sql_runner import run_sql_container
 
 HARNESS_PY = pathlib.Path(__file__).resolve().parents[1] / "harness.py"
@@ -63,13 +63,6 @@ def _run_harness_sql(payload, timeout=30):
     return json.loads(proc.stdout)["results"]
 
 
-def _run_harness_rust(payload, timeout=60):
-    proc = run_rust_container(json.dumps(payload), container_name="judge-seed-validate-rust",
-                              memory_mb=payload["memory_limit_mb"], timeout=timeout)
-    assert proc.returncode == 0, proc.stderr
-    return json.loads(proc.stdout)["results"]
-
-
 # Languages judged in their real sandbox image rather than as a local subprocess.
 _CONTAINER_LANGUAGES = ("mysql", "rust")
 
@@ -78,7 +71,8 @@ def _run_harness(payload, language="python", timeout=15):
     if language == "mysql":
         return _run_harness_sql(payload, timeout=max(timeout, 30))
     if language == "rust":
-        return _run_harness_rust(payload)
+        return rust_results(payload, container_name="judge-seed-validate-rust",
+                            memory_mb=payload["memory_limit_mb"])
     return _run_harness_subprocess(payload, language, timeout=timeout)
 
 

@@ -15,9 +15,10 @@ RUN mkdir -p /opt/judge/lib \
  && rustc --edition 2024 -C opt-level=2 -C strip=symbols \
       -L /opt/judge/lib --extern shikomi_prelude=/opt/judge/lib/libshikomi_prelude.rlib \
       -o /opt/judge/harness /opt/judge/src/harness.rs \
- # Point `rustc` at the real toolchain binary instead of rustup's proxy shim:
- # the shim resolves the toolchain on every call (extra startup, and it wants a
- # writable RUSTUP_HOME for some operations), and the image pins exactly one toolchain.
+ # Link the real toolchain binary at a fixed path the harness calls directly
+ # (harness.rs `RUSTC`). Plain `rustc` on PATH is rustup's proxy shim, since the base
+ # image puts /usr/local/cargo/bin first, and the shim re-resolves the toolchain on
+ # every call. The image pins exactly one toolchain, so nothing needs the proxy.
  && ln -sf "$(rustc --print sysroot)/bin/rustc" /usr/local/bin/rustc \
  && useradd -m -u 1000 runner
 

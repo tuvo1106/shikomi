@@ -320,3 +320,66 @@ fn f(n: i32) -> i32 {
 """
     res = rust_results(payload(code, [case(0, [55], 55), case(1, [20], 20), case(2, [20], 20)]))
     assert [r["status"] for r in res] == ["passed", "passed", "passed"], res
+
+
+def test_a_case_cannot_read_the_payload_out_of_the_harness():
+    # The case's process runs as the same uid as the harness (PID 1), which holds
+    # the whole payload, every `expected` included. The harness marks itself
+    # non-dumpable, so same-uid /proc access to its memory and environment is
+    # refused, and the case gets a scrubbed environment of its own.
+    code = """
+fn f(_x: i32) -> String {
+    let mem = std::fs::File::open("/proc/1/mem").is_ok();
+    let environ = std::fs::read("/proc/1/environ").is_ok();
+    let mut keys: Vec<String> = std::env::vars().map(|(k, _)| k).collect();
+    keys.sort();
+    format!("mem={} environ={} env={}", mem, environ, keys.join(","))
+}
+"""
+    res = rust_results(payload(code, [case(0, [1], "SECRET-EXPECTED-VALUE")]))
+    assert res[0]["output"] == '"mem=false environ=false env=HOME,PATH,SHIKOMI_RESULT,TMPDIR"'
+
+
+def test_large_input_to_a_program_that_never_reads_it_still_times_out_per_case():
+    # A static constructor runs before `main`, so the program never reads stdin.
+    # With a >64KB input the pipe fills and the write blocks; the harness has to
+    # be enforcing the deadline *during* that write, or it hangs until the
+    # container's outer wall-clock kill and every per-case result is lost.
+    code = """
+extern "C" fn stall() { loop { std::hint::black_box(0); } }
+#[used]
+#[unsafe(link_section = ".init_array")]
+static STALL: extern "C" fn() = stall;
+
+fn f(v: Vec<i64>) -> usize { v.len() }
+"""
+    big = list(range(40_000))  # ~230KB of JSON
+    res = rust_results(payload(code, [case(0, [big], 0), case(1, [big], 0)], time_limit_ms=300),
+                       timeout=30)
+    assert [r["status"] for r in res] == ["time_limit_exceeded", "time_limit_exceeded"]
+
+
+def test_integers_past_2_53_are_not_rounded_into_equality():
+    # 9007199254740993 isn't representable as f64 and rounds to ...992. Comparing
+    # through `as f64` would call this wrong answer correct.
+    res = rust_results(payload("fn f(_x: i32) -> i64 { 9007199254740993 }",
+                               [case(0, [0], 9007199254740992.0), case(1, [0], 9007199254740993)]))
+    assert [r["status"] for r in res] == ["wrong_answer", "passed"]
+
+
+def test_compile_timeout_comes_from_the_payload():
+    # The worker sends compile_timeout_s from app/judge_budget.py, the same number
+    # the wall budget reserves. Allowing `long_running_const_eval` stops rustc from
+    # giving up on this 2^40-step const loop by itself, so only the harness's 1s
+    # deadline can end the compile, and the harness must still report cleanly
+    # (rustc and any linker it started are killed as a group).
+    code = """#![allow(long_running_const_eval)]
+const fn spin(n: u64) -> u64 { let mut i = 0; let mut s = 0; while i < n { s += i; i += 1; } s }
+const X: u64 = spin(1u64 << 40);
+fn f(_x: i32) -> u64 { X }
+"""
+    pl = payload(code, [case(0, [0], 0)])
+    pl["compile_timeout_s"] = 1
+    res = rust_results(pl)
+    assert res[0]["status"] == "runtime_error"
+    assert res[0]["error"] == "Compilation timed out after 1s"
