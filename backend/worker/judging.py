@@ -88,7 +88,8 @@ async def run_judgement(*, code, comparison, time_limit_ms, memory_limit_mb,
         memory_mb=memory_limit_mb, cpus=CPUS, pids_limit=PIDS_LIMIT,
         tmpfs_size_mb=profile.tmpfs_size_mb, tmpfs_exec=profile.tmpfs_exec,
         wall_timeout_s=wall_timeout)
-    return aggregate(result, parse_harness_output(result.stdout), total_cases=len(test_cases))
+    case_ids = [tc["id"] for tc in test_cases]
+    return aggregate(result, parse_harness_output(result.stdout, case_ids), total_cases=len(test_cases))
 
 
 def build_verdict_results(results: list[dict], cases: list) -> list[dict]:

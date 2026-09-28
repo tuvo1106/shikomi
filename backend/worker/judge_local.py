@@ -95,9 +95,9 @@ def main(argv=None):
     else:
         container_result = asyncio.run(_run_docker(payload_json, args))
 
-    total_cases = len(json.loads(payload_json).get("test_cases", []))
-    verdict = aggregate(container_result, parse_harness_output(container_result.stdout),
-                        total_cases=total_cases)
+    case_ids = [tc.get("id", 0) for tc in json.loads(payload_json).get("test_cases", [])]
+    verdict = aggregate(container_result, parse_harness_output(container_result.stdout, case_ids),
+                        total_cases=len(case_ids))
     _print_verdict(verdict)
     if container_result.stderr.strip():
         sys.stderr.write(container_result.stderr)
