@@ -8,7 +8,7 @@ from sqlalchemy import select
 
 from app import cli
 from app import judge_budget as jb
-from app.models import Problem, TestCase, User
+from app.models import Problem, Solution, TestCase, User
 from app.security import hash_password
 
 SEED = {
@@ -162,6 +162,62 @@ async def test_two_files_with_the_same_slug_are_refused(session_factory, monkeyp
     _write(tmp_path, "b")                                  # both slug "demo"
     assert await cli.seed(tmp_path) == 1
     assert await _problems(session_factory) == []
+
+
+MULTI = {
+    **{k: v for k, v in SEED.items()
+       if k not in ("function_name", "starter_code", "params", "solutions")},
+    "languages": [
+        {"language": "python", "function_name": "f", "starter_code": "def f(x): ...",
+         "params": [{"name": "x", "type": "int"}]},
+        {"language": "js", "function_name": "f", "starter_code": "var f = function(x) {};",
+         "params": [{"name": "x", "type": "number"}]},
+        {"language": "rust", "function_name": "f", "starter_code": "fn f(x: i64) -> i64 {}",
+         "params": [{"name": "x", "type": "i64"}], "note_md": "Use `i64`."},
+    ],
+    "memory_limit_mb": 256,
+    "solutions": [
+        {"ordinal": 0, "title": "S", "intuition_md": "e",
+         "code": {"python": "py", "js": "js", "rust": "rs"},
+         "time_complexity": "O(1)", "space_complexity": "O(1)"},
+        {"ordinal": 1, "title": "Rust only", "intuition_md": "e", "code": {"rust": "rs2"},
+         "time_complexity": "O(1)", "space_complexity": "O(1)"},
+    ],
+}
+
+
+async def test_seed_writes_every_language_and_its_solution_code(
+        session_factory, monkeypatch, tmp_path):
+    monkeypatch.setattr(cli, "SessionLocal", session_factory)
+    (tmp_path / "demo.json").write_text(json.dumps(MULTI))
+    assert await cli.seed(tmp_path) == 0
+    assert await cli.seed(tmp_path) == 0  # re-seed replaces, doesn't duplicate
+
+    [problem] = await _problems(session_factory)
+    assert [(v.ordinal, v.language) for v in problem.languages] == [
+        (0, "python"), (1, "js"), (2, "rust")]
+    assert problem.languages[2].note_md == "Use `i64`."
+    async with session_factory() as s:
+        sols = (await s.execute(select(Solution).order_by(Solution.ordinal))).scalars().all()
+        assert [{c.language: c.code for c in sol.codes} for sol in sols] == [
+            {"python": "py", "js": "js", "rust": "rs"}, {"rust": "rs2"}]
+
+
+async def test_a_single_language_file_is_lifted_into_languages(
+        session_factory, monkeypatch, tmp_path, capsys):
+    """Files written before problems had several languages still load, as one
+    Python variant, without an "unknown keys" warning for the old fields."""
+    monkeypatch.setattr(cli, "SessionLocal", session_factory)
+    _write(tmp_path, "demo")
+    assert await cli.seed(tmp_path) == 0
+    assert "unknown keys" not in capsys.readouterr().err
+    [problem] = await _problems(session_factory)
+    [variant] = problem.languages
+    assert (variant.language, variant.function_name, variant.starter_code) == (
+        "python", "f", "def f(x): ...")
+    async with session_factory() as s:
+        [sol] = (await s.execute(select(Solution))).scalars().all()
+        assert [(c.language, c.code) for c in sol.codes] == [("python", "c")]
 
 
 async def test_unknown_keys_warn_but_load(session_factory, monkeypatch, tmp_path, capsys):

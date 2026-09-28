@@ -30,6 +30,10 @@ vegetables, the part nobody sees. Practice is prep.
   - Python, JavaScript and Rust *functions*.
   - Python *classes* replayed against a sequence of method calls.
   - *SQL queries* against a per-test-case MariaDB database.
+- **One problem, several languages.** A problem can be offered in any mix of Python,
+  JavaScript and Rust, with one statement and one set of test cases. The editor
+  switches languages without losing your draft in each, and runtime rankings compare
+  you only against submissions in the same language.
 - **Real data structures as input and output.** The harness builds and compares
   linked lists, binary trees, cyclic lists, random-pointer lists and graphs from
   JSON encodings, and the workspace draws them as diagrams.
@@ -86,7 +90,8 @@ docker build -f judge/Dockerfile.sql-mysql -t shikomi-judge-sql:latest judge/
 
 A problem is one JSON file holding the statement, the test cases and the
 reference solutions. [DESIGN.md §7.1](DESIGN.md) documents the format, and the
-starters in [`seed/problems/`](seed/problems/) are complete examples. Keep your
+starters in [`seed/problems/`](seed/problems/) are complete examples
+(`merge-booking-windows.json` shows a problem offered in three languages). Keep your
 problems wherever you like; a separate git repo works well.
 
 ```bash

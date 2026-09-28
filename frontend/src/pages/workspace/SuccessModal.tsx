@@ -5,6 +5,7 @@ import { Modal } from '../../components/Modal'
 import type { ProblemListItem, RuntimeDistribution, Submission } from '../../api/types'
 import { Confetti } from './Confetti'
 import { Histogram } from './Histogram'
+import { beatsText } from '../../lib/languages'
 
 /**
  * The celebration shown after an accepted Submit: a confetti burst, the test-case
@@ -18,15 +19,20 @@ import { Histogram } from './Histogram'
  * server-side so it matches the list's own ordering. If there's none (everything
  * else solved) it falls back to the problem list, so the
  * call to action is never a dead end.
+ *
+ * On a multi-language problem the percentile and histogram cover only this
+ * submission's language (the server scopes them), and the sentence says so.
  */
 export function SuccessModal({
   submission,
   problemSlug,
+  multiLanguage = false,
   onClose,
   onViewSubmissions,
 }: {
   submission: Submission
   problemSlug: string
+  multiLanguage?: boolean
   onClose: () => void
   onViewSubmissions: () => void
 }) {
@@ -62,9 +68,7 @@ export function SuccessModal({
             </div>
           )}
           <div className="text-zinc-400">
-            {submission.runtime_percentile != null
-              ? `Beats ${submission.runtime_percentile}% of accepted submissions`
-              : "You're the first accepted submission!"}
+            {beatsText(submission.runtime_percentile, submission.language, multiLanguage)}
           </div>
         </div>
         {dist && dist.total > 1 && <Histogram dist={dist} runtime={submission.runtime_ms} />}

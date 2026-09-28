@@ -10,6 +10,7 @@ import type { Language, Solution, SolutionsResponse } from '../../api/types'
 import { CodeBlock } from './CodeBlock'
 import { SectionLabel } from './ui'
 import { useTheme } from '../../lib/theme'
+import { LANGUAGE_LABEL } from '../../lib/languages'
 
 /**
  * The Solutions tab, behind a spoiler soft-gate: it warns before revealing
@@ -17,17 +18,27 @@ import { useTheme } from '../../lib/theme'
  * (a nudge, not a wall — solved users or those who previously confirmed skip it).
  * The solutions query is disabled until revealed, so we don't even fetch spoilers
  * the user hasn't asked to see.
+ *
+ * Code follows the editor's language (`language`); the prose and complexity are
+ * shared. An approach without code in that language says which languages it
+ * does have and offers to switch, rather than silently showing another
+ * language's code.
  */
 export function Solutions({
   slug,
   solved,
   language,
+  languages,
   onLoadCode,
+  onSwitchLanguage,
 }: {
   slug: string
   solved: boolean
   language: Language
-  onLoadCode: (code: string) => void
+  /** Every language the problem offers, default first. */
+  languages: Language[]
+  onLoadCode: (code: string, language: Language) => void
+  onSwitchLanguage: (language: Language) => void
 }) {
   // Soft gate (§6.3): spoiler warning unless already solved or previously confirmed.
   const [revealed, setRevealed] = useState(
@@ -62,7 +73,14 @@ export function Solutions({
   return (
     <div className="space-y-8">
       {data?.items.map((s) => (
-        <SolutionView key={s.id} solution={s} language={language} onLoadCode={onLoadCode} />
+        <SolutionView
+          key={s.id}
+          solution={s}
+          language={language}
+          languages={languages}
+          onLoadCode={onLoadCode}
+          onSwitchLanguage={onSwitchLanguage}
+        />
       ))}
     </div>
   )
@@ -96,28 +114,60 @@ function MarkdownSection({ label, md }: { label: string; md: string }) {
 function SolutionView({
   solution,
   language,
+  languages,
   onLoadCode,
+  onSwitchLanguage,
 }: {
   solution: Solution
   language: Language
-  onLoadCode: (code: string) => void
+  languages: Language[]
+  onLoadCode: (code: string, language: Language) => void
+  onSwitchLanguage: (language: Language) => void
 }) {
+  const code = solution.code[language]
+  // In the problem's order, so "Rust only" and the switch buttons read consistently.
+  const covered = languages.filter((l) => solution.code[l] !== undefined)
+  const partial = languages.length > 1 && covered.length < languages.length
   return (
     <div className="space-y-3">
-      <h3 className="text-base font-semibold text-zinc-100">{solution.title}</h3>
+      <h3 className="flex flex-wrap items-baseline gap-2 text-base font-semibold text-zinc-100">
+        {solution.title}
+        {partial && (
+          <span className="text-xs font-normal text-zinc-500">
+            {covered.map((l) => LANGUAGE_LABEL[l]).join(', ')} only
+          </span>
+        )}
+      </h3>
       <MarkdownSection label="Intuition" md={solution.intuition_md} />
       {solution.algorithm_md && <MarkdownSection label="Algorithm" md={solution.algorithm_md} />}
       <div>
         <div className="mb-1 flex items-center justify-between">
           <SectionLabel>Implementation</SectionLabel>
-          <button
-            onClick={() => onLoadCode(solution.code)}
-            className="rounded border border-zinc-700 px-2 py-0.5 text-xs text-zinc-300 hover:bg-zinc-800"
-          >
-            Load into editor
-          </button>
+          {code !== undefined && (
+            <button
+              onClick={() => onLoadCode(code, language)}
+              className="rounded border border-zinc-700 px-2 py-0.5 text-xs text-zinc-300 hover:bg-zinc-800"
+            >
+              Load into editor
+            </button>
+          )}
         </div>
-        <CodeBlock code={solution.code} language={language} copyable={false} />
+        {code !== undefined ? (
+          <CodeBlock code={code} language={language} copyable={false} />
+        ) : (
+          <div className="flex flex-wrap items-center gap-2 rounded border border-zinc-800 bg-zinc-900/40 p-2 text-sm text-zinc-500">
+            No {LANGUAGE_LABEL[language]} version of this approach.
+            {covered.map((l) => (
+              <button
+                key={l}
+                onClick={() => onSwitchLanguage(l)}
+                className="rounded border border-zinc-700 px-2 py-0.5 text-xs text-zinc-300 hover:bg-zinc-800"
+              >
+                Switch to {LANGUAGE_LABEL[l]}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
       <div>
         <SectionLabel>Complexity Analysis</SectionLabel>

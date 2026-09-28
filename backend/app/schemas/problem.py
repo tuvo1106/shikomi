@@ -90,6 +90,9 @@ class ProblemListItem(BaseModel):
     title: str
     difficulty: str
     tags: list[str]
+    # The problem's languages, default first — lets the catalog show which
+    # languages a problem can be solved in without fetching each detail.
+    languages: list[str]
     user_status: UserStatus
 
 
@@ -106,19 +109,35 @@ class ProblemFacets(BaseModel):
     collections: list[str]
 
 
+class LanguageVariantOut(BaseModel):
+    """One language a problem is offered in, as the workspace needs it: what to
+    pre-fill the editor with, how to label the params, and the statement note.
+    """
+
+    language: str
+    starter_code: str
+    function_name: str | None = None
+    class_name: str | None = None
+    params: list[ParamSpec]
+    return_type: str
+    note_md: str = ""
+
+
 class ProblemDetail(BaseModel):
+    """The workspace's view of a problem.
+
+    `languages` is ordered, default first (docs/adr/0005-multi-language-
+    problems.md); a one-language problem simply has one entry. Everything
+    outside it (statement, kind, samples) is shared by every language.
+    """
+
     id: uuid.UUID
     slug: str
     title: str
     difficulty: str
     statement_md: str
-    starter_code: str
     kind: str
-    language: str
-    function_name: str | None = None
-    class_name: str | None = None
-    params: list[ParamSpec]
-    return_type: str
+    languages: list[LanguageVariantOut]
     tags: list[str]
     constraints: list[str]
     sample_cases: list[SampleCase]
@@ -128,6 +147,32 @@ class ProblemDetail(BaseModel):
 
 # --- write models (seed loading) --------------------------------------------
 
+# The fields that were top-level before problems had several languages. A file
+# may still put them at the top level (one language); `ProblemIn` lifts them into
+# a one-element `languages` list, and `app.cli` doesn't warn about them.
+LEGACY_LANGUAGE_FIELDS = (
+    "language", "starter_code", "function_name", "class_name", "params", "return_type")
+
+# Codec param types only judge/harness.py implements.
+_NODE_PARAM_TYPES = (
+    "ListNode", "TreeNode", "List[ListNode]", "List[TreeNode]",
+    "CyclicListNode", "RandomListNode", "GraphNode", "Iterator",
+)
+
+
+class LanguageVariantIn(BaseModel):
+    """One entry of a problem file's `languages` list (DESIGN.md §7.1)."""
+
+    language: Language
+    starter_code: str
+    function_name: str | None = None
+    class_name: str | None = None
+    params: list[ParamSpec] = Field(default_factory=list)
+    return_type: ReturnType = ""
+    # A short language-specific addendum to the shared statement (Markdown).
+    note_md: str = ""
+
+
 class ProblemIn(BaseModel):
     """A problem's metadata as `app.cli seed` loads it (a full replace on update).
 
@@ -136,6 +181,10 @@ class ProblemIn(BaseModel):
     `is_published=False` so new problems start as drafts. `default_factory` (not a
     bare `[]`/`{}`) avoids the classic mutable-default trap where every instance
     would share one list/dict.
+
+    `languages` is ordered, default first. The rules tying a language to the
+    shared `kind` and `comparison` are checked for **every** variant, since any
+    of them can be submitted to.
     """
 
     slug: str | None = None  # auto-generated from title if omitted
@@ -143,12 +192,7 @@ class ProblemIn(BaseModel):
     difficulty: Difficulty
     statement_md: str
     kind: Kind = "function"
-    language: Language = "python"
-    function_name: str | None = None
-    class_name: str | None = None
-    starter_code: str
-    params: list[ParamSpec] = Field(default_factory=list)
-    return_type: ReturnType = ""
+    languages: list[LanguageVariantIn] = Field(min_length=1)
     comparison: dict = Field(default_factory=lambda: {"mode": "exact"})
     # gt=0: the harness floors 0/negative to a 1ms timeout (judge/harness.py), which
     # doesn't crash but makes every submission bogusly time out. Upper bounds are
@@ -163,6 +207,32 @@ class ProblemIn(BaseModel):
     # (`?collection=`, §4.2), so it isn't added to ProblemListItem/ProblemDetail.
     collections: list[str] = Field(default_factory=list)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _lift_single_language_form(cls, data: Any) -> Any:
+        # A file written before problems had several languages carries its one
+        # language's fields at the top level. Lift them into `languages` so both
+        # forms load: problem directories outside this repo keep working, and a
+        # one-language problem stays as terse as it always was. Using both forms
+        # at once is ambiguous (which one wins?), so it's an error.
+        if not isinstance(data, dict):
+            return data
+        legacy = {k: data[k] for k in LEGACY_LANGUAGE_FIELDS if k in data}
+        if not legacy:
+            return data
+        if "languages" in data:
+            raise ValueError(
+                f"use either 'languages' or the top-level {sorted(legacy)}, not both")
+        rest = {k: v for k, v in data.items() if k not in legacy}
+        return {**rest, "languages": [{"language": "python", **legacy}]}
+
+    @model_validator(mode="after")
+    def _languages_are_unique(self) -> "ProblemIn":
+        names = [v.language for v in self.languages]
+        if len(names) != len(set(names)):
+            raise ValueError("each language may appear only once in 'languages'")
+        return self
+
     @model_validator(mode="after")
     def _exactly_one_name_for_kind(self) -> "ProblemIn":
         # The harness looks up function_name (kind="function") or class_name
@@ -171,19 +241,22 @@ class ProblemIn(BaseModel):
         # every submission, instead of a clear validation error at seed time.
         # kind="sql" invokes neither — the harness runs the submission as a raw
         # query (judge/harness_sql.py), so both must be unset.
-        if self.kind == "function":
-            if not self.function_name:
-                raise ValueError("function_name is required when kind is 'function'")
-            if self.class_name:
-                raise ValueError("class_name must not be set when kind is 'function'")
-        elif self.kind == "operations":
-            if not self.class_name:
-                raise ValueError("class_name is required when kind is 'operations'")
-            if self.function_name:
-                raise ValueError("function_name must not be set when kind is 'operations'")
-        else:  # kind == "sql"
-            if self.function_name or self.class_name:
-                raise ValueError("function_name/class_name must not be set when kind is 'sql'")
+        for v in self.languages:
+            where = f"language '{v.language}': "
+            if self.kind == "function":
+                if not v.function_name:
+                    raise ValueError(where + "function_name is required when kind is 'function'")
+                if v.class_name:
+                    raise ValueError(where + "class_name must not be set when kind is 'function'")
+            elif self.kind == "operations":
+                if not v.class_name:
+                    raise ValueError(where + "class_name is required when kind is 'operations'")
+                if v.function_name:
+                    raise ValueError(
+                        where + "function_name must not be set when kind is 'operations'")
+            elif v.function_name or v.class_name:  # kind == "sql"
+                raise ValueError(
+                    where + "function_name/class_name must not be set when kind is 'sql'")
         return self
 
     @model_validator(mode="after")
@@ -192,33 +265,42 @@ class ProblemIn(BaseModel):
         # (DESIGN.md §13): no "operations" kind, no ListNode/TreeNode codecs.
         # Reject the combination here rather than letting it surface as a
         # confusing runtime_error from the harness on every submission.
-        if not profile_for(self.language).function_mode_only:
-            return self
-        lang = self.language
-        if self.kind != "function":
-            raise ValueError(f"language '{lang}' only supports kind 'function'")
-        if self.return_type:
-            raise ValueError(f"language '{lang}' does not support a ListNode/TreeNode return_type")
-        if any(
-            p.type in (
-                "ListNode", "TreeNode", "List[ListNode]", "List[TreeNode]",
-                "CyclicListNode", "RandomListNode", "GraphNode", "Iterator",
-            )
-            for p in self.params
-        ):
-            raise ValueError(f"language '{lang}' does not support a ListNode/TreeNode param type")
+        for v in self.languages:
+            if not profile_for(v.language).function_mode_only:
+                continue
+            lang = v.language
+            if self.kind != "function":
+                raise ValueError(f"language '{lang}' only supports kind 'function'")
+            if v.return_type:
+                raise ValueError(
+                    f"language '{lang}' does not support a ListNode/TreeNode return_type")
+            if any(p.type in _NODE_PARAM_TYPES for p in v.params):
+                raise ValueError(
+                    f"language '{lang}' does not support a ListNode/TreeNode param type")
+        return self
+
+    @model_validator(mode="after")
+    def _same_params_in_every_language(self) -> "ProblemIn":
+        # The test cases are shared, and a case's `input` is positional: one JSON
+        # value per param. A variant with a different param count could never
+        # match them. Names and types may differ (they're per-language display).
+        counts = {len(v.params) for v in self.languages}
+        if len(counts) > 1:
+            raise ValueError("every language must declare the same number of params")
         return self
 
     @model_validator(mode="after")
     def _memory_fits_the_sandbox(self) -> "ProblemIn":
         # A language can need a floor under memory_limit_mb: Rust's rustc compiles
         # the submission inside the same limit (~75MB peak, ADR-0004), so below its
-        # profile's floor a problem could fail to *compile* on the judge.
-        floor = profile_for(self.language).min_memory_limit_mb
-        if self.memory_limit_mb < floor:
-            raise ValueError(
-                f"language '{self.language}' needs memory_limit_mb >= {floor}: "
-                "its judge's own work (rustc, for Rust) runs inside the same limit")
+        # profile's floor a problem could fail to *compile* on the judge. The limit
+        # is shared, so it must clear every language's floor.
+        for v in self.languages:
+            floor = profile_for(v.language).min_memory_limit_mb
+            if self.memory_limit_mb < floor:
+                raise ValueError(
+                    f"language '{v.language}' needs memory_limit_mb >= {floor}: "
+                    "its judge's own work (rustc, for Rust) runs inside the same limit")
         return self
 
     @model_validator(mode="after")
@@ -228,11 +310,13 @@ class ProblemIn(BaseModel):
         # needs the problem author's `validator_code` to actually check
         # anything — reject a missing/empty one at authoring time rather than
         # letting every submission to the problem silently pass/fail against
-        # whatever the harness falls back to.
+        # whatever the harness falls back to. The comparison is shared, so a
+        # second language would be judged by a harness that can't run it.
         if self.comparison.get("mode") == "custom_validator":
-            if self.language != "python":
+            if [v.language for v in self.languages] != ["python"]:
                 raise ValueError(
-                    "comparison mode 'custom_validator' is only supported for language 'python'")
+                    "comparison mode 'custom_validator' is only supported when "
+                    "'python' is the problem's only language")
             code = self.comparison.get("validator_code")
             if not isinstance(code, str) or not code.strip():
                 raise ValueError(
@@ -248,13 +332,16 @@ class ProblemIn(BaseModel):
         # authoring time rather than letting it surface as a confusing
         # "kind '...' is not supported by the SQL harness" runtime_error, or a
         # 'mysql'-language problem trying to run through the python harness.
-        if (self.kind == "sql") != (self.language == "mysql"):
-            raise ValueError("kind 'sql' and language 'mysql' must be set together")
-        if self.kind == "sql":
-            if self.params:
-                raise ValueError("kind 'sql' does not use params — the submission is a raw query")
-            if self.return_type:
-                raise ValueError("kind 'sql' does not use return_type — rows are compared directly")
+        for v in self.languages:
+            if (self.kind == "sql") != (v.language == "mysql"):
+                raise ValueError("kind 'sql' and language 'mysql' must be set together")
+            if self.kind == "sql":
+                if v.params:
+                    raise ValueError(
+                        "kind 'sql' does not use params — the submission is a raw query")
+                if v.return_type:
+                    raise ValueError(
+                        "kind 'sql' does not use return_type — rows are compared directly")
         return self
 
 
@@ -309,15 +396,48 @@ class ProblemFile(ProblemIn):
         return self
 
     @model_validator(mode="after")
+    def _solution_code_per_language(self) -> "ProblemFile":
+        # A solution's `code` is a {language: code} map. A plain string is the
+        # one-language shorthand (and every file written before problems had
+        # several languages), so it's only unambiguous with exactly one language.
+        declared = [v.language for v in self.languages]
+        for sol in self.solutions:
+            if isinstance(sol.code, str):
+                if len(declared) != 1:
+                    raise ValueError(
+                        f"solution '{sol.title}': give 'code' as a map of language to code "
+                        "when the problem has several languages")
+                sol.code = {declared[0]: sol.code}
+            if not sol.code:
+                raise ValueError(f"solution '{sol.title}' has no code")
+            extra = set(sol.code) - set(declared)
+            if extra:
+                raise ValueError(
+                    f"solution '{sol.title}' has code for {sorted(extra)}, "
+                    "which the problem doesn't list in 'languages'")
+        # Every language needs a reference solution, or nothing (the seed-solution
+        # tests in judge/tests/) proves that language's signature and harness can
+        # pass the cases at all.
+        if self.solutions:
+            covered = {lang for sol in self.solutions for lang in sol.code}
+            missing = [lang for lang in declared if lang not in covered]
+            if missing:
+                raise ValueError(f"no solution has code for {missing}")
+        return self
+
+    @model_validator(mode="after")
     def _fits_judge_budget(self) -> "ProblemFile":
         # A full run (cases x time limit + slack) must finish inside arq's judge
         # job_timeout, or arq cancels the job before the runner's own kill fires
         # (app/judge_budget.py). Checked against *this file's* cases and limit
-        # together, so changing both in one edit is judged on the new numbers.
+        # together, so changing both in one edit is judged on the new numbers,
+        # and for every language, since each has its own startup slack.
         n = len(self.test_cases)
-        if not fits_job_timeout(n, self.time_limit_ms, self.language):
-            most = max_cases_within_job_timeout(self.time_limit_ms, self.language)
-            raise ValueError(
-                f"{n} test cases at {self.time_limit_ms} ms each cannot finish inside the judge "
-                f"job timeout; use at most {most} cases, or a shorter time limit")
+        for v in self.languages:
+            if not fits_job_timeout(n, self.time_limit_ms, v.language):
+                most = max_cases_within_job_timeout(self.time_limit_ms, v.language)
+                raise ValueError(
+                    f"{n} test cases at {self.time_limit_ms} ms each cannot finish inside the "
+                    f"judge job timeout for language '{v.language}'; use at most {most} cases, "
+                    "or a shorter time limit")
         return self

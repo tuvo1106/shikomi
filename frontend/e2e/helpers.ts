@@ -10,8 +10,8 @@ export const DEV_USER = { email: 'dev@example.com', password: 'devpassword' }
 // file (cwd is frontend/ when Playwright runs) so the spec can't drift from what
 // `app.cli seed` loaded. Its first editorial solution is the correct submission; the
 // starter code, whose methods all return None, is the wrong one. Code is injected via
-// localStorage (`code:<slug>`, which the Workspace reads on mount) so we never have to
-// fight Monaco's auto-indent when typing Python.
+// localStorage (`code:<slug>:<language>`, the per-language draft the Workspace reads on
+// mount) so we never have to fight Monaco's auto-indent when typing Python.
 const SOLVE_SEED = JSON.parse(
   readFileSync(path.resolve(process.cwd(), '../seed/problems/design-vending-machine.json'), 'utf8'),
 )
@@ -20,6 +20,7 @@ export const SOLVE_PROBLEM: { slug: string; title: string } = {
   title: SOLVE_SEED.title,
 }
 export const SOLVE_CORRECT: string = SOLVE_SEED.solutions[0].code
+// The single-language shorthand: its one language's fields sit at the top level.
 export const SOLVE_WRONG: string = SOLVE_SEED.starter_code
 
 function unique(prefix: string) {
@@ -51,9 +52,10 @@ export async function login(page: Page, email: string, password: string) {
   await page.getByRole('button', { name: 'Sign in' }).click()
 }
 
-/** Seed editor code for a slug, then open that problem's workspace. */
-export async function openProblemWithCode(page: Page, slug: string, code: string) {
-  await page.evaluate(([k, v]) => localStorage.setItem(k, v), [`code:${slug}`, code] as const)
+/** Seed editor code for a slug (in `language`, the problem's default unless given),
+ * then open that problem's workspace. */
+export async function openProblemWithCode(page: Page, slug: string, code: string, language = 'python') {
+  await page.evaluate(([k, v]) => localStorage.setItem(k, v), [`code:${slug}:${language}`, code] as const)
   await page.goto(`/problems/${slug}`)
 }
 

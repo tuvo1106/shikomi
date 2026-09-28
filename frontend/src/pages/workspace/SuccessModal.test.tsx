@@ -12,6 +12,7 @@ const SUB: Submission = {
   problem_id: 'p1',
   status: 'accepted',
   code: '',
+  language: 'python',
   is_run: false,
   runtime_ms: 12,
   created_at: 'now',
@@ -20,7 +21,7 @@ const SUB: Submission = {
 }
 
 const item = (slug: string, title: string) => ({
-  id: slug, slug, title, difficulty: 'easy', tags: [], user_status: 'unsolved',
+  id: slug, slug, title, difficulty: 'easy', tags: [], languages: ['python'], user_status: 'unsolved',
 })
 
 /** Render the modal with `/problems/pair-sum/next` answering `next` (null = none). */

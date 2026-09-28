@@ -134,6 +134,25 @@ async def test_solutions_endpoint(client, make_problem, user_headers):
     items = r.json()["items"]
     assert len(items) == 1
     assert items[0]["time_complexity"] == "O(n)"
+    assert items[0]["code"] == {"python": "python: pair_sum"}
+
+
+async def test_detail_lists_every_language_default_first(client, make_problem, user_headers):
+    """Each language carries its own starter code and signature; the order is
+    the authored one, so the first entry is the workspace's default."""
+    await make_problem(slug="pair-sum", languages=("rust", "python", "js"))
+    body = (await client.get("/api/v1/problems/pair-sum", headers=user_headers)).json()
+    assert [v["language"] for v in body["languages"]] == ["rust", "python", "js"]
+    assert body["languages"][0]["starter_code"] == "rust: pair_sum(nums, target)"
+    assert body["languages"][0]["function_name"] == "pair_sum"
+    assert "starter_code" not in body  # nothing language-specific at the top level
+
+    listed = (await client.get("/api/v1/problems", headers=user_headers)).json()["items"]
+    assert listed[0]["languages"] == ["rust", "python", "js"]
+
+    sols = (await client.get("/api/v1/problems/pair-sum/solutions",
+                             headers=user_headers)).json()["items"]
+    assert set(sols[0]["code"]) == {"rust", "python", "js"}
 
 
 async def test_difficulty_filter_validation(client, user_headers):
