@@ -209,3 +209,20 @@ def test_sweep_orphans_skips_container_this_process_started():
         assert not result.oom_killed
     finally:
         subprocess.run(["docker", "rm", "-f", "sweeptest-active"], capture_output=True)
+
+
+def test_submission_cannot_read_the_parents_memory():
+    # The submission runs in a child; the parent (which holds every `expected`)
+    # is marked non-dumpable and the container runs non-root, so the child can't
+    # open the parent's /proc/<pid>/mem. It returns a "blocked" string (never
+    # "OPENED"), which fails the case rather than leaking the answers.
+    code = ("import os\n"
+            "def f(x):\n"
+            "    try:\n"
+            "        os.open('/proc/%d/mem' % os.getppid(), os.O_RDONLY)\n"
+            "        return 'OPENED'\n"
+            "    except OSError as e:\n"
+            "        return 'blocked:' + e.strerror\n")
+    out = json.loads(run_container(_payload(code)).stdout)["results"][0]["output"]
+    assert "OPENED" not in out
+    assert "blocked" in out

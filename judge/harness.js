@@ -320,174 +320,283 @@ function awaitIfThenable(value, remainingMs) {
   });
 }
 
-// --- execution ---------------------------------------------------------------
+// --- execution: a trusted parent and an untrusted child ----------------------
+// Like the Python harness (DESIGN.md §5.3), the submission runs in a separate
+// **child** process, never here. `vm` is not a security boundary — user code
+// can reach the host realm through it — so the child, not the context, is what
+// isolates the submission. The parent holds every case's `expected`, decides
+// pass/fail with `compare()`, and alone writes the `{"results": [...]}` report.
+// The child receives only the submission and each case's *input* (fd 0), returns
+// the value it produced on a private pipe (fd 3), and has its stdout/stderr
+// pointed at /dev/null. So a fabricated return value can't pass without knowing
+// an `expected` the child never sees, and the child can't reach the report
+// stream. The parent keeps one child for the run and respawns it only after a
+// timeout or crash.
 
-/**
- * Compile the user's code once, then run it against each test case.
- *
- * Mirrors harness.py's `run()`: `vm.Script`/`runInContext` the submission into
- * a fresh context (a top-level failure — syntax error, throw at def time —
- * becomes a single runtime_error), look up `function_name` in that context,
- * then loop the cases. Per case we JSON-round-trip the input (so one case's
- * mutation can't leak into the next, like Python's `copy.deepcopy`), call the
- * function inside a timed `vm.runInContext` (Node's closest analogue to the
- * Python harness's per-case SIGALRM), capture `console.log` output, and
- * compare the result.
- *
- * If the call returns a thenable, it's awaited (`awaitIfThenable`) against
- * whatever's left of the case's `time_limit_ms` after the synchronous portion
- * — `vm`'s own `timeout` option only ever covers the synchronous call itself,
- * never a Promise it hands back, so this is a second, separate timeout on the
- * host's real event loop rather than an extension of the first.
- */
-async function run(payload) {
-  const kind = payload.kind || 'function';
-  const testCases = payload.test_cases || [];
-  const firstId = testCases.length ? (testCases[0].id !== undefined ? testCases[0].id : 0) : 0;
+const CHILD_FLAG = '--child';
+const RESULT_FD = 3;         // the private child->parent pipe (stdio index 3)
+const SETUP_GRACE_MS = 10000; // ceiling for the one-time compile in the child
+const KILL_GRACE_MS = 500;    // extra wall time past the case limit before the parent kills
 
-  if (kind !== 'function') {
-    return [{
-      test_case_id: firstId,
-      status: 'runtime_error',
-      runtime_ms: 0,
-      output: null,
-      stdout: '',
-      error: `kind '${kind}' is not supported by the JavaScript harness`,
-    }];
-  }
+// --- the child: runs the submission, never sees `expected` -------------------
 
-  const functionName = payload.function_name;
-  const userCode = payload.user_code;
-  const comparison = payload.comparison || { mode: 'exact' };
-  const timeLimitMs = Math.max(parseInt(payload.time_limit_ms || 2000, 10), 1);
-  const stopOnFirstFailure = !!payload.stop_on_first_failure;
-
-  let buffer = [];
+function childSetup(setup) {
+  // Build the vm context and compile the submission once. Returns {ctx} or
+  // {error} where error is the message the parent turns into a single
+  // runtime_error, exactly as the pre-split harness did at load time.
+  const ctx = { buffer: [], functionName: setup.function_name, timeLimitMs: Math.max(parseInt(setup.time_limit_ms || 2000, 10), 1) };
   const sandbox = {
-    console: { log: (...args) => buffer.push(args.map(consoleArgToString).join(' ')) },
-    // Bound in deliberately, matching harness.py's exec() giving user code full
-    // stdlib access (`import socket`/`import os`) — the container, not the
-    // language, is the actual security boundary (DESIGN.md §5.8: --network=none,
-    // read-only root FS, cap-drop, pids-limit). Only core modules resolve since
-    // nothing else is installed in the image (judge/Dockerfile.js).
+    console: { log: (...args) => ctx.buffer.push(args.map(consoleArgToString).join(' ')) },
     require,
-    // Real (host) timers, not vm-scoped ones — a Sleep/Debounce-style solution
-    // needs setTimeout to actually fire on the real event loop for its Promise
-    // to ever settle. Bounding how long that's allowed to take is
-    // awaitIfThenable's job (via the case's time_limit_ms), not the sandbox's.
-    // setTimeout/setInterval are the *scoped* wrappers (above), not the raw
-    // globals — clearTimeout/clearInterval stay raw since they only ever need
-    // to cancel a real timer handle, never to decide whether to run anything.
     setTimeout: scopedSetTimeout,
     clearTimeout,
     setInterval: scopedSetInterval,
     clearInterval,
   };
   vm.createContext(sandbox);
-
+  ctx.sandbox = sandbox;
   try {
-    const script = new vm.Script(userCode, { filename: USER_FILENAME });
-    script.runInContext(sandbox);
-  } catch (err) { // any top-level failure -> single runtime_error, matching harness.py
-    return [errorResult(firstId, err, '')];
+    new vm.Script(setup.user_code, { filename: USER_FILENAME }).runInContext(sandbox);
+  } catch (err) {
+    return { error: formatUserError(err) };
   }
-
-  // `sandbox[functionName]` would miss this: only top-level `var`/`function`
-  // declarations become properties of the contextified global object — a
-  // `const`/`let` (including an arrow function, e.g. modern-style starter
-  // code) is a lexical binding the object-property lookup can't see, even
-  // though it resolves fine from further code run in the same context (which
-  // is how the actual per-case call below invokes it). Checking via `typeof`
-  // through runInContext resolves the same lexical environment the call does,
-  // so it doesn't falsely report a real, callable function as missing.
   let exists;
   try {
-    exists = vm.runInContext(`typeof ${functionName} === 'function'`, sandbox);
+    exists = vm.runInContext(`typeof ${ctx.functionName} === 'function'`, sandbox);
   } catch (err) {
     exists = false;
   }
-  if (!exists) {
-    return [{
-      test_case_id: firstId,
-      status: 'runtime_error',
-      runtime_ms: 0,
-      output: null,
-      stdout: '',
-      error: `Function '${functionName}' not found`,
-    }];
+  if (!exists) return { error: `Function '${ctx.functionName}' not found` };
+  return { ctx };
+}
+
+async function executeCase(ctx, input) {
+  // Run one case in the child; return its outcome without deciding pass/fail.
+  // On the ok path it returns the raw `actual` for the parent to compare.
+  const { sandbox, functionName, timeLimitMs } = ctx;
+  ctx.buffer = [];
+  sandbox.console = { log: (...args) => ctx.buffer.push(args.map(consoleArgToString).join(' ')) };
+  sandbox.__args = JSON.parse(JSON.stringify(input || []));
+  activeCaseToken = (activeCaseToken || 0) + 1;
+  const start = process.hrtime.bigint();
+  let actual;
+  try {
+    vm.runInContext(`__result = ${functionName}.apply(null, __args);`, sandbox,
+      { timeout: timeLimitMs, filename: 'harness_call.js' });
+    actual = sandbox.__result;
+  } catch (err) {
+    activeCaseToken = null;
+    if (isTimeoutError(err)) return { status: 'time_limit_exceeded', stdout: truncate(ctx.buffer.join('\n')) };
+    return { status: 'runtime_error', runtime_ms: msSince(start), stdout: truncate(ctx.buffer.join('\n')), error: formatUserError(err) };
   }
+  actual = await awaitIfThenable(actual, timeLimitMs - msSince(start));
+  activeCaseToken = null;
+  if (actual === ASYNC_TIMEOUT) return { status: 'time_limit_exceeded', stdout: truncate(ctx.buffer.join('\n')) };
+  if (actual instanceof AsyncError) {
+    return { status: 'runtime_error', runtime_ms: msSince(start), stdout: truncate(ctx.buffer.join('\n')), error: formatUserError(actual.err) };
+  }
+  return { status: 'ok', actual, runtime_ms: msSince(start), stdout: truncate(ctx.buffer.join('\n')) };
+}
+
+async function childMain() {
+  // fd 1/2 are already /dev/null (the parent spawns us with stdio 'ignore'), so
+  // a submission writing to a raw descriptor reaches nothing the parent reads.
+  const emit = (message) => { fs.writeSync(RESULT_FD, JSON.stringify(message) + '\n'); };
+  const lines = readLines(process.stdin);
+
+  const first = await lines.next();
+  if (first.done) return;
+  const setup = childSetup(JSON.parse(first.value));
+  if (setup.error !== undefined) { emit({ setup: 'user_error', error: setup.error }); return; }
+  emit({ setup: 'ok' });
+
+  for await (const line of lines) {
+    if (!line) continue;
+    emit(await executeCase(setup.ctx, JSON.parse(line).input));
+  }
+}
+
+// An async line iterator over a stream (the child's control channel). One JSON
+// object per line, which is how the parent frames every message.
+async function* readLines(stream) {
+  let buf = '';
+  for await (const chunk of stream) {
+    buf += chunk;
+    let i;
+    while ((i = buf.indexOf('\n')) >= 0) {
+      yield buf.slice(0, i);
+      buf = buf.slice(i + 1);
+    }
+  }
+  if (buf.length) yield buf;
+}
+
+// --- the parent: orchestrates the child and writes the report ----------------
+
+const { spawn } = require('child_process');
+
+class ChildProc {
+  constructor(proc) {
+    this.proc = proc;
+    this.out = proc.stdio[RESULT_FD];
+    this.lines = [];
+    this.buf = '';
+    this.waiter = null;
+    this.dead = false;
+    this.out.on('data', (d) => {
+      this.buf += d;
+      let i;
+      while ((i = this.buf.indexOf('\n')) >= 0) {
+        this.lines.push(this.buf.slice(0, i));
+        this.buf = this.buf.slice(i + 1);
+      }
+      this._wake();
+    });
+    const onDead = () => { this.dead = true; this._wake(); };
+    proc.on('exit', onDead);
+    this.out.on('close', onDead);
+  }
+
+  _wake() { if (this.waiter) { const w = this.waiter; this.waiter = null; w(); } }
+
+  send(message) { this.proc.stdin.write(JSON.stringify(message) + '\n'); }
+
+  // Read one framed message. Resolves to {kind:'msg', msg} | {kind:'hang'}
+  // (nothing within deadlineMs) | {kind:'crash'} (child died first).
+  async read(deadlineMs) {
+    const start = Date.now();
+    for (;;) {
+      if (this.lines.length) return { kind: 'msg', msg: JSON.parse(this.lines.shift()) };
+      if (this.dead) return { kind: 'crash' };
+      const remaining = deadlineMs - (Date.now() - start);
+      if (remaining <= 0) return { kind: 'hang' };
+      await new Promise((resolve) => {
+        this.waiter = resolve;
+        const t = setTimeout(() => { if (this.waiter === resolve) { this.waiter = null; resolve(); } }, remaining);
+        if (t.unref) t.unref();
+      });
+    }
+  }
+
+  kill() {
+    try { this.proc.kill('SIGKILL'); } catch (e) { /* already gone */ }
+  }
+}
+
+function spawnChildProc() {
+  // stdio: control on stdin, stdout+stderr to /dev/null (so raw writes vanish),
+  // and a fourth 'pipe' → fd 3 in the child, the private result channel.
+  const env = {};
+  for (const [k, v] of Object.entries(process.env)) if (!k.startsWith('JUDGE_')) env[k] = v;
+  const proc = spawn(process.execPath, [__filename, CHILD_FLAG],
+    { stdio: ['pipe', 'ignore', 'ignore', 'pipe'], env });
+  return new ChildProc(proc);
+}
+
+async function startChild(setup) {
+  // Launch a child and hand it the setup. Returns {child} once it acks, or
+  // {error} (a compile failure) for the parent to report as a single row.
+  const child = spawnChildProc();
+  child.send(setup);
+  const ack = await child.read(SETUP_GRACE_MS);
+  if (ack.kind !== 'msg' || ack.msg.setup !== 'ok') {
+    child.kill();
+    return { error: ack.kind === 'msg' ? (ack.msg.error || 'the submission could not be started')
+      : 'the submission could not be started' };
+  }
+  return { child };
+}
+
+function finalizeCase(tc, reply, comparison, timeLimitMs) {
+  // Build the report row from the child's reply, computing pass/fail here.
+  // Returns {result, dead} — dead means the child must be respawned next case.
+  const tcId = tc.id !== undefined ? tc.id : 0;
+  if (reply.kind === 'crash') {
+    return { dead: true, result: { test_case_id: tcId, status: 'runtime_error', runtime_ms: 0,
+      output: null, stdout: '', error: 'the submission exited before returning a value' } };
+  }
+  if (reply.kind === 'hang') {
+    return { dead: true, result: timeoutResult(tcId, timeLimitMs, '') };
+  }
+  const msg = reply.msg;
+  if (msg.status === 'time_limit_exceeded') {
+    return { dead: true, result: timeoutResult(tcId, timeLimitMs, msg.stdout || '') };
+  }
+  if (msg.status === 'runtime_error') {
+    return { dead: false, result: { test_case_id: tcId, status: 'runtime_error',
+      runtime_ms: msg.runtime_ms || 0, output: null, stdout: truncate(msg.stdout || ''),
+      error: truncate(msg.error || '') } };
+  }
+  const expected = tc.expected !== undefined ? tc.expected : null;
+  const passed = compare(msg.actual, expected, comparison);
+  return { dead: false, result: { test_case_id: tcId, status: passed ? 'passed' : 'wrong_answer',
+    runtime_ms: msg.runtime_ms || 0, output: truncate(formatOutput(msg.actual)),
+    stdout: truncate(msg.stdout || ''), error: null } };
+}
+
+async function run(payload) {
+  const kind = payload.kind || 'function';
+  const testCases = payload.test_cases || [];
+  const firstId = testCases.length ? (testCases[0].id !== undefined ? testCases[0].id : 0) : 0;
+
+  if (kind !== 'function') {
+    return [{ test_case_id: firstId, status: 'runtime_error', runtime_ms: 0, output: null,
+      stdout: '', error: `kind '${kind}' is not supported by the JavaScript harness` }];
+  }
+
+  const comparison = payload.comparison || { mode: 'exact' };
+  const timeLimitMs = Math.max(parseInt(payload.time_limit_ms || 2000, 10), 1);
+  const stopOnFirstFailure = !!payload.stop_on_first_failure;
+  const setup = { user_code: payload.user_code, function_name: payload.function_name, time_limit_ms: timeLimitMs };
+  const deadlineMs = timeLimitMs + KILL_GRACE_MS;
+
+  let started = await startChild(setup);
+  if (started.error !== undefined) {
+    return [{ test_case_id: firstId, status: 'runtime_error', runtime_ms: 0, output: null,
+      stdout: '', error: truncate(started.error) }];
+  }
+  let child = started.child;
 
   const results = [];
-  let caseCounter = 0;
-  for (const tc of testCases) {
-    const tcId = tc.id !== undefined ? tc.id : 0;
-    const args = JSON.parse(JSON.stringify(tc.input || []));
-    const expected = tc.expected !== undefined ? tc.expected : null;
-
-    buffer = [];
-    sandbox.__args = args;
-    // A fresh token per case (an incrementing counter is enough — uniqueness,
-    // not unguessability, is all scopedSetTimeout/scopedSetInterval need) so
-    // any timer callback scheduled during a *previous* case is recognizably
-    // stale by the time this one starts.
-    activeCaseToken = ++caseCounter;
-    const start = process.hrtime.bigint();
-    let actual;
-    try {
-      vm.runInContext(`__result = ${functionName}.apply(null, __args);`, sandbox,
-        { timeout: timeLimitMs, filename: 'harness_call.js' });
-      actual = sandbox.__result;
-    } catch (err) {
-      if (isTimeoutError(err)) {
-        results.push(timeoutResult(tcId, timeLimitMs, buffer.join('\n')));
-      } else {
-        results.push(runtimeErrorResult(tcId, err, msSince(start), buffer.join('\n')));
+  try {
+    for (const tc of testCases) {
+      if (child === null) {
+        started = await startChild(setup);
+        if (started.error !== undefined) {  // compiled once already; if it fails now, blame the case
+          results.push({ test_case_id: tc.id !== undefined ? tc.id : 0, status: 'runtime_error',
+            runtime_ms: 0, output: null, stdout: '', error: truncate(started.error) });
+          if (stopOnFirstFailure) break;
+          continue;
+        }
+        child = started.child;
       }
-      if (stopOnFirstFailure) break;
-      continue;
+      child.send({ input: tc.input || [] });
+      const reply = await child.read(deadlineMs);
+      const { result, dead } = finalizeCase(tc, reply, comparison, timeLimitMs);
+      results.push(result);
+      if (dead) { child.kill(); child = null; }
+      if (result.status !== 'passed' && stopOnFirstFailure) break;
     }
-
-    // awaitIfThenable is a no-op for an ordinary synchronous return (its own
-    // thenable check), so it's always safe to call rather than duplicating
-    // that check here too.
-    actual = await awaitIfThenable(actual, timeLimitMs - msSince(start));
-    if (actual === ASYNC_TIMEOUT) {
-      results.push(timeoutResult(tcId, timeLimitMs, buffer.join('\n')));
-      if (stopOnFirstFailure) break;
-      continue;
-    }
-    if (actual instanceof AsyncError) {
-      results.push(runtimeErrorResult(tcId, actual.err, msSince(start), buffer.join('\n')));
-      if (stopOnFirstFailure) break;
-      continue;
-    }
-
-    const elapsedMs = msSince(start);
-    const passed = compare(actual, expected, comparison);
-    results.push({
-      test_case_id: tcId,
-      status: passed ? 'passed' : 'wrong_answer',
-      runtime_ms: elapsedMs,
-      output: truncate(formatOutput(actual)),
-      stdout: truncate(buffer.join('\n')),
-      error: null,
-    });
-    if (!passed && stopOnFirstFailure) break;
+  } finally {
+    if (child !== null) child.kill();
   }
-
-  // Nothing scheduled from here on can be "the active case" — any callback
-  // that still fires (a leaked timer from the last case) is now
-  // unconditionally stale and a no-op in scopedSetTimeout/scopedSetInterval.
-  activeCaseToken = null;
   return results;
 }
 
 async function main() {
+  if (process.argv[2] === CHILD_FLAG) {
+    await childMain();
+    return;
+  }
+
   // Payload channel: stdin by default (the `docker run -i` path). Under
-  // Kubernetes there's no stdin pipe, so the runner mounts the payload as a
-  // file and points JUDGE_PAYLOAD_FILE at it — same duality as harness.py.
+  // Kubernetes there's no stdin pipe, so the runner mounts the payload as a file
+  // and points JUDGE_PAYLOAD_FILE at it. Either way the trusted parent reads and
+  // parses it, and removes the file before any user code runs, so the child
+  // (which never gets the path) can't read the expected answers back out of it.
   const payloadFile = process.env.JUDGE_PAYLOAD_FILE;
   const raw = payloadFile ? fs.readFileSync(payloadFile, 'utf8') : fs.readFileSync(0, 'utf8');
+  if (payloadFile) { try { fs.unlinkSync(payloadFile); } catch (e) { /* best effort */ } }
   let payload;
   try {
     payload = JSON.parse(raw);
@@ -496,17 +605,8 @@ async function main() {
     process.exit(2);
   }
   const results = await run(payload);
-  // Explicit exit, not a fall-off-the-end: a submission that leaked a
-  // setInterval/unresolved timer (awaitIfThenable clears its own, but nothing
-  // clears the user's — scopedSetTimeout/scopedSetInterval only stop it from
-  // running further user code, not from existing) would otherwise keep the
-  // event loop — and this container's sandbox slot — alive until the outer
-  // wall-clock kill. But exiting is only safe *after* the write actually
-  // reaches the OS: a pipe write is asynchronous, and a large result set can
-  // exceed the pipe buffer in one call, so calling exit() synchronously right
-  // after write() can truncate the very output this whole harness exists to
-  // produce. The write's own callback — not a fixed delay — is what proves
-  // it's safe to exit.
+  // Wait for the write to reach the OS before exiting (a large report can exceed
+  // the pipe buffer in one call); the callback, not a fixed delay, proves it.
   process.stdout.write(JSON.stringify({ results }), () => process.exit(0));
 }
 
