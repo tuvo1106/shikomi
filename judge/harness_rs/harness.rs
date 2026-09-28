@@ -420,6 +420,90 @@ impl ::shikomi_prelude::nodes::RcNode for TreeNode {
 }
 ";
 
+// The shared-node types, all `Rc<RefCell<…>>` (prelude.rs `nodes` explains the
+// shapes and why every link is a strong `Rc`).
+const CYCLIC_NODE: &str = "\
+#[derive(Debug)]
+pub struct CyclicListNode {
+    pub val: i32,
+    pub next: ::std::option::Option<::std::rc::Rc<::std::cell::RefCell<CyclicListNode>>>,
+}
+impl CyclicListNode {
+    #[inline]
+    pub fn new(val: i32) -> Self { CyclicListNode { val, next: ::std::option::Option::None } }
+}
+impl ::shikomi_prelude::nodes::CyclicShape for CyclicListNode {
+    fn make(val: i32) -> Self { CyclicListNode::new(val) }
+    fn set_next_node(&mut self, next: ::std::option::Option<::std::rc::Rc<::std::cell::RefCell<Self>>>) { self.next = next; }
+}
+impl ::shikomi_prelude::nodes::RcNode for CyclicListNode {
+    fn decode(j: &::shikomi_prelude::Json)
+        -> ::std::result::Result<::std::option::Option<::std::rc::Rc<::std::cell::RefCell<Self>>>, ::std::string::String>
+    { ::shikomi_prelude::nodes::decode_cyclic(j) }
+    fn encode(n: &::std::rc::Rc<::std::cell::RefCell<Self>>)
+        -> ::std::result::Result<::shikomi_prelude::Json, ::std::string::String>
+    { ::shikomi_prelude::nodes::encode_cyclic(n) }
+    fn encode_none() -> ::shikomi_prelude::Json { ::shikomi_prelude::Json::Null }
+}
+";
+
+const RANDOM_NODE: &str = "\
+#[derive(Debug)]
+pub struct RandomListNode {
+    pub val: i32,
+    pub next: ::std::option::Option<::std::rc::Rc<::std::cell::RefCell<RandomListNode>>>,
+    pub random: ::std::option::Option<::std::rc::Rc<::std::cell::RefCell<RandomListNode>>>,
+}
+impl RandomListNode {
+    #[inline]
+    pub fn new(val: i32) -> Self { RandomListNode { val, next: ::std::option::Option::None, random: ::std::option::Option::None } }
+}
+impl ::shikomi_prelude::nodes::RandomShape for RandomListNode {
+    fn make(val: i32) -> Self { RandomListNode::new(val) }
+    fn value(&self) -> i32 { self.val }
+    fn next_node(&self) -> ::std::option::Option<::std::rc::Rc<::std::cell::RefCell<Self>>> { self.next.clone() }
+    fn random_node(&self) -> ::std::option::Option<::std::rc::Rc<::std::cell::RefCell<Self>>> { self.random.clone() }
+    fn set_next_node(&mut self, n: ::std::option::Option<::std::rc::Rc<::std::cell::RefCell<Self>>>) { self.next = n; }
+    fn set_random_node(&mut self, n: ::std::option::Option<::std::rc::Rc<::std::cell::RefCell<Self>>>) { self.random = n; }
+}
+impl ::shikomi_prelude::nodes::RcNode for RandomListNode {
+    fn decode(j: &::shikomi_prelude::Json)
+        -> ::std::result::Result<::std::option::Option<::std::rc::Rc<::std::cell::RefCell<Self>>>, ::std::string::String>
+    { ::shikomi_prelude::nodes::decode_random(j) }
+    fn encode(n: &::std::rc::Rc<::std::cell::RefCell<Self>>)
+        -> ::std::result::Result<::shikomi_prelude::Json, ::std::string::String>
+    { ::shikomi_prelude::nodes::encode_random(n) }
+    fn encode_none() -> ::shikomi_prelude::Json { ::shikomi_prelude::Json::Arr(::std::vec::Vec::new()) }
+}
+";
+
+const GRAPH_NODE: &str = "\
+#[derive(Debug)]
+pub struct GraphNode {
+    pub val: i32,
+    pub neighbors: ::std::vec::Vec<::std::rc::Rc<::std::cell::RefCell<GraphNode>>>,
+}
+impl GraphNode {
+    #[inline]
+    pub fn new(val: i32) -> Self { GraphNode { val, neighbors: ::std::vec::Vec::new() } }
+}
+impl ::shikomi_prelude::nodes::GraphShape for GraphNode {
+    fn make(val: i32) -> Self { GraphNode::new(val) }
+    fn value(&self) -> i32 { self.val }
+    fn neighbor_nodes(&self) -> ::std::vec::Vec<::std::rc::Rc<::std::cell::RefCell<Self>>> { self.neighbors.clone() }
+    fn push_neighbor(&mut self, n: ::std::rc::Rc<::std::cell::RefCell<Self>>) { self.neighbors.push(n); }
+}
+impl ::shikomi_prelude::nodes::RcNode for GraphNode {
+    fn decode(j: &::shikomi_prelude::Json)
+        -> ::std::result::Result<::std::option::Option<::std::rc::Rc<::std::cell::RefCell<Self>>>, ::std::string::String>
+    { ::shikomi_prelude::nodes::decode_graph(j) }
+    fn encode(n: &::std::rc::Rc<::std::cell::RefCell<Self>>)
+        -> ::std::result::Result<::shikomi_prelude::Json, ::std::string::String>
+    { ::shikomi_prelude::nodes::encode_graph(n) }
+    fn encode_none() -> ::shikomi_prelude::Json { ::shikomi_prelude::Json::Arr(::std::vec::Vec::new()) }
+}
+";
+
 /// The node structs a problem needs, from the codec names its Rust variant
 /// declares in `params[].type` and `return_type` (`"ListNode"`,
 /// `"List[TreeNode]"`, ...). Only those are generated: a problem that declares
@@ -440,6 +524,15 @@ fn node_structs(payload: &Json) -> Vec<&'static str> {
     }
     if uses("TreeNode") {
         out.push(TREE_NODE);
+    }
+    if uses("CyclicListNode") {
+        out.push(CYCLIC_NODE);
+    }
+    if uses("RandomListNode") {
+        out.push(RANDOM_NODE);
+    }
+    if uses("GraphNode") {
+        out.push(GRAPH_NODE);
     }
     out
 }
@@ -506,7 +599,7 @@ fn compile(timeout: Duration) -> Result<(), String> {
 /// that collision, so it can't fire for anything else (a node name that only
 /// appears in a comment, or a wrong signature).
 fn node_hint(diag: &str) -> &'static str {
-    const NODES: [&str; 2] = ["ListNode", "TreeNode"];
+    const NODES: [&str; 5] = ["ListNode", "TreeNode", "CyclicListNode", "RandomListNode", "GraphNode"];
     let redefined = NODES.iter().any(|n| diag.contains(&format!("the name `{}` is defined multiple times", n)));
     if redefined || diag.contains("duplicate definitions with name `new`") {
         "\n\nHint: the judge already defines the node struct (the one described in the \

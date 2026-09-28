@@ -53,8 +53,8 @@ so in `statement_md`. A Promise return is awaited. Give real-timer cases
 generous margins (a 50ms debounce window against a 500ms+ `time_limit_ms`).
 
 **Rust** (`"language": "rust"`) is function mode only too, but unlike JS it has
-the `ListNode`/`TreeNode` codecs (and their `List[...]` forms); the cyclic,
-random-pointer and graph ones are Python-only. The harness compiles the submission with the user's own function
+every node codec except the decode-only `Iterator`. The harness compiles the
+submission with the user's own function
 signature and **infers each argument's Rust type from it**, so there's no type
 table: parameters can be integers (`i32`/`i64`/`u8`…`usize`), `f64`, `bool`,
 `char` (a one-character string), `String`, `Vec<T>`, `Option<T>` (`null` =
@@ -67,7 +67,10 @@ types plus `()` (→ `null`). Lists and trees take the conventional shapes,
 declares: the starter describes the struct in a comment and never defines it (a
 solution may still add impls to it, like `impl Ord for ListNode`), and node values
 must fit an `i32`, which the seed checks (`deal-from-both-ends` and `trim-price-band` are the references, and their Rust
-solutions start with the `use std::rc::Rc;`/`RefCell` lines a tree needs). Declare
+solutions start with the `use std::rc::Rc;`/`RefCell` lines a tree needs). The
+cyclic list, random-pointer list and graph are `Rc<RefCell<CyclicListNode>>`,
+`Rc<RefCell<RandomListNode>>` and `Rc<RefCell<GraphNode>>` (`loop-entrance`,
+`copy-referral-chain` and `copy-station-map` are their references). Declare
 the codec name (`"ListNode"`) in the Rust variant's `params`/`return_type` too, the
 same as Python: it's what makes the judge define the struct, and what the workspace
 draws samples from. A type outside that list fails to *compile*, and

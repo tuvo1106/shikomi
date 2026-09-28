@@ -73,10 +73,9 @@ ALL_NODE_TYPES = frozenset({
     "ListNode", "TreeNode", "List[ListNode]", "List[TreeNode]",
     "CyclicListNode", "RandomListNode", "GraphNode", "Iterator",
 })
-# judge/harness_rs/prelude.rs `nodes`: the straight-line list and the binary tree, in the
-# conventional Rust shapes. The cyclic, random-pointer and graph forms need
-# `Rc<RefCell<…>>` throughout and cycle-aware encoding (AGENTS.md TODO).
-RUST_NODE_TYPES = frozenset({"ListNode", "TreeNode", "List[ListNode]", "List[TreeNode]"})
+# judge/harness_rs/prelude.rs `nodes`: every node codec except the decode-only "Iterator",
+# which only an operations constructor takes, and Rust has no operations mode yet.
+RUST_NODE_TYPES = ALL_NODE_TYPES - {"Iterator"}
 I32_RANGE = (-(2**31), 2**31 - 1)
 
 

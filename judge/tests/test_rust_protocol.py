@@ -661,3 +661,138 @@ def test_a_problem_without_node_types_leaves_the_names_free():
     res = rust_results(payload(code, [case(0, [["ab", "abc", "ab"]], 2)], function_name="count",
                                params=[{"name": "words", "type": "Vec<String>"}]))
     assert res[0]["status"] == "passed", res[0]
+
+
+# --- the shared-node codecs: CyclicListNode, RandomListNode, GraphNode --------
+
+CYC = [{"name": "head", "type": "CyclicListNode"}]
+RND = [{"name": "head", "type": "RandomListNode"}]
+GRAPH = [{"name": "node", "type": "GraphNode"}]
+
+CYCLE_START = RC + """fn start(head: Option<Rc<RefCell<CyclicListNode>>>) -> Option<Rc<RefCell<CyclicListNode>>> {
+    let mut seen = std::collections::HashSet::new();
+    let mut cur = head;
+    while let Some(n) = cur {
+        if !seen.insert(Rc::as_ptr(&n)) {
+            return Some(n);
+        }
+        cur = n.borrow().next.clone();
+    }
+    None
+}
+"""
+
+
+def test_cyclic_list_decodes_a_real_cycle_and_answers_by_identity():
+    res = rust_results(nodes_payload(CYCLE_START, [
+        case(0, [[[3, 2, 0, -4], 1]], 1),
+        case(1, [[[1, 2], 0]], 0),
+        case(2, [[[1], -1]], None),       # no cycle
+        case(3, [[]], None),              # empty list
+        case(4, [[[7], 0]], 0),           # a node pointing at itself
+        case(5, [[[1, 1, 1, 1], 2]], 2),  # repeated values: only identity can tell
+    ], "start", CYC, "CyclicListNode"))
+    assert [r["status"] for r in res] == ["passed"] * 6, res
+
+
+def test_a_fabricated_cyclic_node_is_not_an_input_node():
+    code = RC + ("fn start(head: Option<Rc<RefCell<CyclicListNode>>>) -> Option<Rc<RefCell<CyclicListNode>>> {\n"
+                 "    let v = head.unwrap().borrow().val;\n"
+                 "    Some(Rc::new(RefCell::new(CyclicListNode::new(v))))\n}\n")
+    res = rust_results(nodes_payload(code, [case(0, [[[5, 6], 0]], 0)], "start", CYC, "CyclicListNode"))
+    assert res[0]["status"] == "wrong_answer" and res[0]["output"] == "null"
+
+
+COPY_RANDOM = RC + """use std::collections::HashMap;
+
+fn copy(head: Option<Rc<RefCell<RandomListNode>>>) -> Option<Rc<RefCell<RandomListNode>>> {
+    let mut old = Vec::new();
+    let mut cur = head;
+    while let Some(n) = cur {
+        cur = n.borrow().next.clone();
+        old.push(n);
+    }
+    let at: HashMap<_, _> = old.iter().enumerate().map(|(i, n)| (Rc::as_ptr(n), i)).collect();
+    let new: Vec<_> = old.iter().map(|n| Rc::new(RefCell::new(RandomListNode::new(n.borrow().val)))).collect();
+    for (i, n) in old.iter().enumerate() {
+        let mut c = new[i].borrow_mut();
+        c.next = new.get(i + 1).cloned();
+        c.random = n.borrow().random.as_ref().map(|r| Rc::clone(&new[at[&Rc::as_ptr(r)]]));
+    }
+    new.into_iter().next()
+}
+"""
+
+
+def test_random_list_round_trips_through_a_deep_copy():
+    wire = [[7, None], [13, 0], [11, 4], [10, 2], [1, 0]]
+    res = rust_results(nodes_payload(COPY_RANDOM, [
+        case(0, [wire], wire),
+        case(1, [[]], []),
+        case(2, [[[1, 0]]], [[1, 0]]),  # random pointing at itself
+    ], "copy", RND, "RandomListNode"))
+    assert [r["status"] for r in res] == ["passed"] * 3, res
+
+
+def test_a_copy_whose_random_points_into_the_input_encodes_null():
+    # A shallow copy: fresh `next` chain, but `random` still aims at input nodes.
+    code = RC + ("fn copy(head: Option<Rc<RefCell<RandomListNode>>>) -> Option<Rc<RefCell<RandomListNode>>> {\n"
+                 "    let h = head?; let n = h.borrow();\n"
+                 "    let c = RandomListNode { val: n.val, next: None, random: n.random.clone() };\n"
+                 "    Some(Rc::new(RefCell::new(c)))\n}\n")
+    res = rust_results(nodes_payload(code, [case(0, [[[4, 0]]], [[4, 0]])], "copy", RND, "RandomListNode"))
+    assert res[0]["status"] == "wrong_answer" and res[0]["output"] == "[[4,null]]"
+
+
+def test_a_random_list_whose_next_loops_is_refused():
+    code = RC + ("fn copy(head: Option<Rc<RefCell<RandomListNode>>>) -> Option<Rc<RefCell<RandomListNode>>> {\n"
+                 "    let h = head?; h.borrow_mut().next = Some(Rc::clone(&h)); Some(h)\n}\n")
+    res = rust_results(nodes_payload(code, [case(0, [[[4, None]]], [[4, None]])], "copy", RND, "RandomListNode"))
+    assert res[0]["status"] == "runtime_error"
+    assert "the returned list has a cycle" in res[0]["error"]
+
+
+CLONE_GRAPH = RC + """use std::collections::HashMap;
+
+fn clone(node: Option<Rc<RefCell<GraphNode>>>) -> Option<Rc<RefCell<GraphNode>>> {
+    let start = node?;
+    let mut copies: HashMap<*const RefCell<GraphNode>, Rc<RefCell<GraphNode>>> = HashMap::new();
+    let mut stack = vec![Rc::clone(&start)];
+    copies.insert(Rc::as_ptr(&start), Rc::new(RefCell::new(GraphNode::new(start.borrow().val))));
+    while let Some(n) = stack.pop() {
+        let copy = Rc::clone(&copies[&Rc::as_ptr(&n)]);
+        for nb in &n.borrow().neighbors {
+            let c = copies.entry(Rc::as_ptr(nb)).or_insert_with(|| {
+                stack.push(Rc::clone(nb));
+                Rc::new(RefCell::new(GraphNode::new(nb.borrow().val)))
+            });
+            copy.borrow_mut().neighbors.push(Rc::clone(c));
+        }
+    }
+    Some(Rc::clone(&copies[&Rc::as_ptr(&start)]))
+}
+"""
+
+
+def test_graph_round_trips_through_a_clone():
+    square = [[2, 4], [1, 3], [2, 4], [1, 3]]
+    res = rust_results(nodes_payload(CLONE_GRAPH, [
+        case(0, [square], square),
+        case(1, [[[]]], [[]]),        # one isolated node
+        case(2, [[]], []),            # empty graph
+        case(3, [[[2], [1]]], [[2], [1]]),
+    ], "clone", GRAPH, "GraphNode"))
+    assert [r["status"] for r in res] == ["passed"] * 4, res
+
+
+def test_a_large_cyclic_graph_encodes_without_hanging():
+    n = 20_000
+    ring = [[(i - 1) % n + 1, (i + 1) % n + 1] for i in range(n)]  # node i+1 <-> its neighbours
+    res = rust_results(nodes_payload(CLONE_GRAPH, [case(0, [ring], ring)], "clone", GRAPH, "GraphNode"))
+    assert res[0]["status"] == "passed", res[0]["error"]
+
+
+def test_a_bad_cycle_position_is_a_decode_error():
+    res = rust_results(nodes_payload(CYCLE_START, [case(0, [[[1, 2], 5]], None)], "start", CYC, "CyclicListNode"))
+    assert res[0]["status"] == "runtime_error"
+    assert "outside the list" in res[0]["error"]

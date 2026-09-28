@@ -385,9 +385,8 @@ def _encode_random_list(head):
     that the submission returns a *fresh* deep copy, not any node from the
     input graph, so nothing the harness stamped on the input survives into
     the answer. The encoder instead re-derives indices purely from the
-    returned graph's own shape: walk `.next` from `head` (the same cycle-safe
-    id-`seen` guard as `_flatten_list`, since a buggy submission could return
-    something cyclic) to fix a traversal order, then map each node's
+    returned graph's own shape: walk `.next` from `head` (refusing a `next`
+    chain that loops, as `_flatten_list` does) to fix a traversal order, then map each node's
     `.random` to that node's position in the *same* walk. A `.random` that
     doesn't land on any node from this traversal (a submission bug — e.g. it
     points outside the returned list) encodes as `None` rather than crashing.
@@ -395,7 +394,12 @@ def _encode_random_list(head):
     order = []
     seen = set()
     node = head
-    while node is not None and id(node) not in seen:
+    while node is not None:
+        if id(node) in seen:
+            raise MalformedResult(
+                f"the returned list has a cycle: after {len(order)} node(s), a `next` "
+                "points back to an earlier node (did you forget to set the last node's "
+                "`next` to None?)")
         seen.add(id(node))
         order.append(node)
         node = getattr(node, "next", None)
