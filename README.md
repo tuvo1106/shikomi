@@ -113,7 +113,8 @@ problem fails here, not on a user's first submission, and never leaves the
 catalog half-loaded. Problems are added or updated, never deleted: removing a
 file doesn't remove its problem. With the Compose stack, set `PROBLEMS_DIR=~/my-problems/problems`
 before `scripts/prod-up.sh`, and the migrate step loads your directory instead
-of the starters.
+of the starters. `scripts/k8s-up.sh` takes the same variable and builds the directory
+into a seed image for the cluster ([DESIGN.md §9](DESIGN.md) covers a real cluster).
 
 To set up the repo-root test environment used in step 2, run
 `uv venv .venv && uv pip install --python .venv pytest` once.

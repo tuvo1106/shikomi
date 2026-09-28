@@ -68,32 +68,41 @@ for img in shikomi-api:local shikomi-worker:local shikomi-web:local shikomi-judg
   kind load docker-image --name "$CLUSTER" "$img"
 done
 
-# 3. Seed data → ConfigMap (the JSON lives at the repo root, outside the image).
-#    Published as ONE gzipped tarball, not a key per file: a ConfigMap caps at 1MiB,
-#    and problem JSON (big hidden test cases) outgrows that long before it outgrows
-#    what it compresses to — the bundled starters are ~2MB raw, ~0.45MB gzipped.
-#    The migrate hook extracts it into /seed/problems before seeding. Server-side
-#    apply, because client-side apply's last-applied annotation caps at 256KB, and
-#    because it updates in place: a rejected update leaves the old ConfigMap intact,
-#    where delete-then-create would leave none. PROBLEMS_DIR swaps in an operator's
-#    own problems.
-echo "▶ publishing problems as a ConfigMap (gzipped tarball)"
-SEED_TGZ=$(mktemp)
-trap 'rm -f "$SEED_TGZ"' EXIT
-# COPYFILE_DISABLE: stop macOS tar adding AppleDouble "._*" entries for extended
-# attributes (they'd land in the extracted dir next to the real files).
-( cd "$PROBLEMS_DIR" && COPYFILE_DISABLE=1 tar -czf "$SEED_TGZ" -- *.json )
-# The ConfigMap stores the archive base64-encoded (4/3 larger), so ~780KB of archive
-# is the most that fits under 1MiB. Fail here with a useful message, not as an
-# opaque API rejection.
-SEED_BYTES=$(wc -c < "$SEED_TGZ" | tr -d ' ')
-if [ "$SEED_BYTES" -gt 780000 ]; then
-  echo "problems archive is ${SEED_BYTES} bytes gzipped; a ConfigMap holds ~780000." >&2
-  echo "A problem set this large needs another carrier (see the AGENTS.md TODO)." >&2
-  exit 1
+# 3. Seed data → an image (the JSON lives at the repo root, outside the app images).
+#    A tiny image holding PROBLEMS_DIR/*.json at /problems, which the migrate hook's
+#    init container copies out before seeding. It replaced a ConfigMap, which caps at
+#    1MiB: problem JSON with big hidden test cases outgrew even a gzipped tarball of it.
+#    The tag is the chart's default, shikomi-seed:local, so a bare `helm upgrade` finds
+#    it too; rebuilding under the same tag also keeps old images from piling up. A hash
+#    of the problem set and of the recipe below is stored as a label, and a rebuild is
+#    skipped when it matches.
+echo "▶ building the problems image from $PROBLEMS_DIR"
+SEED_IMAGE=shikomi-seed:local
+SEED_DOCKERFILE='FROM busybox:1.36
+COPY *.json /problems/
+'
+# Per-file checksums (name + digest, one line each, so where one file ends is never
+# ambiguous) plus the Dockerfile: a renamed file, an edited one or a changed recipe
+# all change the hash. sha256sum on Linux, shasum on macOS.
+SHA256=$(command -v sha256sum || echo "shasum -a 256")
+SEED_HASH=$( { (cd "$PROBLEMS_DIR" && $SHA256 -- *.json); printf '%s' "$SEED_DOCKERFILE"; } | $SHA256 | cut -c1-16)
+if [ "$(docker image inspect -f '{{ index .Config.Labels "shikomi.seed-hash" }}' "$SEED_IMAGE" 2>/dev/null)" != "$SEED_HASH" ]; then
+  # Build from a temporary context holding only the JSON: the problem directory may be a
+  # whole repo (a .git, fixtures) that needn't be sent to the daemon, and its own
+  # .dockerignore can't then drop a file the hash counted.
+  SEED_CTX=$(mktemp -d)
+  trap 'rm -rf "$SEED_CTX"' EXIT
+  cp -- "$PROBLEMS_DIR"/*.json "$SEED_CTX"/
+  printf '%s' "$SEED_DOCKERFILE" \
+    | docker build -q --label "shikomi.seed-hash=$SEED_HASH" -t "$SEED_IMAGE" -f - "$SEED_CTX" >/dev/null
+  # The previous build lost its tag to this one; drop it (only seed images carry the label).
+  docker image prune -f --filter "label=shikomi.seed-hash" >/dev/null
 fi
-kubectl create configmap shikomi-seed --from-file=problems.tgz="$SEED_TGZ" --dry-run=client -o yaml \
-  | kubectl apply --server-side --force-conflicts -f - >/dev/null
+# Runs every time, but kind skips an image the node already has (same ID).
+kind load docker-image --name "$CLUSTER" "$SEED_IMAGE"
+# The ConfigMap this script published before the seed image (added 2026-09-28); nothing
+# reads it now. Safe to delete this line once no cluster predates that.
+kubectl delete configmap shikomi-seed --ignore-not-found >/dev/null
 
 # 4. Optional: KEDA (event-driven autoscaling for the worker)
 HELM_ARGS=()

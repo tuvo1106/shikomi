@@ -8,6 +8,10 @@ images:
   api: shikomi-api:local
   worker: shikomi-worker:local
   web: shikomi-web:local
+  # The problem files, as an image holding /problems/*.json, copied in by the
+  # migrate hook. scripts/k8s-up.sh builds this tag from PROBLEMS_DIR; on a real
+  # cluster, build and push your own and point this at it (DESIGN.md §9).
+  seed: shikomi-seed:local
   pullPolicy: Never
 
 # App config → ConfigMap (non-secret) + Secret. Service names are literal

@@ -353,12 +353,7 @@ slice ships, delete its entry here.
 - **Kubernetes (remaining):** HPA on the api, managed Postgres + Redis, Ingress +
   cert-manager TLS, a **gVisor/Kata node pool** (`runtimeClassName`) + a
   policy-enforcing CNI before untrusted users, and wiring kind into CI for the
-  Playwright job. Problems reach the migrate hook as a ConfigMap holding one gzipped
-  tarball (`scripts/k8s-up.sh`, `PROBLEMS_DIR`). That stretches the 1 MiB cap to about
-  780 KB *compressed* (~2.6 MB of problem JSON is ~0.66 MB), and the script refuses
-  anything bigger. The bundled starters alone are close to that now, so the next few
-  starters need this carrier first. A large problem set needs a PVC, an init-container `git clone`,
-  or an image layer instead.
+  Playwright job.
 
 - **Keep the k8s judge payload away from submissions:** the k8s runner mounts the
   payload (every hidden case's `expected`) as a ConfigMap file at a fixed path,

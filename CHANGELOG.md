@@ -60,8 +60,11 @@ All notable changes to this project are recorded here. The format follows
 - The Python judge no longer counts a bool as equal to a number (`True` against an
   expected `1`, in any comparison mode). The JavaScript and Rust judges already
   rejected it, so the same answer could be judged differently depending on the language.
-- `scripts/k8s-up.sh` ships the problems as one gzipped tarball, so a problem set over
-  1 MiB (such as the bundled starters, now ~2.6 MB) still fits the seed ConfigMap.
+- The Kubernetes deploy no longer has a size limit on the problem set. The bundled
+  starters (~2.6 MB) had outgrown the 1 MiB ConfigMap that carried them. `scripts/k8s-up.sh`
+  now builds `PROBLEMS_DIR` into a small seed image, which the chart's migrate hook copies
+  the problems out of. On a real cluster, build and push your own seed image and set
+  `images.seed`.
 - The navbar's page links now line up with the *shikomi* brand beside them. They used to
   sit about 2px higher.
 - The Results pane no longer jitters when you Run or Submit. It used to flash its empty
