@@ -367,7 +367,13 @@ slice ships, delete its entry here.
   re-read. The Docker runner is unaffected (stdin only).
 
 - **Rust judge follow-ups** (v1 shipped, [ADR-0004](docs/adr/0004-rust-judge-compile-in-sandbox.md)):
-  `kind: "operations"` for Rust. That needs machine-readable method signatures in
+  node codecs, then `kind: "operations"`, each shipping with a Python + Rust starter
+  per problem type. Codecs first: `ListNode`/`TreeNode` and their `List[...]` forms,
+  in the conventional Rust shapes (`Option<Box<ListNode>>`,
+  `Option<Rc<RefCell<TreeNode>>>`, decided with the maintainer), defined in the prelude
+  and picked by the param's declared type as in Python; then `CyclicListNode`,
+  `RandomListNode` and `GraphNode`, which need `Rc<RefCell<…>>` throughout (`Weak` for
+  back edges) and cycle-aware encoding. Then `kind: "operations"` for Rust. That needs machine-readable method signatures in
   `ProblemIn` (today they exist only in the Python `starter_code`) and a second
   glue generator that dispatches method names. Also: measure compile time and the
   per-case spawn cost under gVisor (`runsc` adds syscall overhead that rustc and

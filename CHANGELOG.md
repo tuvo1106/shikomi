@@ -23,6 +23,10 @@ All notable changes to this project are recorded here. The format follows
   (SQL).
 - `python -m worker.judge_local --language <python|js|rust|mysql>` judges a payload in
   that language's sandbox (its image, tmpfs size and `exec` flag).
+- Seven starter problems, each in Python and Rust, that together exercise every value
+  type the Rust judge supports and every fixed comparison mode: *Matched Markers*,
+  *Trailing Average*, *Carry Forward*, *Restock Ledger*, *Pairs to Target*, *Any Peak*
+  and *Count Lakes*.
 - **Problems in several languages.** A problem can be offered in any number of
   languages, with one shared statement and one shared set of test cases. The workspace
   gets a language switcher (shown only when there's more than one), keeps a separate
