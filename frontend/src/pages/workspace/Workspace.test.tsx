@@ -319,3 +319,78 @@ describe('Workspace across problems', () => {
     expect(screen.queryByText('2/2 passed')).not.toBeInTheDocument() // last verdict is gone
   })
 })
+
+describe('Workspace judging state', () => {
+  afterEach(() => vi.useRealTimers())
+
+  it('stays in "Judging…" between the submit response and the first poll', async () => {
+    // The POST answers at once, but the first GET is held open. Before the fix, the
+    // new query had no data in that window, so `judging` briefly went false: the
+    // pane flashed the empty prompt and the buttons re-enabled, visible as a jitter.
+    let releasePoll: (r: Response) => void = () => {}
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: string, init?: RequestInit) => {
+        const url = String(input)
+        if (url.includes('/problems/pair-sum')) return Promise.resolve(json(PROBLEM))
+        if (url.endsWith('/submissions') && init?.method === 'POST')
+          return Promise.resolve(json({ id: 'slow', status: 'pending' }, 202))
+        if (url.includes('/submissions/slow'))
+          return new Promise<Response>((resolve) => {
+            releasePoll = resolve
+          })
+        return Promise.resolve(json({}, 404))
+      }),
+    )
+    renderWorkspace()
+    expect(await screen.findByText('Pair Sum')).toBeInTheDocument()
+    await userEvent.click(screen.getByText('Submit'))
+    // Wait until the first poll is actually in flight, i.e. the POST has resolved.
+    await vi.waitFor(() =>
+      expect(vi.mocked(fetch).mock.calls.some(([u]) => String(u).includes('/submissions/slow'))).toBe(true),
+    )
+
+    expect(screen.getByText('Judging…', { selector: 'div' })).toBeInTheDocument()
+    expect(screen.queryByText(/Run against sample cases/)).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Judging…' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Run' })).toBeDisabled()
+
+    await act(async () => {
+      releasePoll(
+        json({
+          id: 'slow', problem_id: 'p1', status: 'wrong_answer', is_run: false, created_at: 'now',
+          verdict_detail: { results: [{ test_case_id: 0, status: 'wrong_answer', runtime_ms: 1 }], passed: 0, total: 1 },
+        }),
+      )
+    })
+    expect(await screen.findByText('Wrong Answer')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Submit' })).not.toBeDisabled()
+  })
+
+  it('still gives up at the deadline when the first poll never succeeds', async () => {
+    // Holding "Judging…" until the first poll has data must not become a hang if
+    // that poll fails: the polling deadline covers this case too.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: string, init?: RequestInit) => {
+        const url = String(input)
+        if (url.includes('/problems/pair-sum')) return Promise.resolve(json(PROBLEM))
+        if (url.endsWith('/submissions') && init?.method === 'POST')
+          return Promise.resolve(json({ id: 'broken', status: 'pending' }, 202))
+        if (url.includes('/submissions/broken')) return Promise.resolve(json({ detail: 'boom' }, 500))
+        return Promise.resolve(json({}, 404))
+      }),
+    )
+    renderWorkspace()
+    expect(await screen.findByText('Pair Sum')).toBeInTheDocument()
+    await userEvent.click(screen.getByText('Submit'))
+    expect(await screen.findByText('Judging…', { selector: 'div' })).toBeInTheDocument()
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(POLL_DEADLINE_MS + 2_000)
+    })
+    expect(await screen.findByText(/taking longer than expected/)).toBeInTheDocument()
+    expect(screen.getByText('Submit')).not.toBeDisabled()
+  })
+})

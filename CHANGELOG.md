@@ -26,6 +26,8 @@ All notable changes to this project are recorded here. The format follows
 
 ### Fixed
 
+- The Results pane no longer jitters when you Run or Submit. It used to flash its empty
+  prompt and re-enable the buttons for a moment before showing "Judging…".
 - Python problems using `float_tolerance` now accept an infinite answer that matches an
   infinite expected value (it was graded wrong, because `inf - inf` is NaN).
 - The account menu (and its Sign out) no longer opens behind the code editor in the

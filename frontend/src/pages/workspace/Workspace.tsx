@@ -114,7 +114,14 @@ function ProblemWorkspace() {
     return () => clearTimeout(timer)
   }, [submissionId])
 
-  const stillJudging = !!submission && !isTerminal(submission.status)
+  // A submission is in flight from the moment it has an id until a terminal status arrives,
+  // *including* the gap before its first poll returns, when the new query has no data yet.
+  // Counting only `submission`'s status made `judging` drop to false for that one round
+  // trip, so the Results pane flashed its empty prompt and Run/Submit re-enabled before
+  // flipping back to "Judging…" (a visible jitter on every Run and Submit). A first poll
+  // that never succeeds is still bounded: the deadline below times it out the same way.
+  const awaitingFirstPoll = !!submissionId && !submission
+  const stillJudging = awaitingFirstPoll || (!!submission && !isTerminal(submission.status))
   const timedOut = pollTimedOut && stillJudging
   const judging = starting || (stillJudging && !timedOut)
   const proseInvert = theme === 'dark' ? 'prose-invert' : ''
