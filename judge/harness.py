@@ -789,17 +789,6 @@ def _format_user_traceback(exc):
     return "".join(parts)
 
 
-def _error_result(test_case_id, exc, stdout=""):
-    return {
-        "test_case_id": test_case_id,
-        "status": "runtime_error",
-        "runtime_ms": 0,
-        "output": None,
-        "stdout": _truncate(stdout),
-        "error": _truncate(_format_user_traceback(exc)),
-    }
-
-
 # --- execution: a trusted parent and an untrusted child ----------------------
 # The submission runs in a separate **child** process, not here. This process
 # (the parent) holds every case's `expected`, decides pass/fail, and is the only
@@ -995,12 +984,23 @@ class _Child:
     def read(self, deadline_s):
         """Read one framed message. Returns the parsed dict, or a sentinel dict
         `{"status": _HANG}` if the child produced nothing within `deadline_s`
-        seconds, or `{"status": _CRASH}` if it closed the pipe first (died)."""
+        seconds, or `{"status": _CRASH}` if it closed the pipe first (died) or
+        sent a frame that isn't valid JSON.
+
+        A submission's `exec`'d code can write raw bytes to the result fd itself,
+        so a malformed frame is treated as a dead, desynced child (_CRASH) rather
+        than being allowed to raise out of here and abort the whole run. It still
+        can't forge a pass: the parent alone holds `expected` and decides."""
         ready, _, _ = select.select([self.reader], [], [], deadline_s)
         if not ready:
             return {"status": _HANG}
         line = self.reader.readline()
-        return json.loads(line) if line else {"status": _CRASH}
+        if not line:
+            return {"status": _CRASH}
+        try:
+            return json.loads(line)
+        except ValueError:  # JSONDecodeError → treat the channel as desynced
+            return {"status": _CRASH}
 
     def kill(self):
         try:

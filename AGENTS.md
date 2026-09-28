@@ -340,10 +340,15 @@ and `playwright`.
   case's `expected`, decides pass/fail for fixed-answer modes, and alone writes the
   `{"results": ...}` report; the child gets only the submission and each case's
   input, and its stdout goes to /dev/null. So a submission can't read the answers
-  out of memory or forge the report. Two consequences when editing a harness: keep
+  out of memory or forge the report. Three consequences when editing a harness: keep
   `expected` (and any secret) out of the child (`_child_setup`/`childSetup` receive
-  no `expected`), and never make the child's own stdout the channel the parent
-  parses. `worker/aggregate.py` also refuses a report that doesn't have one row per
+  no `expected`); never make the child's own stdout the channel the parent parses;
+  and keep the parent's result-pipe read defensive — the submission's runtime can
+  write to that fd itself, so a frame the parent can't parse is treated as a desynced
+  child (per-case failure + respawn), never allowed to raise and lose the whole run.
+  Each child is its own process-group leader (`start_new_session`/`detached`) and the
+  parent kills the group, so grandchildren the submission spawned are reaped too.
+  `worker/aggregate.py` also refuses a report that doesn't have one row per
   case sent (defence in depth). An operations `custom_validator` is the one thing
   that still runs in the child (it calls into the live object), so such a problem
   must not rely on `expected` being hidden from the submission.
@@ -397,6 +402,10 @@ slice ships, delete its entry here.
   --profile minimal` build on `debian:slim`). A dedicated `compile_error` verdict would
   suit every language at once, not just Rust. The node structs fix `val: i32`, as
   LeetCode's do; a problem that needs other values needs a generic or second node type.
+  **k8s payload:** the Rust harness reads `JUDGE_PAYLOAD_FILE` but doesn't delete it, so on
+  the k8s runner a submission (same uid) can still open `expected` at the fixed path. Python
+  and JS now delete it (ADR-0006); the writable-`emptyDir` groundwork is already in place, so
+  Rust just needs the parent to `fs::remove_file` the payload right after reading it.
 
 - **Multi-language follow-ups** ([ADR-0005](docs/adr/0005-multi-language-problems.md)):
   per-language `time_limit_ms` (limits are shared today, so they're calibrated to the

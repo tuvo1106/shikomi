@@ -138,8 +138,15 @@ def _build_pod(name, image, cm_name, memory_mb, cpus, wall_timeout_s, tmpfs_size
         containers=[container],
         volumes=[
             client.V1Volume(name="payload-src", config_map=client.V1ConfigMapVolumeSource(name=cm_name)),
+            # Node-backed (default medium), deliberately NOT medium="Memory": a
+            # tmpfs emptyDir's bytes are charged to the judge container's memory
+            # cgroup, silently shrinking the effective `memory_limit_mb` the
+            # submission is graded under. The payload holds only `expected` (not a
+            # secret), lives on node ephemeral storage for the few milliseconds
+            # before the harness parent deletes it, and is never on the node once
+            # the submission's peak memory is measured. size_limit still caps it.
             client.V1Volume(name="payload", empty_dir=client.V1EmptyDirVolumeSource(
-                medium="Memory", size_limit="16Mi")),
+                size_limit="16Mi")),
             client.V1Volume(name="tmp", empty_dir=client.V1EmptyDirVolumeSource(
                 medium="Memory", size_limit=f"{tmpfs_size_mb}Mi")),
         ],

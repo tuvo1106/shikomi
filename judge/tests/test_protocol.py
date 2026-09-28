@@ -931,3 +931,22 @@ def test_a_case_that_crashes_the_child_does_not_stop_later_cases():
     res = results(payload(code, [case(0, [0, 0], 0), case(1, [2, 3], 5)],
                           params=[{"name": "a", "type": "int"}, {"name": "b", "type": "int"}]))
     assert [r["status"] for r in res] == ["runtime_error", "passed"]
+
+
+def test_a_garbage_frame_on_the_result_pipe_does_not_abort_the_run():
+    # The child's result fd is passed by number (sys.argv[2]), so a submission can
+    # write raw bytes to it. A frame the parent can't parse must not raise out of
+    # the read loop and lose every case as a judge_error: the parent treats it as
+    # a desynced child (this case fails, a fresh child runs the next), and it
+    # still can't forge a pass because the parent alone holds `expected`.
+    code = (
+        "import os, sys\n"
+        "def f(a, b):\n"
+        "    if a == 0:\n"
+        "        os.write(int(sys.argv[2]), b'this is not json\\n')\n"
+        "        os._exit(0)\n"
+        "    return a + b\n"
+    )
+    res = results(payload(code, [case(0, [0, 0], 0), case(1, [2, 3], 5)],
+                          params=[{"name": "a", "type": "int"}, {"name": "b", "type": "int"}]))
+    assert [r["status"] for r in res] == ["runtime_error", "passed"]

@@ -43,10 +43,17 @@ Give the Python and JS harnesses the Rust harness's shape: a **trusted parent** 
 - The **child** is spawned once per run (a re-exec of the same harness in `--child` mode). It
   receives only the submission and, one at a time, each case's **input**. It returns the value
   the submission produced over a *separate private pipe* (a passed fd on Python, stdio fd 3 on
-  Node); its own stdout and stderr go to `/dev/null`, so a submission writing to a raw
-  descriptor reaches nothing the parent reads. One child for the whole run keeps the per-case
-  cost a pipe round trip, not a process launch (Python startup is ~20–30ms); the parent respawns
-  it only after a timeout or a crash.
+  Node); its own stdout and stderr go to `/dev/null`, so a submission writing to those raw
+  descriptors reaches nothing the parent reads. The submission *can* write to the result pipe
+  itself (that's how it returns values, and its runtime — Python builtins, Node's `require` — can
+  reach the fd), but that buys it nothing: the parent still computes pass/fail from an `expected`
+  the child never sees, and treats a frame it can't parse, or one that arrives out of turn, as a
+  desynced child — that case fails and a fresh child runs the next — rather than letting a bad
+  frame raise and lose the whole run. One child for the whole run keeps the per-case cost a pipe
+  round trip, not a process launch (Python startup is ~20–30ms); the parent respawns it only
+  after a timeout or a crash. Each child is its own process-group leader (`start_new_session` /
+  `detached`), and the parent kills the **group**, so any grandchildren the submission spawned
+  are reaped with it.
 - **Timeouts** are enforced by the parent: it kills a child that doesn't answer within the case
   limit and reports `time_limit_exceeded` for that case — so a submission that defeats the
   harness's own in-process alarm (e.g. `signal.signal(SIGALRM, SIG_IGN)`) is still bounded per
@@ -60,8 +67,12 @@ Give the Python and JS harnesses the Rust harness's shape: a **trusted parent** 
 - **Kubernetes payload.** The k8s runner used to mount the payload as a read-only ConfigMap file
   in the judge container, which the harness therefore couldn't delete before running the
   submission — leaving `expected` readable at a fixed path. An init container now copies it into a
-  writable in-memory `emptyDir` the judge mounts instead, and the parent unlinks it before any
-  user code runs (as it already does for the stdin path).
+  writable `emptyDir` the judge mounts instead, and the parent unlinks it before any user code
+  runs (as it already does for the stdin path). That `emptyDir` is node-backed, **not**
+  `medium: Memory`: a tmpfs emptyDir's bytes are charged to the judge container's memory cgroup,
+  which would silently shrink the `memory_limit_mb` a submission is graded under. The payload
+  holds only `expected` (not a secret) and is gone before the submission's peak memory is
+  measured, so node-local ephemeral storage is the right home for it; `/tmp` stays tmpfs.
 
 ## Consequences
 

@@ -178,21 +178,10 @@ function msSince(startNs) {
   return Math.round(ms * 1000) / 1000; // 3 decimals, matching harness.py's round(...,3)
 }
 
-function errorResult(testCaseId, err, stdout) {
-  return {
-    test_case_id: testCaseId,
-    status: 'runtime_error',
-    runtime_ms: 0,
-    output: null,
-    stdout: truncate(stdout || ''),
-    error: truncate(formatUserError(err)),
-  };
-}
-
-// Per-case (not top-level, unlike errorResult above) time_limit_exceeded /
-// runtime_error builders — shared by the synchronous vm timeout path and the
-// async awaitIfThenable path below so the two don't drift out of sync with
-// each other on the result shape.
+// A per-case time_limit_exceeded builder, shared by the synchronous vm timeout
+// path and the async awaitIfThenable path below so the two don't drift out of
+// sync with each other on the result shape. (A failing case's runtime_error is
+// built inline where it's raised, in the child; see finalizeCase.)
 function timeoutResult(testCaseId, timeLimitMs, stdout) {
   return {
     test_case_id: testCaseId,
@@ -201,17 +190,6 @@ function timeoutResult(testCaseId, timeLimitMs, stdout) {
     output: null,
     stdout: truncate(stdout || ''),
     error: null,
-  };
-}
-
-function runtimeErrorResult(testCaseId, err, runtimeMs, stdout) {
-  return {
-    test_case_id: testCaseId,
-    status: 'runtime_error',
-    runtime_ms: runtimeMs,
-    output: null,
-    stdout: truncate(stdout || ''),
-    error: truncate(formatUserError(err)),
   };
 }
 
@@ -466,7 +444,18 @@ class ChildProc {
   async read(deadlineMs) {
     const start = Date.now();
     for (;;) {
-      if (this.lines.length) return { kind: 'msg', msg: JSON.parse(this.lines.shift()) };
+      if (this.lines.length) {
+        const line = this.lines.shift();
+        // The child's `require` is the real one, so a submission can write raw
+        // bytes to fd 3 itself. A malformed frame must not throw out of here and
+        // abort the whole run (losing every case as a judge_error); treat it as
+        // a dead, desynced child so the case fails and the parent respawns. It
+        // still can't forge a pass — the parent alone holds `expected`.
+        let msg;
+        try { msg = JSON.parse(line); }
+        catch (e) { return { kind: 'crash' }; }
+        return { kind: 'msg', msg };
+      }
       if (this.dead) return { kind: 'crash' };
       const remaining = deadlineMs - (Date.now() - start);
       if (remaining <= 0) return { kind: 'hang' };
@@ -479,7 +468,18 @@ class ChildProc {
   }
 
   kill() {
-    try { this.proc.kill('SIGKILL'); } catch (e) { /* already gone */ }
+    // The child is its own process-group leader (spawned `detached`), so signal
+    // the whole group: this also reaps any grandchildren the submission spawned
+    // (its `require` reaches child_process), mirroring the Python harness's
+    // os.killpg. Fall back to the direct child if the group send fails — e.g.
+    // it already exited, so the group no longer exists.
+    const pid = this.proc.pid;
+    try {
+      if (pid !== undefined) process.kill(-pid, 'SIGKILL');
+      else this.proc.kill('SIGKILL');
+    } catch (e) {
+      try { this.proc.kill('SIGKILL'); } catch (e2) { /* already gone */ }
+    }
   }
 }
 
@@ -488,8 +488,11 @@ function spawnChildProc() {
   // and a fourth 'pipe' → fd 3 in the child, the private result channel.
   const env = {};
   for (const [k, v] of Object.entries(process.env)) if (!k.startsWith('JUDGE_')) env[k] = v;
+  // `detached: true` puts the child in its own process group (setsid) so a kill
+  // can reap the whole group, not just the direct child; see ChildProc.kill.
+  // We keep it referenced (no unref) — the parent manages its lifecycle.
   const proc = spawn(process.execPath, [__filename, CHILD_FLAG],
-    { stdio: ['pipe', 'ignore', 'ignore', 'pipe'], env });
+    { stdio: ['pipe', 'ignore', 'ignore', 'pipe'], env, detached: true });
   return new ChildProc(proc);
 }
 

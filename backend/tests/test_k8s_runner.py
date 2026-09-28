@@ -48,7 +48,11 @@ def test_payload_is_not_mounted_into_the_judge_container():
     # The judge sees the writable copy, never the ConfigMap.
     assert "payload-src" not in judge_mounts
     assert judge_mounts["payload"].read_only in (None, False)   # writable → deletable
-    assert next(v for v in spec.volumes if v.name == "payload").empty_dir is not None
+    payload_vol = next(v for v in spec.volumes if v.name == "payload")
+    assert payload_vol.empty_dir is not None
+    # Node-backed, not tmpfs: a memory-medium emptyDir would charge the payload's
+    # bytes to the judge container's memory cgroup, shrinking memory_limit_mb.
+    assert payload_vol.empty_dir.medium in (None, "")
 
     # The ConfigMap is mounted read-only, only on the init container.
     init = spec.init_containers[0]
