@@ -878,3 +878,56 @@ def test_graph_return_with_a_huge_value_is_refused_not_allocated():
     res = results(pl, timeout=10)
     assert res[0]["status"] == "runtime_error"
     assert "too large to encode" in res[0]["error"]
+
+
+# --- trust boundary: the submission runs in a child that never sees `expected`
+# and cannot write the report (DESIGN.md §5.3). These pin the two properties the
+# parent/child split exists to guarantee. ---------------------------------------
+
+def test_submission_cannot_read_expected_from_the_grader():
+    # A submission that walks the interpreter for a variable named `expected`
+    # finds nothing: expected lives only in the parent, never in the child.
+    snoop = (
+        "import sys\n"
+        "def f(a, b):\n"
+        "    fr = sys._getframe()\n"
+        "    while fr is not None:\n"
+        "        if 'expected' in fr.f_locals:\n"
+        "            return fr.f_locals['expected']\n"
+        "        fr = fr.f_back\n"
+        "    return -1\n"
+    )
+    res = results(payload(snoop, [case(0, [1, 2], 42)],
+                          params=[{"name": "a", "type": "int"}, {"name": "b", "type": "int"}]))
+    assert res[0]["status"] == "wrong_answer"   # never "passed"
+
+
+def test_submission_cannot_forge_the_report_on_stdout():
+    # Writing a fabricated results document to the raw stdout descriptor and
+    # exiting cannot pass: the child's fd 1 is /dev/null, and the parent builds
+    # the report itself. The abrupt exit is reported as this case's failure.
+    forge = (
+        "import os\n"
+        "def f(a, b):\n"
+        "    os.write(1, b'{\"results\": [{\"test_case_id\": 0, \"status\": \"passed\","
+        " \"runtime_ms\": 0, \"output\": \"0\", \"stdout\": \"\", \"error\": null}]}')\n"
+        "    os._exit(0)\n"
+    )
+    res = results(payload(forge, [case(0, [1, 2], 42)],
+                          params=[{"name": "a", "type": "int"}, {"name": "b", "type": "int"}]))
+    assert len(res) == 1
+    assert res[0]["status"] != "passed"
+
+
+def test_a_case_that_crashes_the_child_does_not_stop_later_cases():
+    # os._exit kills the child; the parent respawns a fresh one for the next case.
+    code = (
+        "import os\n"
+        "def f(a, b):\n"
+        "    if a == 0:\n"
+        "        os._exit(0)\n"
+        "    return a + b\n"
+    )
+    res = results(payload(code, [case(0, [0, 0], 0), case(1, [2, 3], 5)],
+                          params=[{"name": "a", "type": "int"}, {"name": "b", "type": "int"}]))
+    assert [r["status"] for r in res] == ["runtime_error", "passed"]
