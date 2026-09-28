@@ -74,9 +74,9 @@ ALL_NODE_TYPES = frozenset({
     "ListNode", "TreeNode", "List[ListNode]", "List[TreeNode]",
     "CyclicListNode", "RandomListNode", "GraphNode", "Iterator",
 })
-# judge/harness_rs/prelude.rs `nodes`: every node codec except the decode-only "Iterator",
-# an operations constructor's argument that Rust has no counterpart for yet (AGENTS.md TODO).
-RUST_NODE_TYPES = ALL_NODE_TYPES - {"Iterator"}
+# judge/harness_rs/prelude.rs: every node codec (`nodes`), plus `IntIter`, the Rust
+# counterpart of the decode-only "Iterator" (an `impl Iterator<Item = i32>`).
+RUST_NODE_TYPES = ALL_NODE_TYPES
 I32_RANGE = (-(2**31), 2**31 - 1)
 
 

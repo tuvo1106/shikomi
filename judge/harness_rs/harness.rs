@@ -630,7 +630,10 @@ fn rc_node_impl(name: &str, codec: &str, none: &str) -> String {
 /// declares in `params[].type` and `return_type` (`"ListNode"`,
 /// `"List[TreeNode]"`, ...). Only those are generated: a problem that declares
 /// none leaves the names free, so a trie problem's own `struct TreeNode` can't
-/// collide with ours.
+/// collide with ours. Also re-exports the prelude's `IntIter` when a param is
+/// `"Iterator"` (decode-only, no struct to generate), so the user's
+/// `fn new(nums: IntIter)` can name it; a `use` at crate root is visible to
+/// their earlier code, since item order doesn't matter.
 fn node_structs(payload: &Json) -> Vec<String> {
     let mut declared: Vec<&str> = payload.get("params").as_arr().iter().filter_map(|p| match p.get("type") {
         Json::Str(t) => Some(t.as_str()),
@@ -640,14 +643,18 @@ fn node_structs(payload: &Json) -> Vec<String> {
         declared.push(t);
     }
     let uses = |name: &str| declared.iter().any(|t| *t == name || *t == format!("List[{}]", name));
-    NODE_STRUCTS
+    let mut out: Vec<String> = NODE_STRUCTS
         .iter()
         .filter(|n| uses(n.name))
         .map(|n| match n.rc_codec {
             Some((codec, none)) => format!("{}{}", n.source, rc_node_impl(n.name, codec, none)),
             None => n.source.to_string(),
         })
-        .collect()
+        .collect();
+    if declared.iter().any(|t| *t == "Iterator") {
+        out.push("use ::shikomi_prelude::IntIter;\n".to_string());
+    }
+    out
 }
 
 /// The whole `solution.rs`: `#![no_main]` on the user's first line (see `glue`),

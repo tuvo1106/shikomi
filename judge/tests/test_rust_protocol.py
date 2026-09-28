@@ -930,6 +930,45 @@ def test_operations_wrong_answer_shows_every_call_result():
     assert res[0]["output"] == '[null,"x"]'
 
 
+PEEKER = """struct Peeker { vals: Vec<i32>, i: usize }
+
+impl Peeker {
+    fn new(nums: IntIter) -> Self {
+        Peeker { vals: nums.collect(), i: 0 }
+    }
+    fn next(&mut self) -> i32 {
+        let v = self.vals[self.i];
+        self.i += 1;
+        v
+    }
+    fn has_next(&self) -> bool {
+        self.i < self.vals.len()
+    }
+}
+"""
+
+
+def test_operations_iterator_constructor_arg_is_an_int_iter():
+    """A declared `"Iterator"` param is Rust's `IntIter` (prelude.rs): a flat
+    `[i32]` on the wire, a real `Iterator<Item = i32>` in `new`."""
+    params = [{"name": "nums", "type": "Iterator"}]
+    res = rust_results(ops_payload(PEEKER, [
+        ops_case(0, [[[1, 2, 3]], ("next", []), ("hasNext", []), ("next", []), ("next", []),
+                     ("hasNext", [])],
+                 [1, True, 2, 3, False], class_name="Peeker"),
+        ops_case(1, [[[]], ("hasNext", [])], [False], class_name="Peeker"),
+    ], class_name="Peeker", params=params))
+    assert [r["status"] for r in res] == ["passed", "passed"], res
+    assert res[0]["output"] == "[null,1,true,2,3,false]"
+
+
+def test_operations_iterator_constructor_arg_rejects_non_integers():
+    res = rust_results(ops_payload(PEEKER, [
+        ops_case(0, [[["a"]], ("hasNext", [])], [False], class_name="Peeker"),
+    ], class_name="Peeker", params=[{"name": "nums", "type": "Iterator"}]))
+    assert res[0]["status"] == "runtime_error", res
+
+
 def test_operations_constructor_args_and_node_structs():
     """`params` describe the constructor, as in Python: its arguments are the first
     list, typed by `new`'s signature, and a declared node type gets its struct."""

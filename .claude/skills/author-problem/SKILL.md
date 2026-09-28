@@ -37,7 +37,7 @@ The judge compares **return values**. Three problem kinds are supported:
   The harness matches classes by attribute shape, not identity.
 - **`operations`** (class replay). The judge instantiates `class_name` and
   replays a sequence of method calls. Constructor args go through the same codecs
-  (plus the decode-only `Iterator`). Later method calls take plain JSON.
+  (plus the decode-only `Iterator`; in Rust it is `IntIter`, an int-only `impl Iterator<Item = i32>`). Later method calls take plain JSON.
 - **`sql`** (always paired with `"language": "mysql"`). The submission is one raw
   query, run against a database the harness seeds per test case. The engine is
   MariaDB (`docs/adr/0002-sql-judge-engine-mysql-vs-mariadb.md`), so MySQL-8-only
@@ -53,7 +53,7 @@ so in `statement_md`. A Promise return is awaited. Give real-timer cases
 generous margins (a 50ms debounce window against a 500ms+ `time_limit_ms`).
 
 **Rust** (`"language": "rust"`) supports `function` and `operations` mode (not
-`sql`), with every node codec except the decode-only `Iterator`. The harness
+`sql`), with every node codec (the decode-only `Iterator` is `IntIter`: `fn new(nums: IntIter)`). The harness
 compiles the submission with the user's own function or method
 signature and **infers each argument's Rust type from it**, so there's no type
 table: parameters can be integers (`i32`/`i64`/`u8`…`usize`), `f64`, `bool`,

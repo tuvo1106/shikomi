@@ -547,6 +547,36 @@ macro_rules! tuple_json {
     };
 }
 
+/// A decode-only iterator handed to an `operations` constructor (the Rust
+/// counterpart of the Python harness's `Iterator`, DESIGN.md §5.4/§13). The
+/// harness pre-builds it from a flat JSON `[i32, …]` — the wire shape of an
+/// `"Iterator"`-typed constructor arg — and the submission's `new` consumes it.
+/// It is a real `std::iter::Iterator<Item = i32>`, so a solution can call
+/// `.next()`, `for x in it`, `.collect()`, `.peekable()`, etc. Decode-only:
+/// there is no `ToJson`, because `"Iterator"` is never a return type. Int-only
+/// (`i32`) like a node's `val`; a non-integer element fails the case's decode.
+pub struct IntIter(::std::vec::IntoIter<i32>);
+
+impl FromJson for IntIter {
+    fn from_json(j: &Json) -> Result<Self, String> {
+        // Same wire as Vec<i32>: a JSON array of integers.
+        let v = <::std::vec::Vec<i32> as FromJson>::from_json(j)?;
+        Ok(IntIter(v.into_iter()))
+    }
+}
+
+impl ::core::iter::Iterator for IntIter {
+    type Item = i32;
+    fn next(&mut self) -> ::core::option::Option<i32> {
+        self.0.next()
+    }
+    fn size_hint(&self) -> (usize, ::core::option::Option<usize>) {
+        self.0.size_hint()
+    }
+}
+
+impl ::core::iter::ExactSizeIterator for IntIter {}
+
 // --- encoding return values (Rust -> JSON) --------------------------------
 
 /// Encode a function's return value for comparison against `expected`.

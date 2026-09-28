@@ -525,15 +525,21 @@ def test_rust_accepts_its_node_codecs(node_type):
 
 
 @pytest.mark.parametrize("language,node_type", [
-    ("rust", "Iterator"), ("js", "ListNode"), ("js", "TreeNode"), ("js", "GraphNode"),
+    ("js", "ListNode"), ("js", "TreeNode"), ("js", "GraphNode"),
 ])
 def test_a_language_refuses_node_types_its_harness_lacks(language, node_type):
     with pytest.raises(ValidationError, match=f"language '{language}' does not support the '{node_type}'"):
         ProblemFile.model_validate(_file(1, language=language, params=[{"name": "x", "type": node_type}]))
-    if node_type == "Iterator":
-        return  # decode-only: never a valid return_type, in any language
     with pytest.raises(ValidationError, match=f"does not support the '{node_type}'"):
         ProblemFile.model_validate(_file(1, language=language, return_type=node_type))
+
+
+def test_rust_accepts_the_iterator_constructor_arg():
+    """prelude.rs `IntIter` is Rust's decode-only Iterator: valid as a param,
+    never as a return type (in any language)."""
+    ProblemFile.model_validate(_file(1, language="rust", params=[{"name": "nums", "type": "Iterator"}]))
+    with pytest.raises(ValidationError):
+        ProblemFile.model_validate(_file(1, language="rust", return_type="Iterator"))
 
 
 def test_rust_memory_limit_must_leave_room_for_rustc():
