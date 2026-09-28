@@ -518,7 +518,7 @@ The judge image bakes in a harness script (`harness.py`) as its entrypoint. Cont
 | ------------------- | ------------------------------------------------ | ------------------------------------------------ |
 | `exact`             | `{"mode": "exact"}`                              | `actual == expected` (default)                   |
 | `unordered`         | `{"mode": "unordered"}`                          | Compare as multisets (list order ignored, top level only; elements within a nested list still compare in order) |
-| `float_tolerance`   | `{"mode": "float_tolerance", "epsilon": 1e-6}`   | `abs(a - b) <= epsilon`, recursively over nested lists |
+| `float_tolerance`   | `{"mode": "float_tolerance", "epsilon": 1e-6}`   | `a == b or abs(a - b) <= epsilon` (the equality case lets matching infinities pass, since `inf - inf` is NaN), recursively over nested lists |
 | `any_of`            | `{"mode": "any_of"}`                             | `expected` is a list of acceptable answers; pass if actual equals any |
 | `custom_validator`  | `{"mode": "custom_validator", "validator_code": "def validate(actual, expected, args, instance=None):\n    ..."}` | Problem-authored Python decides pass/fail directly, instead of comparing against a fixed `expected` |
 
