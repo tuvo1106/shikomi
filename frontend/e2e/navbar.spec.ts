@@ -6,6 +6,11 @@ import { DEV_USER, login } from './helpers'
  * (`sm:pt-0.5` in Navbar.tsx) that depends on the fonts' metrics and sizes. This
  * measures both baselines in the browser, so a font, size or bar-height change
  * that breaks the alignment fails here instead of going unnoticed.
+ *
+ * The app uses the system font stack, so the true gap is a sub-pixel amount that
+ * rounds differently per OS: 0px on macOS, 1px on CI's Linux. A 1px tolerance is
+ * therefore the tightest honest bound. It still catches the bug the nudge fixed,
+ * which measured 2px (a bottom-only border and no nudge).
  */
 function baseline(el: Locator): Promise<number> {
   return el.evaluate((node) => {
@@ -35,6 +40,6 @@ test("the nav links share the brand text's baseline", async ({ page }) => {
   // Every entry of NAV_LINKS (navLinks.ts); today that's one.
   for (const label of ['Problems']) {
     const link = page.getByRole('navigation').getByRole('link', { name: label, exact: true })
-    expect(Math.abs((await baseline(link)) - brand)).toBeLessThanOrEqual(0.5)
+    expect(Math.abs((await baseline(link)) - brand)).toBeLessThanOrEqual(1)
   }
 })

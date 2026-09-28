@@ -16,8 +16,11 @@ import { NAV_LINKS } from './navLinks'
  * 2px of top padding moves the center down that 1px. Below `sm` the brand text is
  * hidden, so the tab stays centered against the icon and avatar instead.
  *
- * The 1px depends on the fonts' metrics and sizes, so e2e/navbar.spec.ts measures
- * both baselines in a real browser and fails if a font or size change breaks it.
+ * The 1px depends on the fonts' metrics and sizes. The app uses system fonts, so the
+ * real gap is sub-pixel and rounds differently per OS (aligned on macOS, 1px on
+ * Linux); e2e/navbar.spec.ts measures both baselines in a real browser and fails
+ * past 1px, which catches a font, size or bar-height change that breaks it (the
+ * original bug measured 2px).
  * Each border side's color is set once (`border-t-transparent`, `border-b-*`), so
  * the result doesn't depend on the order Tailwind emits its rules in.
  */
