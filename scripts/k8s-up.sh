@@ -71,23 +71,37 @@ done
 # 3. Seed data → an image (the JSON lives at the repo root, outside the app images).
 #    A tiny image holding PROBLEMS_DIR/*.json at /problems, which the migrate hook's
 #    init container copies out before seeding. It replaced a ConfigMap, which caps at
-#    1MiB: problem JSON with big hidden test cases outgrew even a gzipped tarball of
-#    it. The tag is a hash of the files, so a changed problem set is a new image the
-#    release picks up, and an unchanged one is neither rebuilt nor reloaded.
+#    1MiB: problem JSON with big hidden test cases outgrew even a gzipped tarball of it.
+#    The tag is the chart's default, shikomi-seed:local, so a bare `helm upgrade` finds
+#    it too; rebuilding under the same tag also keeps old images from piling up. A hash
+#    of the problem set and of the recipe below is stored as a label, and a rebuild is
+#    skipped when it matches.
 echo "▶ building the problems image from $PROBLEMS_DIR"
-# Names and contents both go into the hash (a renamed file is a changed set).
-# sha256sum on Linux, shasum on macOS.
+SEED_IMAGE=shikomi-seed:local
+SEED_DOCKERFILE='FROM busybox:1.36
+COPY *.json /problems/
+'
+# Per-file checksums (name + digest, one line each, so where one file ends is never
+# ambiguous) plus the Dockerfile: a renamed file, an edited one or a changed recipe
+# all change the hash. sha256sum on Linux, shasum on macOS.
 SHA256=$(command -v sha256sum || echo "shasum -a 256")
-SEED_TAG=$( (cd "$PROBLEMS_DIR" && for f in *.json; do printf '%s\n' "$f"; cat -- "$f"; done) | $SHA256 | cut -c1-12)
-SEED_IMAGE="shikomi-seed:$SEED_TAG"
-if ! docker image inspect "$SEED_IMAGE" >/dev/null 2>&1; then
-  # The Dockerfile comes from stdin, so PROBLEMS_DIR itself is the build context and
-  # an operator's problem directory needs nothing added to it.
-  printf 'FROM busybox:1.36\nCOPY *.json /problems/\n' \
-    | docker build -q -t "$SEED_IMAGE" -f - "$PROBLEMS_DIR" >/dev/null
+SEED_HASH=$( { (cd "$PROBLEMS_DIR" && $SHA256 -- *.json); printf '%s' "$SEED_DOCKERFILE"; } | $SHA256 | cut -c1-16)
+if [ "$(docker image inspect -f '{{ index .Config.Labels "shikomi.seed-hash" }}' "$SEED_IMAGE" 2>/dev/null)" != "$SEED_HASH" ]; then
+  # Build from a temporary context holding only the JSON: the problem directory may be a
+  # whole repo (a .git, fixtures) that needn't be sent to the daemon, and its own
+  # .dockerignore can't then drop a file the hash counted.
+  SEED_CTX=$(mktemp -d)
+  trap 'rm -rf "$SEED_CTX"' EXIT
+  cp -- "$PROBLEMS_DIR"/*.json "$SEED_CTX"/
+  printf '%s' "$SEED_DOCKERFILE" \
+    | docker build -q --label "shikomi.seed-hash=$SEED_HASH" -t "$SEED_IMAGE" -f - "$SEED_CTX" >/dev/null
+  # The previous build lost its tag to this one; drop it (only seed images carry the label).
+  docker image prune -f --filter "label=shikomi.seed-hash" >/dev/null
 fi
+# Runs every time, but kind skips an image the node already has (same ID).
 kind load docker-image --name "$CLUSTER" "$SEED_IMAGE"
-# The ConfigMap earlier versions of this script published; nothing reads it now.
+# The ConfigMap this script published before the seed image (added 2026-09-28); nothing
+# reads it now. Safe to delete this line once no cluster predates that.
 kubectl delete configmap shikomi-seed --ignore-not-found >/dev/null
 
 # 4. Optional: KEDA (event-driven autoscaling for the worker)
@@ -105,7 +119,6 @@ fi
 # 5. Release
 . scripts/_local_secrets.sh   # the api refuses the dev secrets under ENV=prod; stable across runs
 HELM_ARGS+=(--set "secrets.jwtSecret=$JWT_SECRET" --set "secrets.totpEncryptionKey=$TOTP_ENCRYPTION_KEY")
-HELM_ARGS+=(--set "images.seed=$SEED_IMAGE")
 echo "▶ helm upgrade --install"
 # ${HELM_ARGS[@]+"${HELM_ARGS[@]}"} (not "${HELM_ARGS[@]}") — macOS ships bash 3.2,
 # where `set -u` treats expanding an empty array as an unbound variable. This

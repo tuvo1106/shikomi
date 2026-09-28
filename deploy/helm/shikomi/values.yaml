@@ -9,8 +9,8 @@ images:
   worker: shikomi-worker:local
   web: shikomi-web:local
   # The problem files, as an image holding /problems/*.json, copied in by the
-  # migrate hook. scripts/k8s-up.sh builds it from PROBLEMS_DIR and passes the
-  # content-hashed tag; on a real cluster, build and push your own (DESIGN.md §9).
+  # migrate hook. scripts/k8s-up.sh builds this tag from PROBLEMS_DIR; on a real
+  # cluster, build and push your own and point this at it (DESIGN.md §9).
   seed: shikomi-seed:local
   pullPolicy: Never
 
