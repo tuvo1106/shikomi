@@ -27,6 +27,14 @@ All notable changes to this project are recorded here. The format follows
   value types and every fixed comparison mode: *Matched Markers*,
   *Trailing Average*, *Carry Forward*, *Restock Ledger*, *Pairs to Target*, *Any Peak*
   and *Count Lakes*.
+- **Linked lists and trees in Rust.** A Rust problem can take and return linked lists
+  (`Option<Box<ListNode>>`) and binary trees (`Option<Rc<RefCell<TreeNode>>>`), including
+  a list of them (`Vec<…>`), in the same wire format as Python, so one problem's cases
+  serve both languages. The judge defines `ListNode` and `TreeNode` in the conventional
+  shapes, and a submission that defines its own gets a hint instead of a bare compile
+  error. Three starters, each in Python and Rust, show it: *Deal from Both Ends*
+  (a list), *Trim to Price Band* (a binary search tree) and *Merge Sorted Feeds*
+  (several lists).
 - **Problems in several languages.** A problem can be offered in any number of
   languages, with one shared statement and one shared set of test cases. The workspace
   gets a language switcher (shown only when there's more than one), keeps a separate
@@ -43,11 +51,15 @@ All notable changes to this project are recorded here. The format follows
 
 ### Fixed
 
+- A returned linked list or tree with a cycle is now a runtime error ("the returned list
+  has a cycle") in the Python judge, instead of being judged on its first pass. A
+  solution that forgot to end its list could be accepted, because that first pass
+  matched the expected answer exactly.
 - The Python judge no longer counts a bool as equal to a number (`True` against an
   expected `1`, in any comparison mode). The JavaScript and Rust judges already
   rejected it, so the same answer could be judged differently depending on the language.
 - `scripts/k8s-up.sh` ships the problems as one gzipped tarball, so a problem set over
-  1 MiB (such as the bundled starters, now ~2 MB) still fits the seed ConfigMap.
+  1 MiB (such as the bundled starters, now ~2.6 MB) still fits the seed ConfigMap.
 - The navbar's page links now line up with the *shikomi* brand beside them. They used to
   sit about 2px higher.
 - The Results pane no longer jitters when you Run or Submit. It used to flash its empty

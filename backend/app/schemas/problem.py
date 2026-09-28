@@ -18,7 +18,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, model_validator
 
 from app.judge_budget import fits_job_timeout, max_cases_within_job_timeout
-from app.sandbox import profile_for
+from app.sandbox import PYTHON_NODE_TYPES, profile_for
 from app.schemas.solution import SolutionIn
 
 UserStatus = Literal["solved", "attempted", "unsolved"]
@@ -153,11 +153,9 @@ class ProblemDetail(BaseModel):
 LEGACY_LANGUAGE_FIELDS = (
     "language", "starter_code", "function_name", "class_name", "params", "return_type")
 
-# Codec param types only judge/harness.py implements.
-_NODE_PARAM_TYPES = (
-    "ListNode", "TreeNode", "List[ListNode]", "List[TreeNode]",
-    "CyclicListNode", "RandomListNode", "GraphNode", "Iterator",
-)
+# Every node codec name a param may declare (judge/harness.py implements them all;
+# `SandboxProfile.node_types` says which each other language does).
+_NODE_PARAM_TYPES = PYTHON_NODE_TYPES
 
 
 class LanguageVariantIn(BaseModel):
@@ -260,23 +258,24 @@ class ProblemIn(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def _function_mode_only_languages(self) -> "ProblemIn":
+    def _language_supports_kind_and_codecs(self) -> "ProblemIn":
         # judge/harness.js and judge/harness_rs/ only implement function mode
-        # (DESIGN.md §13): no "operations" kind, no ListNode/TreeNode codecs.
-        # Reject the combination here rather than letting it surface as a
+        # (DESIGN.md §13), and each harness implements its own set of node codecs
+        # (JS none; Rust the list and tree, prelude.rs `nodes`). Reject an
+        # unsupported combination here rather than letting it surface as a
         # confusing runtime_error from the harness on every submission.
         for v in self.languages:
-            if not profile_for(v.language).function_mode_only:
-                continue
+            profile = profile_for(v.language)
             lang = v.language
-            if self.kind != "function":
+            if profile.function_mode_only and self.kind != "function":
                 raise ValueError(f"language '{lang}' only supports kind 'function'")
-            if v.return_type:
-                raise ValueError(
-                    f"language '{lang}' does not support a ListNode/TreeNode return_type")
-            if any(p.type in _NODE_PARAM_TYPES for p in v.params):
-                raise ValueError(
-                    f"language '{lang}' does not support a ListNode/TreeNode param type")
+            declared = [v.return_type] + [p.type for p in v.params]
+            for node_type in declared:
+                if node_type in _NODE_PARAM_TYPES and node_type not in profile.node_types:
+                    raise ValueError(
+                        f"language '{lang}' does not support the '{node_type}' node type"
+                        + (f" (it supports: {', '.join(sorted(profile.node_types))})"
+                           if profile.node_types else ""))
         return self
 
     @model_validator(mode="after")

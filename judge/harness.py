@@ -158,12 +158,31 @@ def _build_list(values):
     return head
 
 
+class MalformedResult(ValueError):
+    """A returned list or tree that isn't one: it has a cycle, or (for a tree) a
+    node reachable along two paths. The name is what the user sees in front of
+    the message (`_format_user_traceback`), so it reads as a diagnosis."""
+
+
 def _flatten_list(node):
     """Linked list -> flat array, walking `.next` by duck-typed attribute
-    access so it works on the user's own `ListNode` instances too."""
+    access so it works on the user's own `ListNode` instances too.
+
+    Raises:
+        MalformedResult: the list loops back on itself. Stopping quietly at the
+            repeated node (the old behavior) could turn a wrong answer into a
+            right one: a solution that forgets to clear its last node's `next`
+            produces a cycle whose truncation equals the expected list exactly.
+            harness_rs can't get here: a `Box` list can't be cyclic in safe Rust.
+    """
     out = []
-    seen = set()  # a buggy solution's cycle shouldn't hang the harness
-    while node is not None and id(node) not in seen:
+    seen = set()  # a buggy solution's cycle must neither hang the harness nor pass
+    while node is not None:
+        if id(node) in seen:
+            raise MalformedResult(
+                f"the returned list has a cycle: after {len(out)} node(s), a `next` "
+                "points back to an earlier node (did you forget to set the last node's "
+                "`next` to None?)")
         seen.add(id(node))
         out.append(getattr(node, "val", None))
         node = getattr(node, "next", None)
@@ -211,7 +230,11 @@ def _flatten_tree(root):
             out.append(None)
             continue
         if id(node) in seen:
-            break  # cyclic structure — stop rather than loop forever
+            # A cycle, or a node shared by two parents: not a tree. Refused for the
+            # same reason as `_flatten_list`'s cycle (harness_rs `nodes` matches).
+            raise MalformedResult(
+                "the returned tree reaches the same node twice: a child points back to "
+                "an ancestor, or two parents share one child")
         seen.add(id(node))
         out.append(getattr(node, "val", None))
         queue.append(getattr(node, "left", None))

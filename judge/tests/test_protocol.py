@@ -442,11 +442,42 @@ CYCLIC_TREE = (
 )
 
 
-def test_treenode_cyclic_return_does_not_hang():
+def test_treenode_cyclic_return_is_refused_not_hung_on():
+    # [1] would match a quietly truncated encoding; the cycle must fail the case instead.
     pl = payload(CYCLIC_TREE, [case(0, [[1, 2]], [1])], time_limit_ms=300,
                  params=[{"name": "root", "type": "TreeNode"}], return_type="TreeNode")
     res = results(pl, timeout=5)
-    assert res[0]["status"] != "time_limit_exceeded"
+    assert res[0]["status"] == "runtime_error"
+    assert "MalformedResult: the returned tree reaches the same node twice" in res[0]["error"]
+    assert "harness" not in res[0]["error"]  # only the diagnosis, no harness frames
+
+
+UNTERMINATED_LIST = (
+    "class ListNode:\n"
+    "    def __init__(self, val=0, next=None):\n"
+    "        self.val = val\n"
+    "        self.next = next\n"
+    "\n"
+    "def f(head):\n"
+    "    # Move the head to the back, but forget to clear its old `next`.\n"
+    "    if head is None or head.next is None:\n"
+    "        return head\n"
+    "    first, tail = head, head\n"
+    "    while tail.next:\n"
+    "        tail = tail.next\n"
+    "    tail.next = first\n"
+    "    return head.next\n"
+)
+
+
+def test_listnode_cyclic_return_is_refused_even_when_its_prefix_matches():
+    # The cycle's first pass is [2, 3, 1], exactly the expected answer. Truncating at
+    # the repeated node used to accept it.
+    pl = payload(UNTERMINATED_LIST, [case(0, [[1, 2, 3]], [2, 3, 1])],
+                 params=[{"name": "head", "type": "ListNode"}], return_type="ListNode")
+    res = results(pl, timeout=5)
+    assert res[0]["status"] == "runtime_error"
+    assert "MalformedResult: the returned list has a cycle: after 3 node(s)" in res[0]["error"]
 
 
 def test_treenode_param_and_return_round_trip():

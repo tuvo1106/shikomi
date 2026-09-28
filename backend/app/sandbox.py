@@ -41,8 +41,11 @@ class SandboxProfile:
             writes a binary there and runs it needs this lifted (ADR-0004).
         startup_slack_s: one-time work before the first case (a database cold start, a
             compile), added to the worker's wall-clock budget (`app.judge_budget`).
-        function_mode_only: the harness has no `operations` kind and no node codecs, and
-            `ProblemIn` refuses those combinations at seed time.
+        function_mode_only: the harness has no `operations` kind, and `ProblemIn` refuses
+            that combination at seed time.
+        node_types: the node codecs (`ListNode`, `TreeNode`, ...) the harness implements, as
+            the names a problem declares in `params[].type`/`return_type`. `ProblemIn`
+            refuses any other node type for this language.
         min_memory_limit_mb: the smallest `memory_limit_mb` a problem may declare. Rust needs
             room for rustc, which compiles inside the same limit (~75MB peak).
     """
@@ -54,15 +57,29 @@ class SandboxProfile:
     startup_slack_s: float = 0
     function_mode_only: bool = False
     min_memory_limit_mb: int = 1
+    node_types: frozenset[str] = frozenset()
+
+
+# Every node codec judge/harness.py implements (its `_CODECS`, plus the decode-only
+# "Iterator" for an operations constructor).
+PYTHON_NODE_TYPES = frozenset({
+    "ListNode", "TreeNode", "List[ListNode]", "List[TreeNode]",
+    "CyclicListNode", "RandomListNode", "GraphNode", "Iterator",
+})
+# judge/harness_rs/prelude.rs `nodes`: the straight-line list and the binary tree, in the
+# conventional Rust shapes. The cyclic, random-pointer and graph forms need
+# `Rc<RefCell<…>>` throughout and cycle-aware encoding (AGENTS.md TODO).
+RUST_NODE_TYPES = frozenset({"ListNode", "TreeNode", "List[ListNode]", "List[TreeNode]"})
 
 
 PROFILES = {
-    "python": SandboxProfile("judge_image", "shikomi-judge:latest"),
+    "python": SandboxProfile("judge_image", "shikomi-judge:latest", node_types=PYTHON_NODE_TYPES),
     "js": SandboxProfile("judge_image_js", "shikomi-judge-js:latest", function_mode_only=True),
     # The margin over the compile timeout covers the harness's own startup and payload parsing.
     "rust": SandboxProfile("judge_image_rust", "shikomi-judge-rust:latest", tmpfs_size_mb=32,
                            tmpfs_exec=True, startup_slack_s=RUST_COMPILE_TIMEOUT_S + 2,
-                           function_mode_only=True, min_memory_limit_mb=128),
+                           function_mode_only=True, min_memory_limit_mb=128,
+                           node_types=RUST_NODE_TYPES),
     # ADR-0002: the tuned MariaDB datadir needs ~22MB of tmpfs and boots in ~0.05s; 2s is a
     # generous multiple.
     "mysql": SandboxProfile("judge_image_sql", "shikomi-judge-sql:latest", tmpfs_size_mb=32,

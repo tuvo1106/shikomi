@@ -448,9 +448,25 @@ def test_rust_is_function_mode_only_like_js():
     with pytest.raises(ValidationError, match="language 'rust' only supports kind 'function'"):
         ProblemFile.model_validate(_file(1, language="rust", kind="operations",
                                          function_name=None, class_name="C"))
-    with pytest.raises(ValidationError, match="language 'rust' does not support a ListNode"):
-        ProblemFile.model_validate(_file(1, language="rust",
-                                         params=[{"name": "head", "type": "ListNode"}]))
+
+
+@pytest.mark.parametrize("node_type", ["ListNode", "TreeNode", "List[ListNode]", "List[TreeNode]"])
+def test_rust_accepts_the_list_and_tree_codecs(node_type):
+    """prelude.rs `nodes` implements these, so a Rust variant may declare them
+    (as a param or the return type) and the workspace draws its samples."""
+    ProblemFile.model_validate(_file(1, language="rust", params=[{"name": "x", "type": node_type}]))
+    ProblemFile.model_validate(_file(1, language="rust", return_type=node_type))
+
+
+@pytest.mark.parametrize("language,node_type", [
+    ("rust", "GraphNode"), ("rust", "CyclicListNode"), ("rust", "RandomListNode"),
+    ("js", "ListNode"), ("js", "TreeNode"),
+])
+def test_a_language_refuses_node_types_its_harness_lacks(language, node_type):
+    with pytest.raises(ValidationError, match=f"language '{language}' does not support the '{node_type}'"):
+        ProblemFile.model_validate(_file(1, language=language, params=[{"name": "x", "type": node_type}]))
+    with pytest.raises(ValidationError, match=f"does not support the '{node_type}'"):
+        ProblemFile.model_validate(_file(1, language=language, return_type=node_type))
 
 
 def test_rust_memory_limit_must_leave_room_for_rustc():
