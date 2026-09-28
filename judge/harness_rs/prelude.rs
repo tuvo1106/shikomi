@@ -555,6 +555,9 @@ macro_rules! tuple_json {
 /// `.next()`, `for x in it`, `.collect()`, `.peekable()`, etc. Decode-only:
 /// there is no `ToJson`, because `"Iterator"` is never a return type. Int-only
 /// (`i32`) like a node's `val`; a non-integer element fails the case's decode.
+/// Deliberately not an `ExactSizeIterator` (and no `size_hint`): the Python
+/// `Iterator` can't be asked its length, so a one-pass-stream problem means the
+/// same thing in both languages.
 pub struct IntIter(::std::vec::IntoIter<i32>);
 
 impl FromJson for IntIter {
@@ -570,12 +573,7 @@ impl ::core::iter::Iterator for IntIter {
     fn next(&mut self) -> ::core::option::Option<i32> {
         self.0.next()
     }
-    fn size_hint(&self) -> (usize, ::core::option::Option<usize>) {
-        self.0.size_hint()
-    }
 }
-
-impl ::core::iter::ExactSizeIterator for IntIter {}
 
 // --- encoding return values (Rust -> JSON) --------------------------------
 

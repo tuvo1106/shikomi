@@ -962,6 +962,28 @@ def test_operations_iterator_constructor_arg_is_an_int_iter():
     assert res[0]["output"] == "[null,1,true,2,3,false]"
 
 
+def test_iterator_param_works_in_function_mode_too():
+    """`IntIter` is just a `FromJson` type, so any declared "Iterator" param gets it."""
+    res = rust_results(payload("fn f(nums: IntIter) -> i32 { nums.sum() }",
+                               [case(0, [[1, 2, 3]], 6)], params=[{"name": "nums", "type": "Iterator"}]))
+    assert res[0]["status"] == "passed", res[0]
+
+
+def test_int_iter_cannot_be_asked_its_length():
+    """Like the Python `Iterator`: a one-pass stream with no length."""
+    res = rust_results(payload("fn f(nums: IntIter) -> usize { nums.len() }",
+                               [case(0, [[1, 2, 3]], 3)], params=[{"name": "nums", "type": "Iterator"}]))
+    assert res[0]["status"] == "runtime_error" and "len" in res[0]["error"], res[0]
+
+
+def test_impl_iterator_constructor_gets_an_int_iter_hint():
+    code = "struct P;\nimpl P { fn new(nums: impl Iterator<Item = i32>) -> Self { P } fn n(&self) -> i32 { 0 } }\n"
+    res = rust_results(ops_payload(code, [ops_case(0, [[[1]], ("n", [])], [0], class_name="P")],
+                                   class_name="P", params=[{"name": "nums", "type": "Iterator"}]))
+    assert res[0]["status"] == "runtime_error", res[0]
+    assert "IntIter" in res[0]["error"], res[0]["error"]
+
+
 def test_operations_iterator_constructor_arg_rejects_non_integers():
     res = rust_results(ops_payload(PEEKER, [
         ops_case(0, [[["a"]], ("hasNext", [])], [False], class_name="Peeker"),

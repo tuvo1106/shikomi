@@ -76,7 +76,12 @@ ALL_NODE_TYPES = frozenset({
 })
 # judge/harness_rs/prelude.rs: every node codec (`nodes`), plus `IntIter`, the Rust
 # counterpart of the decode-only "Iterator" (an `impl Iterator<Item = i32>`).
-RUST_NODE_TYPES = ALL_NODE_TYPES
+# Spelled out (not an alias of ALL_NODE_TYPES) so a codec added for Python only doesn't
+# become valid for Rust by accident; a test pins this against harness.rs and prelude.rs.
+RUST_NODE_TYPES = frozenset({
+    "ListNode", "TreeNode", "List[ListNode]", "List[TreeNode]",
+    "CyclicListNode", "RandomListNode", "GraphNode", "Iterator",
+})
 I32_RANGE = (-(2**31), 2**31 - 1)
 
 
