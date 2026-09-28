@@ -11,7 +11,7 @@
   "time_limit_ms": 2000,
   "memory_limit_mb": 256,
   "is_published": true,
-  "tags": ["queue"],
+  "tags": ["graph", "queue"],
   "constraints": ["$0 \\le$ rows, columns $\\le 150$", "Every row has the same length"],
   "test_cases": [
     {"ordinal": 0, "input": [[["~", "~", ".", "."], ["~", ".", ".", "."], [".", ".", "~", "~"], [".", ".", ".", "~"]]], "expected": [2, 3], "is_sample": true},

@@ -28,14 +28,24 @@ spec:
         - name: migrate
           image: {{ .Values.images.api }}
           imagePullPolicy: {{ .Values.images.pullPolicy }}
-          command: ["sh", "-c", "alembic upgrade head && python -m app.cli seed"]
+          # The problems arrive as one gzipped tarball (a ConfigMap caps at 1MiB, and
+          # problem JSON is far smaller compressed; scripts/k8s-up.sh builds it), so
+          # unpack it into the writable emptyDir app.cli seed reads before seeding.
+          command:
+            - sh
+            - -c
+            - tar -xzf /seed-archive/problems.tgz -C /seed/problems && alembic upgrade head && python -m app.cli seed
           envFrom:
             - configMapRef: { name: shikomi-config }
             - secretRef: { name: shikomi-secret }
           volumeMounts:
             # Seed JSON lives at the repo root (outside the image); the deploy
-            # script publishes it as this ConfigMap. app.cli seed reads /seed/problems.
+            # script publishes it as this ConfigMap, as problems.tgz.
+            - { name: seed-archive, mountPath: /seed-archive, readOnly: true }
+            # app.cli seed reads /seed/problems, extracted here by the command above.
             - { name: seed, mountPath: /seed/problems }
       volumes:
-        - name: seed
+        - name: seed-archive
           configMap: { name: shikomi-seed }
+        - name: seed
+          emptyDir: {}

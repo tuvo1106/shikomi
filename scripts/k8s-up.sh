@@ -68,15 +68,31 @@ for img in shikomi-api:local shikomi-worker:local shikomi-web:local shikomi-judg
   kind load docker-image --name "$CLUSTER" "$img"
 done
 
-# 3. Seed data → ConfigMap (the JSON lives at the repo root, outside the image;
-#    the migrate hook mounts this at /seed/problems). Server-side apply, because
-#    client-side apply's last-applied annotation caps at 256KB, and because it
-#    updates in place: a rejected update leaves the old ConfigMap intact, where
-#    delete-then-create would leave none. PROBLEMS_DIR swaps in an operator's own
-#    problems; a ConfigMap caps at 1MiB, so a large problem set needs a different
-#    carrier (see AGENTS.md TODO).
-echo "▶ publishing problems as a ConfigMap"
-kubectl create configmap shikomi-seed --from-file="$PROBLEMS_DIR/" --dry-run=client -o yaml \
+# 3. Seed data → ConfigMap (the JSON lives at the repo root, outside the image).
+#    Published as ONE gzipped tarball, not a key per file: a ConfigMap caps at 1MiB,
+#    and problem JSON (big hidden test cases) outgrows that long before it outgrows
+#    what it compresses to — the bundled starters are ~2MB raw, ~0.45MB gzipped.
+#    The migrate hook extracts it into /seed/problems before seeding. Server-side
+#    apply, because client-side apply's last-applied annotation caps at 256KB, and
+#    because it updates in place: a rejected update leaves the old ConfigMap intact,
+#    where delete-then-create would leave none. PROBLEMS_DIR swaps in an operator's
+#    own problems.
+echo "▶ publishing problems as a ConfigMap (gzipped tarball)"
+SEED_TGZ=$(mktemp)
+trap 'rm -f "$SEED_TGZ"' EXIT
+# COPYFILE_DISABLE: stop macOS tar adding AppleDouble "._*" entries for extended
+# attributes (they'd land in the extracted dir next to the real files).
+( cd "$PROBLEMS_DIR" && COPYFILE_DISABLE=1 tar -czf "$SEED_TGZ" -- *.json )
+# The ConfigMap stores the archive base64-encoded (4/3 larger), so ~780KB of archive
+# is the most that fits under 1MiB. Fail here with a useful message, not as an
+# opaque API rejection.
+SEED_BYTES=$(wc -c < "$SEED_TGZ" | tr -d ' ')
+if [ "$SEED_BYTES" -gt 780000 ]; then
+  echo "problems archive is ${SEED_BYTES} bytes gzipped; a ConfigMap holds ~780000." >&2
+  echo "A problem set this large needs another carrier (see the AGENTS.md TODO)." >&2
+  exit 1
+fi
+kubectl create configmap shikomi-seed --from-file=problems.tgz="$SEED_TGZ" --dry-run=client -o yaml \
   | kubectl apply --server-side --force-conflicts -f - >/dev/null
 
 # 4. Optional: KEDA (event-driven autoscaling for the worker)
