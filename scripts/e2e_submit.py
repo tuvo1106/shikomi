@@ -26,8 +26,8 @@ BASE = os.environ.get("BASE_URL", "http://localhost:8000")
 API = f"{BASE}/api/v1"
 
 PROBLEM = json.loads((ROOT / "seed" / "problems" / "design-vending-machine.json").read_text())
-# Python, the problem's default language (`languages[0]`), which a submission without a
-# `language` is judged in.
+# The Python variant (`languages[0]`). The problem is offered in several languages, so
+# every request below names its language (the API refuses one without it).
 WRONG = PROBLEM["languages"][0]["starter_code"]
 CORRECT = PROBLEM["solutions"][0]["code"]["python"]
 
