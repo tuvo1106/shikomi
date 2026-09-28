@@ -6,8 +6,9 @@ structures** (AVL, B-tree, segment tree, …). Both run into the same underlying
 limit: the judge grades behaviour, not structure (DESIGN.md §12). Each family
 works around that limit in its own way.
 
-The starters include three pattern lessons (`design-vending-machine` for State,
-`design-undo-redo-editor` for Command, `design-price-feed` for Observer) and two
+The starters include four pattern lessons (`design-vending-machine` for State,
+`design-undo-redo-editor` for Command, `design-price-feed` for Observer,
+`design-sorted-tree-cursor` for Iterator) and two
 structures (`design-b-tree`, `design-lazy-segment-tree`). Use them as templates.
 
 ---

@@ -1,0 +1,27 @@
+{
+  "_comment": "Op name -> the Rust method it calls (null: refused). Read by backend tests (app/sandbox.py rust_method_name) and judge/tests/test_rust_protocol.py (the real harness.rs method_name), so the two implementations can't drift.",
+  "names": {
+    "push": "push",
+    "getState": "get_state",
+    "insertCoin": "insert_coin",
+    "toJSON": "to_json",
+    "parseHTTPHeader": "parse_http_header",
+    "get2nd": "get2nd",
+    "level2Up": "level2_up",
+    "already_snake": "already_snake",
+    "matchAll": "match_all",
+    "XMLHttp": "xml_http",
+    "type": "r#type",
+    "Match": "r#match",
+    "loop": "r#loop",
+    "Self": null,
+    "self": null,
+    "_": null,
+    "has-dash": null,
+    "9lives": null,
+    "new": null,
+    "New": null,
+    "": null,
+    "café": null
+  }
+}

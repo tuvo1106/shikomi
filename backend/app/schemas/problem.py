@@ -18,7 +18,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, model_validator
 
 from app.judge_budget import fits_job_timeout, max_cases_within_job_timeout
-from app.sandbox import ALL_NODE_TYPES, profile_for
+from app.sandbox import ALL_NODE_TYPES, profile_for, rust_method_name
 from app.schemas.solution import SolutionIn
 
 UserStatus = Literal["solved", "attempted", "unsolved"]
@@ -59,8 +59,10 @@ Kind = Literal["function", "operations", "sql"]
 # return. "js": judged by judge/harness.js under Node (DESIGN.md §13) —
 # function-mode only, no "operations" kind and no ListNode/TreeNode codecs on
 # that path at all. "rust": compiled by rustc and judged by judge/harness_rs/
-# (DESIGN.md §13, docs/adr/0004-rust-judge-compile-in-sandbox.md), function-mode only
-# like "js", but with every node codec except "Iterator" (`SandboxProfile.node_types`). "mysql": judged by judge/harness_sql.py against an
+# (DESIGN.md §13, docs/adr/0004-rust-judge-compile-in-sandbox.md), function and
+# operations mode, with every node codec except "Iterator" (`SandboxProfile.node_types`);
+# its method calls decode their args by the user's signature. "mysql": judged by
+# judge/harness_sql.py against an
 # ephemeral MariaDB instance (DESIGN.md §13, docs/adr/0002-sql-judge-engine-
 # mysql-vs-mariadb.md) — always paired with kind="sql", never any other kind.
 Language = Literal["python", "js", "rust", "mysql"]
@@ -160,6 +162,24 @@ _NODE_PARAM_TYPES = ALL_NODE_TYPES
 
 def _is_index(x: Any, size: int) -> bool:
     return isinstance(x, int) and not isinstance(x, bool) and 0 <= x < size
+
+
+def _operations_case(case_input: Any) -> tuple[list, list]:
+    """An operations case's `(ops, args)`: `input` is `[ops, args]`, with `ops[0]`
+    the class name and `args[0]` the constructor's argument list. Either is [] for
+    a case that isn't shaped so (the harness reports that case; the validators that
+    read ops or constructor args just find nothing to check)."""
+    if isinstance(case_input, list) and len(case_input) == 2:
+        ops, args = case_input
+        return (ops if isinstance(ops, list) else [], args if isinstance(args, list) else [])
+    return [], []
+
+
+def _operations_ctor_args(case_input: Any) -> list:
+    """An operations case's constructor arguments, or [] (see `_operations_case`)."""
+    _, args = _operations_case(case_input)
+    first = args[0] if args else []
+    return first if isinstance(first, list) else []
 
 
 def _malformed_node_wire(node_type: str, wire: Any) -> str | None:
@@ -318,8 +338,8 @@ class ProblemIn(BaseModel):
 
     @model_validator(mode="after")
     def _language_supports_kind_and_codecs(self) -> "ProblemIn":
-        # judge/harness.js and judge/harness_rs/ only implement function mode
-        # (DESIGN.md §13), and each harness implements its own set of node codecs
+        # judge/harness.js only implements function mode (DESIGN.md §13), and each
+        # harness implements its own set of node codecs
         # (JS none; Rust all but the decode-only Iterator, prelude.rs `nodes`). Reject an
         # unsupported combination here rather than letting it surface as a
         # confusing runtime_error from the harness on every submission.
@@ -446,8 +466,16 @@ class ProblemFile(ProblemIn):
 
     def _node_wires(self, tc: "TestCaseIn"):
         """`(variant, where, node_type, wire)` for every node-typed argument and
-        expected output in function-mode case `tc` (an any_of case contributes each
-        option). Operations cases put constructor args elsewhere, so they're skipped."""
+        expected output in case `tc` (an any_of case contributes each option). In an
+        operations case, `params` describe the constructor, whose arguments are the
+        case's first argument list; its method calls take no declared types."""
+        if self.kind == "operations":
+            ctor_args = _operations_ctor_args(tc.input)
+            for v in self.languages:
+                for i, p in enumerate(v.params):
+                    if p.type in _NODE_PARAM_TYPES and p.type != "Iterator" and i < len(ctor_args):
+                        yield v, f"constructor argument {p.name}", p.type, ctor_args[i]
+            return
         if self.kind != "function":
             return
         expected_options = self.comparison.get("mode") == "any_of"
@@ -494,6 +522,28 @@ class ProblemFile(ProblemIn):
                             f"test case {tc.ordinal}: {where} holds the node value {x!r}, but "
                             f"language '{v.language}' stores a {node_type} value as an integer "
                             f"in [{lo}, {hi}]")
+        return self
+
+    @model_validator(mode="after")
+    def _ops_are_rust_methods(self) -> "ProblemFile":
+        # The Rust harness dispatches each op name to a method by generating source
+        # (harness.rs `operations_glue`), after mapping it to snake_case. An op that
+        # can't be a Rust identifier, or two ops that map to the same method
+        # (`getState` and `get_state`), would fail every Rust submission; caught here.
+        # So would an op named `new`, the constructor's name (`rust_method_name`).
+        if self.kind != "operations" or not any(v.language == "rust" for v in self.languages):
+            return self
+        methods: dict[str, str] = {}
+        for tc in self.test_cases:
+            ops, _ = _operations_case(tc.input)
+            for op in ops[1:]:
+                method = rust_method_name(op) if isinstance(op, str) else None
+                if method is None:
+                    raise ValueError(f"test case {tc.ordinal}: op {op!r} can't be a Rust method name")
+                other = methods.setdefault(method, op)
+                if other != op:
+                    raise ValueError(
+                        f"ops {other!r} and {op!r} both map to the Rust method `{method}`")
         return self
 
     @model_validator(mode="after")

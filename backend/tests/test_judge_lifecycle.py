@@ -8,17 +8,20 @@ Three failure modes, each easy to miss:
 * one worker replica's sweep reaping another replica's live sandbox.
 """
 import asyncio
+import json
+import pathlib
+import re
 import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
-import re
-
 import pytest
 from pydantic import ValidationError
 
 from app import judge_budget as jb
+from app import sandbox as sandbox_mod
+from app.sandbox import rust_method_name
 from app.schemas.problem import ProblemFile
 from app.queue import inflight_key
 from fake_redis import ScriptedRedis
@@ -446,10 +449,70 @@ async def test_enqueue_judge_uses_the_submission_id_as_the_job_id_on_the_judge_q
 
 # --- language rules the Rust judge relies on (ADR-0004) ---------------------------------------
 
-def test_rust_is_function_mode_only_like_js():
-    with pytest.raises(ValidationError, match="language 'rust' only supports kind 'function'"):
-        ProblemFile.model_validate(_file(1, language="rust", kind="operations",
-                                         function_name=None, class_name="C"))
+def _rust_ops_file(*ops_lists, params=None):
+    cases = [{"ordinal": i, "input": [["C", *ops], [[]] + [[] for _ in ops]],
+              "expected": [None] * (len(ops) + 1), "is_sample": True}
+             for i, ops in enumerate(ops_lists)]
+    return {**_file(1, language="rust", kind="operations", function_name=None, class_name="C",
+                    params=params or []), "test_cases": cases}
+
+
+def test_rust_supports_operations_mode():
+    """harness_rs dispatches each op name to a method (harness.rs `operations_glue`)."""
+    ProblemFile.model_validate(_rust_ops_file(["push", "getState"], ["type"]))
+
+
+_REPO = pathlib.Path(__file__).resolve().parents[2]
+_METHOD_NAMES = json.loads((_REPO / "judge/tests/rust_method_names.json").read_text())["names"]
+
+
+@pytest.mark.parametrize("op, method", sorted(_METHOD_NAMES.items()))
+def test_rust_method_name_mirrors_the_harness(op, method):
+    """The table judge/tests/test_rust_protocol.py also runs through the real
+    harness.rs `method_name`, so the two implementations are held to one spec."""
+    assert rust_method_name(op) == method
+
+
+def test_rust_keyword_list_matches_the_harness():
+    """harness.rs `KEYWORDS` and `_RUST_KEYWORDS` decide which ops get `r#`. The
+    Docker test can only exercise a few keywords, so the lists are compared here,
+    where CI always runs."""
+    source = (_REPO / "judge/harness_rs/harness.rs").read_text()
+    block = re.search(r"const KEYWORDS: &\[&str\] = &\[(.*?)\];", source, re.S)
+    assert block, "KEYWORDS not found in harness.rs"
+    assert set(re.findall(r'"([^"]+)"', block.group(1))) == set(sandbox_mod._RUST_KEYWORDS)
+
+
+def test_rust_refuses_an_op_named_like_the_constructor():
+    with pytest.raises(ValidationError, match="op 'new' can't be a Rust method name"):
+        ProblemFile.model_validate(_rust_ops_file(["push", "new"]))
+
+
+def test_rust_refuses_an_op_that_cant_be_a_method():
+    with pytest.raises(ValidationError, match="op 'has-dash' can't be a Rust method name"):
+        ProblemFile.model_validate(_rust_ops_file(["push", "has-dash"]))
+
+
+def test_rust_refuses_two_ops_mapping_to_one_method():
+    with pytest.raises(ValidationError, match="'getState' and 'get_state' both map"):
+        ProblemFile.model_validate(_rust_ops_file(["getState"], ["get_state"]))
+
+
+def test_python_only_operations_problems_keep_any_op_name():
+    """The snake_case mapping is Rust's; a Python-only problem isn't held to it."""
+    data = _rust_ops_file(["getState"], ["get_state"])
+    data["language"] = "python"
+    data["memory_limit_mb"] = 64
+    ProblemFile.model_validate(data)
+
+
+def test_rust_operations_constructor_node_values_must_fit_i32():
+    """`params` describe an operations problem's constructor, whose args are the
+    first argument list, so its node values are checked like a function's."""
+    data = _rust_ops_file(["size"], params=[{"name": "head", "type": "ListNode"}])
+    data["test_cases"][0]["input"][1][0] = [[1, 2**31]]
+    with pytest.raises(ValidationError, match="constructor argument head holds the node value"):
+        ProblemFile.model_validate(data)
 
 
 @pytest.mark.parametrize("node_type", ["ListNode", "TreeNode", "List[ListNode]", "List[TreeNode]",

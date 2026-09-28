@@ -73,7 +73,7 @@ was N languages per problem, not two.
 - Adding a language to an existing problem is a data change: a `languages` entry, starter
   code, and at least one solution in that language. No migration.
 - The database no longer backstops the kind/language rules. A hand-written insert could
-  create a Rust operations variant that fails on every submission. Acceptable because no API
+  create a JavaScript operations variant that fails on every submission. Acceptable because no API
   writes problems.
 - Authors must write statements and constraints in language-neutral terms (`n bookings`, not
   `bookings.len()`), and must return values in each language's natural JSON shape. In Python,

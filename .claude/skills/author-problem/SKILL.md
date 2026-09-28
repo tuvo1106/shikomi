@@ -52,9 +52,9 @@ it and returns a JSON-safe result, point `function_name` at the driver, and say
 so in `statement_md`. A Promise return is awaited. Give real-timer cases
 generous margins (a 50ms debounce window against a 500ms+ `time_limit_ms`).
 
-**Rust** (`"language": "rust"`) is function mode only too, but unlike JS it has
-every node codec except the decode-only `Iterator`. The harness compiles the
-submission with the user's own function
+**Rust** (`"language": "rust"`) supports `function` and `operations` mode (not
+`sql`), with every node codec except the decode-only `Iterator`. The harness
+compiles the submission with the user's own function or method
 signature and **infers each argument's Rust type from it**, so there's no type
 table: parameters can be integers (`i32`/`i64`/`u8`…`usize`), `f64`, `bool`,
 `char` (a one-character string), `String`, `Vec<T>`, `Option<T>` (`null` =
@@ -80,11 +80,23 @@ the reference-solution run in step 5 catches it. Integer overflow **panics**
 same limit. Each case runs in a fresh process, so statics don't carry over
 between cases.
 
-**Several languages.** A function-mode problem can be offered in more than one
+A Rust **operations** problem needs no method signatures in the file either: the
+judge calls `ClassName::new(...)` with the first argument list, then each method,
+and infers every argument's type from the user's `impl`. Methods take `&self` or
+`&mut self` and at most six owned parameters, and return an owned value (not
+`&str`). Rust methods are snake_case, so the shared cases' op names are mapped:
+`getState` calls `get_state`. Say so in the Rust `note_md` when an op name isn't
+already snake_case (`design-vending-machine` does), and don't use two op names
+that map to the same method (the seed refuses them). Method arguments are decoded
+by the signature too, unlike Python's, which stay raw JSON. The six `design-*`
+problems are the references; `design-sorted-tree-cursor` takes a `TreeNode` in its
+constructor.
+
+**Several languages.** A function or operations problem can be offered in more than one
 language (`merge-booking-windows` is Python, JS and Rust; DESIGN.md §7.1). Write
 it once: the statement, `kind`, `comparison`, limits and test cases are shared,
-and a `languages` list (default first) carries each language's `function_name`,
-`starter_code`, `params`, `return_type` and an optional `note_md`. Rules:
+and a `languages` list (default first) carries each language's `function_name`
+(or `class_name`), `starter_code`, `params`, `return_type` and an optional `note_md`. Rules:
 
 - Keep the statement and constraints **language-neutral** (`n bookings`, not
   `bookings.len()`); a line that only makes sense in one language goes in that
@@ -97,7 +109,7 @@ and a `languages` list (default first) carries each language's `function_name`,
   it `list[list[int]]`, not `list[tuple[int, int]]`.
 - Limits are shared, so calibrate `time_limit_ms` and the large cases against the
   slowest language's reference solution (usually Python).
-- Operations problems stay Python-only (JS and Rust have no operations mode).
+- Operations problems can't include JS (it has no operations mode).
 
 **In-place mutation isn't observable.** The judge never inspects mutated
 arguments. A "modify the array in place" problem returns the resulting array

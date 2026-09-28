@@ -335,6 +335,13 @@ and `playwright`.
   by `test_the_bundled_starters_validate` (backend/tests/test_cli.py). A rule that reads a
   node-typed `expected` must remember a `CyclicListNode` answer is an index, not a list:
   that exact slip was caught this way.
+- **Rust calls each op by its snake_case name.** The shared cases spell an op once for
+  every language (`getState`), and the Rust glue calls `get_state`. The mapping exists
+  twice: harness.rs `method_name`, which the judge runs, and `app/sandbox.py`
+  `rust_method_name`, which seed validation uses to refuse ops that can't map, that
+  collide, or that map to `new` (the constructor). Change both together: both are held
+  to one table, `judge/tests/rust_method_names.json` (a backend test and a Docker-marked
+  harness test), and a backend test compares the two keyword lists.
 - **Rust node structs are generated per problem.** The glue defines only the node
   structs the Rust variant declares (harness.rs `node_structs`), in the user's crate. A
   Rust test payload that uses `ListNode` must declare it in `params`/`return_type`, or the
@@ -374,11 +381,13 @@ slice ships, delete its entry here.
   re-read. The Docker runner is unaffected (stdin only).
 
 - **Rust judge follow-ups** (v1 shipped,
-  [ADR-0004](docs/adr/0004-rust-judge-compile-in-sandbox.md); every node codec but the
-  decode-only `Iterator` shipped too): `kind: "operations"` for Rust, shipping with
-  Python + Rust design starters. That needs machine-readable method signatures in
-  `ProblemIn` (today they exist only in the Python `starter_code`), a second glue
-  generator that dispatches method names, and then `Iterator` for constructors. Also:
+  [ADR-0004](docs/adr/0004-rust-judge-compile-in-sandbox.md); every node codec and
+  operations mode shipped too): the decode-only `Iterator` constructor argument has no
+  Rust counterpart yet (it would need a prelude type, say one wrapping a `Vec`, that a
+  starter can take as `impl Iterator`-like input). The workspace renders an operations
+  case with the cases' op names (`insertCoin(25)`) even in the Rust editor, where the
+  method is `insert_coin`; the note under the statement says so, but the rendering could
+  apply the snake_case mapping for Rust instead. Also:
   measure compile time and the per-case spawn cost under gVisor (`runsc` adds syscall
   overhead that rustc and `fork`/`exec` feel), and trim the ~1.1GB image (a `rustup
   --profile minimal` build on `debian:slim`). A dedicated `compile_error` verdict would
@@ -389,7 +398,7 @@ slice ships, delete its entry here.
   per-language `time_limit_ms` (limits are shared today, so they're calibrated to the
   slowest language's reference solution); a language filter and language chips in the
   problem list (`ProblemListItem.languages` is already returned); and offering more of
-  the bundled starters in several languages (only `merge-booking-windows` is, today).
+  the bundled starters in several languages (`calm-stretch` is still Python-only).
 
 - **Auth roadmap:** revisit session strategy (currently JWT-in-memory access +
   httpOnly refresh cookie — consider server-side sessions / cookie-based access
