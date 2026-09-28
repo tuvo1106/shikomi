@@ -1046,9 +1046,24 @@ fn main() {
             // never this file, so deleting it costs nothing. This mirrors what
             // harness.py/js do on their k8s path (ADR-0006). On the Docker path
             // the payload arrives on stdin, so there's no file to remove.
-            let contents = fs::read_to_string(&path);
-            let _ = fs::remove_file(&path);
-            contents
+            let contents = match fs::read_to_string(&path) {
+                Ok(c) => c,
+                Err(e) => {
+                    // A judge-side I/O fault, not a malformed payload — say so.
+                    eprintln!("harness: could not read payload file: {}", e);
+                    std::process::exit(3);
+                }
+            };
+            // Fail closed: if we read a real payload but can't delete it, we can't
+            // guarantee `expected` is out of a case's reach, so refuse the run
+            // rather than grade every case with it still readable at the fixed
+            // path. The k8s emptyDir is world-writable and we own the file, so this
+            // never fires in practice; it guards against a future misconfiguration.
+            if let Err(e) = fs::remove_file(&path) {
+                eprintln!("harness: could not remove payload file: {}", e);
+                std::process::exit(3);
+            }
+            Ok(contents)
         }
         Err(_) => {
             let mut s = String::new();

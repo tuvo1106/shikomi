@@ -77,25 +77,33 @@ fn f(_x: i32) -> String {
     assert _first(run_rust_container(_payload(code)))["status"] == "passed"
 
 
-def _run_with_payload_file(payload_json, container_name="judge-rust-payload"):
+def _run_with_payload_file(payload_json):
     """Deliver the payload the way the k8s runner does — as a file the harness
     reads via JUDGE_PAYLOAD_FILE — instead of on stdin, so the parent's
     read-then-unlink path runs. A shell wrapper writes stdin to /tmp/payload.json
     (the writable tmpfs, since the root FS is read-only), points the harness at
     it, and execs the real entrypoint."""
+    import subprocess
+    import uuid
     sys.path.insert(0, str(BACKEND))
     from app.sandbox import profile_for
     from worker.docker_runner import build_run_args
-    import subprocess
 
     profile = profile_for("rust")
+    # A unique name (not a fixed one) so a leftover container from a crashed
+    # prior run can't collide with `--name` and fail us on infra, not behavior.
+    container_name = "judge-rust-payload-%s" % uuid.uuid4().hex[:8]
     base = build_run_args(image=IMAGE, container_name=container_name, memory_mb=256,
                           cpus="1", pids_limit=64, tmpfs_size_mb=profile.tmpfs_size_mb,
                           tmpfs_exec=profile.tmpfs_exec)
     wrapper = ("cat > /tmp/payload.json && "
                "JUDGE_PAYLOAD_FILE=/tmp/payload.json exec /opt/judge/harness")
     args = base[:-1] + ["--entrypoint", "sh", IMAGE, "-c", wrapper]
-    return subprocess.run(args, input=payload_json, capture_output=True, text=True, timeout=60)
+    try:
+        return subprocess.run(args, input=payload_json, capture_output=True, text=True, timeout=60)
+    finally:
+        # `--rm` cleans up on a normal exit; force-remove in case the run was killed.
+        subprocess.run(["docker", "rm", "-f", container_name], capture_output=True)
 
 
 def test_k8s_payload_file_is_deleted_before_the_submission_runs():

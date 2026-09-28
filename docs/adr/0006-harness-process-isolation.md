@@ -70,7 +70,10 @@ Give the Python and JS harnesses the Rust harness's shape: a **trusted parent** 
   harness runs each case as the same uid too, so it had this gap even though it always isolated
   the case). An init container now copies it into a writable `emptyDir` the judge mounts instead,
   and the parent unlinks it before any user code runs (as it already does for the stdin path);
-  all three harnesses — Python, JS and Rust — do this. That `emptyDir` is node-backed, **not**
+  all three harnesses — Python, JS and Rust — do this, and **fail closed**: if the delete fails
+  they refuse the run as a judge fault rather than grade with `expected` still readable (the
+  emptyDir is world-writable and the parent owns the file, so this never fires in practice — it
+  guards a future misconfiguration). That `emptyDir` is node-backed, **not**
   `medium: Memory`: a tmpfs emptyDir's bytes are charged to the judge container's memory cgroup,
   which would silently shrink the `memory_limit_mb` a submission is graded under. The payload
   holds only `expected` (not a secret) and is gone before the submission's peak memory is

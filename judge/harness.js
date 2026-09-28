@@ -599,7 +599,18 @@ async function main() {
   // (which never gets the path) can't read the expected answers back out of it.
   const payloadFile = process.env.JUDGE_PAYLOAD_FILE;
   const raw = payloadFile ? fs.readFileSync(payloadFile, 'utf8') : fs.readFileSync(0, 'utf8');
-  if (payloadFile) { try { fs.unlinkSync(payloadFile); } catch (e) { /* best effort */ } }
+  if (payloadFile) {
+    // Fail closed: if we can't delete the payload we can't guarantee the child
+    // can't read `expected` back at the fixed path, so refuse the run (a
+    // judge-side fault, no report) rather than grade with it readable. The k8s
+    // emptyDir is world-writable and we own the file, so this never fires in
+    // practice; it guards against a future misconfiguration.
+    try { fs.unlinkSync(payloadFile); }
+    catch (e) {
+      process.stderr.write('harness: could not remove payload file: ' + e.message + '\n');
+      process.exit(3);
+    }
+  }
   let payload;
   try {
     payload = JSON.parse(raw);
