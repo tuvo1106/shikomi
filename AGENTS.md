@@ -43,7 +43,7 @@ Run from `backend/` unless noted.
 | Run accounts worker | `uv run arq worker.main.AccountsWorkerSettings` — **required for account email**: register/reset enqueue onto `arq:accounts`, so without it mail silently never sends |
 | E2E pipeline check | `uv run python ../scripts/e2e_submit.py` (needs API + worker + Docker) |
 | Judge one payload (no Docker) | `uv run python -m worker.judge_local --subprocess payload.json` |
-| Judge one payload (real sandbox) | `uv run python -m worker.judge_local payload.json` |
+| Judge one payload (real sandbox) | `uv run python -m worker.judge_local payload.json` (`--language js/rust/mysql` for another language's sandbox profile) |
 | Backend real-container test | `uv run pytest -m docker` (from `backend/`, needs judge image) |
 | Harness protocol tests | `pytest -m "not docker"` (repo root) |
 | Sandbox isolation tests | `docker build -t shikomi-judge:latest judge/ && docker build -f judge/Dockerfile.js -t shikomi-judge-js:latest judge/ && docker build -f judge/Dockerfile.rust -t shikomi-judge-rust:latest judge/ && docker build -f judge/Dockerfile.sql-mysql -t shikomi-judge-sql:latest judge/ && pytest -m docker` (root) |
@@ -224,8 +224,10 @@ and `playwright`.
   (a per-case cgroup, or an RSS watchdog) if Rust problems start using threads.
 - **Docker's `--tmpfs` is `noexec` by default.** Any harness that writes a
   binary into `/tmp` and runs it (today only Rust) needs
-  `build_run_args(tmpfs_exec=True)` (`TMPFS_EXEC_LANGUAGES` in
-  `worker/judging.py`); otherwise it fails with `Permission denied` at spawn.
+  `build_run_args(tmpfs_exec=True)`; otherwise it fails with `Permission denied`
+  at spawn. Take it from the language's profile (`app/sandbox.py`
+  `profile_for`) rather than hardcoding it. `worker/judge_local` once didn't,
+  and couldn't run Rust at all.
   Kubernetes `emptyDir` has no such option, so a k8s-only test would never
   catch a missing flag.
 - **A judge harness that spawns processes is PID 1 and has to reap.** The

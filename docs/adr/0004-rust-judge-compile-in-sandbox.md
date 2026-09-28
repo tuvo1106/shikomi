@@ -98,4 +98,11 @@ The implementation follows the decision above, with these differences, each foun
   - Exact integer-vs-float equality. Measured: `9007199254740993` passed against an expected `9007199254740992.0`.
   - rustc is called by absolute path (the base image's PATH put rustup's proxy first) and runs in its own process group, and the compile timeout now comes from `app/judge_budget.py` through the payload.
   - **Not fixed:** under the k8s runner the payload is a ConfigMap file the case can open. The harness can't hide it (read-only mount, same uid), so "the child never sees `expected`" holds on Docker only. This affects Python equally and is tracked in AGENTS.md.
+- **Review fixes, round 2** (each regression test fails on the prior image):
+  - `unordered` sorts canonical keys, O(n log n). The pairwise match took ~6s at 100k elements, untimed.
+  - Case output goes through capped pipes, not tmpfs files. 40MB of prints failed a correct solution with `ENOSPC`.
+  - `NaN`/`Infinity` parse, so they stay values instead of crashes, and inf matches inf under `float_tolerance`.
+  - The entry point is an exported C `main` under `#![no_main]`, so a user's own `fn main` or an `Ok` variant in scope no longer breaks compilation. One side effect: std's stack-overflow message isn't installed, so a SIGSEGV is reported as "stack overflow".
+  - Judge-side faults exit with code 3 and no results, so they report as `judge_error`, not the user's `runtime_error`.
+  - Every per-language setting now lives in one `SandboxProfile` table (`backend/app/sandbox.py`), replacing five parallel tables across three modules. `worker/judge_local` had missed them and couldn't run Rust.
 - **Also:** edition 2024, a 64MB per-case stack (`RLIMIT_STACK`, for deep recursion), a 32MB tmpfs, a `memory_limit_mb >= 128` floor for Rust problems (`ProblemIn`), and a 10s compile timeout (`RUST_COMPILE_TIMEOUT_S`) reserved in the wall budget with a 2s margin.

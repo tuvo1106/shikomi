@@ -18,6 +18,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, model_validator
 
 from app.judge_budget import fits_job_timeout, max_cases_within_job_timeout
+from app.sandbox import profile_for
 from app.schemas.solution import SolutionIn
 
 UserStatus = Literal["solved", "attempted", "unsolved"]
@@ -63,15 +64,6 @@ Kind = Literal["function", "operations", "sql"]
 # ephemeral MariaDB instance (DESIGN.md §13, docs/adr/0002-sql-judge-engine-
 # mysql-vs-mariadb.md) — always paired with kind="sql", never any other kind.
 Language = Literal["python", "js", "rust", "mysql"]
-
-# Languages whose harness implements function mode only, with no "operations"
-# kind and no ListNode/TreeNode/... codecs (`_function_mode_only_languages`).
-FUNCTION_MODE_ONLY_LANGUAGES = ("js", "rust")
-
-# rustc runs inside the submission's own container, so its peak (~75MB,
-# ADR-0004) counts against memory_limit_mb. Below this floor, a Rust problem
-# could fail to *compile* on the judge.
-RUST_MIN_MEMORY_LIMIT_MB = 128
 
 
 class ParamSpec(BaseModel):
@@ -200,7 +192,7 @@ class ProblemIn(BaseModel):
         # (DESIGN.md §13): no "operations" kind, no ListNode/TreeNode codecs.
         # Reject the combination here rather than letting it surface as a
         # confusing runtime_error from the harness on every submission.
-        if self.language not in FUNCTION_MODE_ONLY_LANGUAGES:
+        if not profile_for(self.language).function_mode_only:
             return self
         lang = self.language
         if self.kind != "function":
@@ -218,11 +210,15 @@ class ProblemIn(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def _rust_memory_fits_the_compiler(self) -> "ProblemIn":
-        if self.language == "rust" and self.memory_limit_mb < RUST_MIN_MEMORY_LIMIT_MB:
+    def _memory_fits_the_sandbox(self) -> "ProblemIn":
+        # A language can need a floor under memory_limit_mb: Rust's rustc compiles
+        # the submission inside the same limit (~75MB peak, ADR-0004), so below its
+        # profile's floor a problem could fail to *compile* on the judge.
+        floor = profile_for(self.language).min_memory_limit_mb
+        if self.memory_limit_mb < floor:
             raise ValueError(
-                f"language 'rust' needs memory_limit_mb >= {RUST_MIN_MEMORY_LIMIT_MB}: "
-                "rustc compiles the submission inside the same memory limit")
+                f"language '{self.language}' needs memory_limit_mb >= {floor}: "
+                "its judge's own work (rustc, for Rust) runs inside the same limit")
         return self
 
     @model_validator(mode="after")

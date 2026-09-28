@@ -125,7 +125,7 @@ async def test_run_judgement_dispatches_sql_language_to_its_image_and_tmpfs(monk
     """language="mysql" must resolve to the SQL sandbox image and its larger
     tmpfs (DESIGN.md §13, docs/adr/0002-sql-judge-engine-mysql-vs-mariadb.md)
     — not silently fall through to the python defaults the way an unrecognized
-    language would (`_image_for`'s documented fallback)."""
+    language would (`profile_for`'s documented fallback)."""
     from worker import judging as judging_mod
 
     captured = {}
@@ -146,7 +146,7 @@ async def test_run_judgement_dispatches_sql_language_to_its_image_and_tmpfs(monk
 
     assert captured["image"] == judging_mod.settings.judge_image_sql
     assert captured["tmpfs_size_mb"] == 32
-    # WALL_CLOCK_SLACK_S (10) + STARTUP_SLACK_S_BY_LANGUAGE["mysql"] (2) + 1 case * 2s
+    # WALL_CLOCK_SLACK_S (10) + the mysql profile's startup_slack_s (2) + 1 case * 2s
     assert captured["wall_timeout_s"] == pytest.approx(2 + 10 + 2)
 
 
@@ -203,11 +203,11 @@ async def test_run_judgement_dispatches_rust_to_its_image_with_an_exec_tmpfs(mon
     assert captured["image"] == judging_mod.settings.judge_image_rust
     assert captured["tmpfs_size_mb"] == 32
     assert captured["tmpfs_exec"] is True
-    # WALL_CLOCK_SLACK_S (10) + STARTUP_SLACK_S_BY_LANGUAGE["rust"] (10 + 2) + 1 case * 2s
+    # WALL_CLOCK_SLACK_S (10) + the rust profile's startup_slack_s (10 + 2) + 1 case * 2s
     assert captured["wall_timeout_s"] == pytest.approx(2 + 10 + 12)
     assert captured["payload"]["memory_limit_mb"] == 256
     # The harness's compile deadline comes from the same constant the budget reserves.
-    from app.judge_budget import RUST_COMPILE_TIMEOUT_S
+    from app.sandbox import RUST_COMPILE_TIMEOUT_S
     assert captured["payload"]["compile_timeout_s"] == RUST_COMPILE_TIMEOUT_S
 
 

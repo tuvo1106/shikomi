@@ -464,6 +464,7 @@ def test_rust_budget_reserves_the_compile_timeout_with_margin():
     # The worker sends RUST_COMPILE_TIMEOUT_S as the harness's rustc deadline; the wall
     # budget must cover all of it (plus harness startup) or a slow compile would read
     # as a whole-run TLE.
-    assert jb.STARTUP_SLACK_S_BY_LANGUAGE["rust"] > jb.RUST_COMPILE_TIMEOUT_S
+    from app.sandbox import RUST_COMPILE_TIMEOUT_S, profile_for
+    assert profile_for("rust").startup_slack_s > RUST_COMPILE_TIMEOUT_S
     assert jb.wall_budget_s(1, 2000, "rust") == pytest.approx(
-        2 + jb.WALL_CLOCK_SLACK_S + jb.RUST_COMPILE_TIMEOUT_S + 2)
+        2 + jb.WALL_CLOCK_SLACK_S + RUST_COMPILE_TIMEOUT_S + 2)

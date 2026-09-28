@@ -5,8 +5,9 @@ test_seed_solutions.py so the container configuration lives in one place.
 The Rust harness compiles inside the sandbox, so it can't run as a bare local
 subprocess the way harness.py/harness.js do (that would need a local rustc
 plus the prebuilt prelude rlib). Every Rust test is therefore Docker-marked.
-The flags mirror worker/judging.py for language "rust": a 32MB tmpfs mounted
-`exec`, since the harness runs the binary it just compiled there (ADR-0004).
+The tmpfs flags come from the Rust sandbox profile (backend/app/sandbox.py), the
+same table the worker uses: a 32MB tmpfs mounted `exec`, since the harness runs
+the binary it just compiled there (ADR-0004).
 """
 import json
 import os
@@ -23,11 +24,14 @@ BACKEND = pathlib.Path(__file__).resolve().parents[2] / "backend"
 def run_rust_container(payload_json, container_name="judge-rust-test", memory_mb=256,
                        timeout=60, tmpfs_exec=True):
     sys.path.insert(0, str(BACKEND))
+    from app.sandbox import profile_for
     from worker.docker_runner import build_run_args
 
+    profile = profile_for("rust")
     args = build_run_args(image=IMAGE, container_name=container_name,
                           memory_mb=memory_mb, cpus="1", pids_limit=64,
-                          tmpfs_size_mb=32, tmpfs_exec=tmpfs_exec)
+                          tmpfs_size_mb=profile.tmpfs_size_mb,
+                          tmpfs_exec=profile.tmpfs_exec and tmpfs_exec)
     return subprocess.run(args, input=payload_json, capture_output=True,
                           text=True, timeout=timeout)
 

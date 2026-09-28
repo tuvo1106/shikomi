@@ -111,8 +111,8 @@ class Problem(Base, PKMixin, TimestampMixin):
     # each case in its own process (docs/adr/0004-rust-judge-compile-in-
     # sandbox.md). "mysql": judge/harness_sql.py runs it as a query against
     # an ephemeral MariaDB instance (docs/adr/0002-sql-judge-engine-mysql-vs-
-    # mariadb.md) — a different sandbox image either way (worker/judging.py's
-    # IMAGE_BY_LANGUAGE), same protocol/verdict shape (DESIGN.md §13). Only
+    # mariadb.md) — a different sandbox image either way (its profile in
+    # app/sandbox.py), same protocol/verdict shape (DESIGN.md §13). Only
     # "function"-kind problems support "js"/"rust"; "mysql" only ever pairs with
     # kind="sql".
     language: Mapped[str] = mapped_column(Text, nullable=False, server_default="python")

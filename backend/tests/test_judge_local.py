@@ -59,3 +59,23 @@ def test_container_result_oom_detection():
     result = ContainerResult(stdout="", stderr="", exit_code=137,
                              timed_out=False, stdout_truncated=False)
     assert result.oom_killed is True
+
+
+def test_judge_local_runs_each_language_with_its_sandbox_profile(tmp_path, monkeypatch):
+    """--language picks the profile's image, tmpfs size and `exec` flag. Without
+    them the Rust harness can't run the binary it compiles (the bug this guards)."""
+    captured = {}
+
+    async def fake_run(payload_json, **kwargs):
+        captured.update(kwargs)
+        return ContainerResult(stdout='{"results": []}', stderr="", exit_code=0,
+                               timed_out=False, stdout_truncated=False)
+
+    monkeypatch.setattr(judge_local.docker_runner, "run_in_container", fake_run)
+    judge_local.main(["--language", "rust", _write(tmp_path, _payload(PAIR_SUM_OK))])
+    assert captured["image"] == "shikomi-judge-rust:latest"
+    assert (captured["tmpfs_size_mb"], captured["tmpfs_exec"]) == (32, True)
+
+    judge_local.main(["--image", "custom:tag", _write(tmp_path, _payload(PAIR_SUM_OK))])
+    assert captured["image"] == "custom:tag"
+    assert (captured["tmpfs_size_mb"], captured["tmpfs_exec"]) == (16, False)

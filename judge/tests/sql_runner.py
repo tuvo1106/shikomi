@@ -15,9 +15,11 @@ BACKEND = pathlib.Path(__file__).resolve().parents[2] / "backend"
 
 def run_sql_container(payload_json, container_name="judge-sql-test", memory_mb=192, timeout=20):
     sys.path.insert(0, str(BACKEND))
+    from app.sandbox import profile_for
     from worker.docker_runner import build_run_args
 
     args = build_run_args(image=IMAGE, container_name=container_name,
-                          memory_mb=memory_mb, cpus="1", pids_limit=64, tmpfs_size_mb=32)
+                          memory_mb=memory_mb, cpus="1", pids_limit=64,
+                          tmpfs_size_mb=profile_for("mysql").tmpfs_size_mb)
     return subprocess.run(args, input=payload_json, capture_output=True,
                           text=True, timeout=timeout)

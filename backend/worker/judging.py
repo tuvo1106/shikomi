@@ -6,7 +6,8 @@ and Submit, so the two always judge identically. See DESIGN.md §5.2, §5.3.
 import json
 
 from app.config import get_settings
-from app.judge_budget import RUST_COMPILE_TIMEOUT_S, wall_budget_s
+from app.judge_budget import wall_budget_s
+from app.sandbox import RUST_COMPILE_TIMEOUT_S, profile_for
 from worker import runner
 from worker.aggregate import Verdict, aggregate, parse_harness_output
 
@@ -14,35 +15,13 @@ settings = get_settings()
 
 CPUS = "1"
 PIDS_LIMIT = 64
-# tmpfs size per problem `language` (docker_runner.build_run_args'/k8s_runner's
-# `tmpfs_size_mb`, default 16 there). Only "mysql" needs more: a database
-# server's data directory has to live entirely in this scratch space
-# (ADR-0002's Phase 0 spike: MariaDB's tuned template needs ~22MB, fits
-# comfortably in 32).
-# "rust" gets 32 as well: the tmpfs holds rustc's intermediate objects, the
-# compiled binary (~0.4MB stripped) and each case's captured stdout/stderr
-# (ADR-0004 measured it fitting in 16; 32 is headroom for a chatty submission).
-TMPFS_SIZE_MB_BY_LANGUAGE = {"mysql": 32, "rust": 32}
-# Languages whose harness executes a binary it wrote into /tmp, and so need the
-# tmpfs mounted `exec` (docker_runner.build_run_args). Everything else keeps
-# Docker's noexec default.
-TMPFS_EXEC_LANGUAGES = {"rust"}
 MAX_REVEAL_CHARS = 2000  # cap embedded input/expected so verdict_detail stays bounded
 
-# Sandbox image per problem `language` (DESIGN.md §13).
-IMAGE_BY_LANGUAGE = {
-    "python": settings.judge_image,
-    "js": settings.judge_image_js,
-    "rust": settings.judge_image_rust,
-    "mysql": settings.judge_image_sql,
-}
 
-
-def _image_for(language: str) -> str:
-    """Look up `language`'s sandbox image, defaulting to Python for an unknown
-    value (defensive only — `ProblemIn`'s `Language` literal already rejects
-    anything else at the authoring boundary)."""
-    return IMAGE_BY_LANGUAGE.get(language, settings.judge_image)
+def _image_for(profile) -> str:
+    """The configured image for `profile`: its `Settings` field (e.g. `JUDGE_IMAGE_RUST`),
+    whose default is the profile's own tag (app/sandbox.py)."""
+    return getattr(settings, profile.image_setting)
 
 
 def _capped(value) -> dict:
@@ -76,8 +55,9 @@ async def run_judgement(*, code, comparison, time_limit_ms, memory_limit_mb,
     test case and replays a method-call sequence against — judge/harness.py's
     `_run_operations`) instead of the default single-`function_name` mode.
 
-    `language` (DESIGN.md §13) picks which harness/sandbox image judges the
-    code — `_image_for` resolves it, so callers never hardcode an image.
+    `language` (DESIGN.md §13) picks the sandbox profile (app/sandbox.py):
+    image, tmpfs size and `exec`, and startup slack. Callers never hardcode any
+    of them.
 
     `memory_limit_mb` rides in the payload as well as setting the container's
     cgroup limit. The Rust harness applies it per case as `RLIMIT_AS`, so an
@@ -102,11 +82,11 @@ async def run_judgement(*, code, comparison, time_limit_ms, memory_limit_mb,
     })
     # The same number the authoring path checks against arq's job timeout (app/judge_budget.py).
     wall_timeout = wall_budget_s(len(test_cases), time_limit_ms, language)
+    profile = profile_for(language)
     result = await runner.run_in_container(
-        payload, image=_image_for(language), container_name=container_name,
+        payload, image=_image_for(profile), container_name=container_name,
         memory_mb=memory_limit_mb, cpus=CPUS, pids_limit=PIDS_LIMIT,
-        tmpfs_size_mb=TMPFS_SIZE_MB_BY_LANGUAGE.get(language, 16),
-        tmpfs_exec=language in TMPFS_EXEC_LANGUAGES,
+        tmpfs_size_mb=profile.tmpfs_size_mb, tmpfs_exec=profile.tmpfs_exec,
         wall_timeout_s=wall_timeout)
     return aggregate(result, parse_harness_output(result.stdout), total_cases=len(test_cases))
 
