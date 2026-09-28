@@ -19,6 +19,7 @@ config:
   redisUrl: redis://redis:6379/0
   judgeImage: shikomi-judge:latest
   judgeImageJs: shikomi-judge-js:latest
+  judgeImageRust: shikomi-judge-rust:latest
   judgeImageSql: shikomi-judge-sql:latest
   frontendBaseUrl: http://localhost:8080
   emailFrom: no-reply@example.com

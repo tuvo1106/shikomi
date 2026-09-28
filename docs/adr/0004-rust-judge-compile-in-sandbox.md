@@ -1,6 +1,6 @@
 # ADR-0004: Rust judge — compile inside the sandbox, one process per case
 
-- **Status:** Proposed — spike run (`judge/spike_rust/`), no kill-criteria hit; not yet implemented
+- **Status:** Accepted: implemented in `judge/harness_rs/` + `judge/Dockerfile.rust` (see "As built" for where it differs from the proposal)
 - **Date:** 2026-09-27
 
 ## Context
@@ -14,7 +14,7 @@ The spike answers one question: can the compile and the run both fit inside the 
 
 ## Evidence: measured in-session
 
-Docker 29.5.2 on arm64 (Docker Desktop), `rust:1-slim` (rustc 1.98.1), with the exact `build_run_args` flags except where noted. Probe scripts are in `judge/spike_rust/`: `measure.sh`, `adversarial.sh` and `iso.sh`.
+Docker 29.5.2 on arm64 (Docker Desktop), `rust:1-slim` (rustc 1.98.1), with the exact `build_run_args` flags except where noted. The probe scripts (`measure.sh`, `adversarial.sh`, `iso.sh`) lived in `judge/spike_rust/` and were deleted when the real harness landed; they're in git history at commit `0d71b7c`.
 
 | Measurement | Result |
 |---|---|
@@ -51,7 +51,7 @@ Docker 29.5.2 on arm64 (Docker Desktop), `rust:1-slim` (rustc 1.98.1), with the 
 
 `panic` → `runtime_error` (with the panic message) · stack overflow → `runtime_error` ("has overflowed its stack") · `loop {}` → `time_limit_exceeded` · allocation bomb → `memory_limit_exceeded` (child SIGKILLed, driver survived) · `exit(0)` → `runtime_error` ("exited before returning") · forged stdout → `accepted`, with the forgery captured in the case's `stdout` field where it belongs.
 
-## Decision (proposed)
+## Decision
 
 Build `judge/harness_rs` as a Rust-specific judge. It speaks the same stdin-JSON-in/stdout-JSON-out protocol (§5.3), so nothing downstream of the sandbox changes. In outline:
 
@@ -82,3 +82,14 @@ Build `judge/harness_rs` as a Rust-specific judge. It speaks the same stdin-JSON
 - **Typed glue is the real work.** Function mode needs a `params[].type` → Rust type table (the existing strings are Python-flavored: `List[int]`, `str`, …) with explicit `i32`/`i64` choices and float formatting that matches harness.py's output. Operations mode (all 5 current seed problems) additionally needs machine-readable method signatures, which today exist only inside the Python `starter_code`, so it's a schema addition to `ProblemIn`.
 - **Rust problems are their own problems**, like JS ones: a problem has one `language` and one `starter_code`. Making existing problems solvable in Rust is a separate, larger data-model change and out of scope here.
 - **Unverified on k8s**: `emptyDir` exec semantics, and compile time under gVisor (`runsc` adds syscall overhead that rustc is sensitive to). Measure both before relying on the k8s runner for Rust.
+
+## As built
+
+The implementation follows the decision above, with these differences, each found while building it:
+
+- **No type table, and no new `params` semantics.** The proposal assumed a `params[].type` → Rust type mapping. Instead the glue calls `f(arg(a, 0)?, …)` and rustc infers each argument's type from the user's own signature. `params[].type` stays display-only, any type with a `FromJson` impl works, and an unsupported one fails at compile time, where the seed-solution tests catch it.
+- **No `compile_error` verdict.** A rustc failure is one `runtime_error` row whose `error` starts with `Compile error:`, the same shape harness.py uses for a `SyntaxError` (DESIGN.md §5.3). That keeps the aggregator, the DB and the frontend unchanged. A dedicated status stays open for all languages at once.
+- **`RLIMIT_AS` is implemented,** set from the trusted parent in `pre_exec` (cur = max, so the submission can't raise it), with `memory_limit_mb` added to the payload. That made per-case `memory_limit_exceeded` deterministic, so `worker/aggregate.py` now maps it as a per-case status. The cgroup OOM kill of a child is still mapped the same way, as a fallback.
+- **Process groups + reaping.** Not anticipated by the spike: the harness is the container's PID 1, so background processes a case leaves behind get reparented to it and, until reaped, keep holding `--pids-limit` slots. A case that spawned 55 `sleep`s left the next case able to start only 6 of 20 processes. Each case now runs in its own process group, which is SIGKILLed and reaped (blocking, since SIGKILL is asynchronous) before the next case starts.
+- **`runtime_ms` is measured by the parent,** spawn to exit, so a submission can't under-report it. With the harness built at `-O2`, the per-case spawn floor measured ~0.3ms, not the spike's ~1.2ms.
+- **Also:** edition 2024, a 64MB per-case stack (`RLIMIT_STACK`, for deep recursion), a 32MB tmpfs, a `memory_limit_mb >= 128` floor for Rust problems (`ProblemIn`), and a 10s compile timeout reserved in the wall budget.

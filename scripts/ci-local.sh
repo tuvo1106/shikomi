@@ -94,6 +94,7 @@ job_sandbox() {
   log "sandbox: build judge images, run the real-container tests"
   docker build -q -t shikomi-judge:latest judge/ >/dev/null
   docker build -q -f judge/Dockerfile.js -t shikomi-judge-js:latest judge/ >/dev/null
+  docker build -q -f judge/Dockerfile.rust -t shikomi-judge-rust:latest judge/ >/dev/null
   docker build -q -f judge/Dockerfile.sql-mysql -t shikomi-judge-sql:latest judge/ >/dev/null
   uv run --project backend pytest -m docker
 }

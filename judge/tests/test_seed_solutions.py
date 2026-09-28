@@ -6,13 +6,15 @@ mismatched against its own test cases, or written for the wrong `comparison`
 mode. For `python`/`js` problems this drives the harness
 directly as a bare subprocess (like the protocol tests — no Docker, no DB), so
 a seed-authoring mistake fails `pytest -m "not docker"` instead of surfacing
-first as a confused user report. `mysql` problems can't take that path — the
+first as a confused user report. `mysql` and `rust` problems can't take that path — the
 harness needs a live database server, which only the built sandbox image
 provides (`judge/sql_entrypoint.sh` boots it) — so those run the real
 `shikomi-judge-sql:latest` image instead, same as `judge/tests/
 test_sql_protocol.py`, and are Docker-marked accordingly (skipped under
 `pytest -m "not docker"`, same as every other Docker-dependent test in this
-repo).
+repo). `rust` is the same story for a different reason: its harness compiles
+the solution with the rustc and prebuilt prelude that only
+`shikomi-judge-rust:latest` carries (judge/tests/rust_runner.py).
 
 Point it at your own problems with `SEED_DIR=/path/to/problems` (default:
 this repo's `seed/problems/`) — it's the check to run before `app.cli seed`
@@ -26,6 +28,7 @@ import sys
 
 import pytest
 
+from rust_runner import run_rust_container
 from sql_runner import run_sql_container
 
 HARNESS_PY = pathlib.Path(__file__).resolve().parents[1] / "harness.py"
@@ -60,9 +63,22 @@ def _run_harness_sql(payload, timeout=30):
     return json.loads(proc.stdout)["results"]
 
 
+def _run_harness_rust(payload, timeout=60):
+    proc = run_rust_container(json.dumps(payload), container_name="judge-seed-validate-rust",
+                              memory_mb=payload["memory_limit_mb"], timeout=timeout)
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)["results"]
+
+
+# Languages judged in their real sandbox image rather than as a local subprocess.
+_CONTAINER_LANGUAGES = ("mysql", "rust")
+
+
 def _run_harness(payload, language="python", timeout=15):
     if language == "mysql":
         return _run_harness_sql(payload, timeout=max(timeout, 30))
+    if language == "rust":
+        return _run_harness_rust(payload)
     return _run_harness_subprocess(payload, language, timeout=timeout)
 
 
@@ -86,7 +102,7 @@ def _solution_cases():
     # problem, same convention as the rest of this repo's Docker-gated tests.
     return [
         pytest.param(problem, solution, id=f"{problem['slug']}-{solution.get('ordinal', i)}",
-                     marks=pytest.mark.docker if problem.get("language") == "mysql" else ())
+                     marks=pytest.mark.docker if problem.get("language") in _CONTAINER_LANGUAGES else ())
         for problem in _seed_problems()
         for i, solution in enumerate(problem.get("solutions", []))
     ]
@@ -102,6 +118,7 @@ def test_seed_solution_passes_its_own_test_cases(problem, solution):
         "test_cases": _cases(problem),
         "comparison": problem.get("comparison", {"mode": "exact"}),
         "time_limit_ms": problem.get("time_limit_ms", 2000),
+        "memory_limit_mb": problem.get("memory_limit_mb", 256),
         "params": problem.get("params", []),
         "return_type": problem.get("return_type", ""),
     }

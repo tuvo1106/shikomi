@@ -58,6 +58,7 @@ services:
       TRUST_PROXY: "true"
       JUDGE_IMAGE: shikomi-judge:latest
       JUDGE_IMAGE_JS: shikomi-judge-js:latest
+      JUDGE_IMAGE_RUST: shikomi-judge-rust:latest
       JUDGE_IMAGE_SQL: shikomi-judge-sql:latest
       # Links in verify/reset emails are built from this, so a real deploy must set it
       # (e.g. https://your.domain.com). Mail is sent by the worker (DESIGN.md §4.1);

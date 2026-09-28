@@ -58,12 +58,13 @@ docker image inspect shikomi-worker:local  >/dev/null 2>&1 || docker build --tar
 docker image inspect shikomi-web:local     >/dev/null 2>&1 || docker build                 -t shikomi-web:local    frontend/
 docker image inspect shikomi-judge:latest  >/dev/null 2>&1 || docker build                 -t shikomi-judge:latest judge/
 docker image inspect shikomi-judge-js:latest >/dev/null 2>&1 || docker build -f judge/Dockerfile.js -t shikomi-judge-js:latest judge/
+docker image inspect shikomi-judge-rust:latest >/dev/null 2>&1 || docker build -f judge/Dockerfile.rust -t shikomi-judge-rust:latest judge/
 docker image inspect shikomi-judge-sql:latest >/dev/null 2>&1 || docker build -f judge/Dockerfile.sql-mysql -t shikomi-judge-sql:latest judge/
 echo "▶ loading images into kind"
-# judge:latest, judge-js:latest, and judge-sql:latest too — the worker
+# judge:latest, judge-js:latest, judge-rust:latest, and judge-sql:latest too — the worker
 # launches whichever a problem's `language` selects as a per-submission Pod
-# (pull policy Never), so all three must be present on the node (DESIGN.md §13).
-for img in shikomi-api:local shikomi-worker:local shikomi-web:local shikomi-judge:latest shikomi-judge-js:latest shikomi-judge-sql:latest; do
+# (pull policy Never), so all four must be present on the node (DESIGN.md §13).
+for img in shikomi-api:local shikomi-worker:local shikomi-web:local shikomi-judge:latest shikomi-judge-js:latest shikomi-judge-rust:latest shikomi-judge-sql:latest; do
   kind load docker-image --name "$CLUSTER" "$img"
 done
 

@@ -67,6 +67,12 @@ class Settings(BaseSettings):
     # node:slim-based image (judge/Dockerfile.js), selected per submission by
     # worker/judging.py's `IMAGE_BY_LANGUAGE` instead of the single Python image.
     judge_image_js: str = "shikomi-judge-js:latest"
+    # Sandbox image for `language="rust"` problems (DESIGN.md §13, docs/adr/
+    # 0004-rust-judge-compile-in-sandbox.md): the Rust toolchain plus a
+    # prebuilt harness (judge/Dockerfile.rust). It compiles the submission inside
+    # the sandbox, so it's the one image whose /tmp is mounted `exec`
+    # (worker/judging.py's TMPFS_EXEC_LANGUAGES).
+    judge_image_rust: str = "shikomi-judge-rust:latest"
     # Sandbox image for `language="mysql"` problems (DESIGN.md §13,
     # docs/adr/0002-sql-judge-engine-mysql-vs-mariadb.md) — a MariaDB-based
     # image (judge/Dockerfile.sql-mysql) that boots an ephemeral database

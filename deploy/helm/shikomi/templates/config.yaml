@@ -11,6 +11,7 @@ data:
   REDIS_URL: {{ .Values.config.redisUrl | quote }}
   JUDGE_IMAGE: {{ .Values.config.judgeImage | quote }}
   JUDGE_IMAGE_JS: {{ .Values.config.judgeImageJs | quote }}
+  JUDGE_IMAGE_RUST: {{ .Values.config.judgeImageRust | quote }}
   JUDGE_IMAGE_SQL: {{ .Values.config.judgeImageSql | quote }}
   FRONTEND_BASE_URL: {{ .Values.config.frontendBaseUrl | quote }}
   EMAIL_FROM: {{ .Values.config.emailFrom | quote }}

@@ -46,7 +46,7 @@ Run from `backend/` unless noted.
 | Judge one payload (real sandbox) | `uv run python -m worker.judge_local payload.json` |
 | Backend real-container test | `uv run pytest -m docker` (from `backend/`, needs judge image) |
 | Harness protocol tests | `pytest -m "not docker"` (repo root) |
-| Sandbox isolation tests | `docker build -t shikomi-judge:latest judge/ && docker build -f judge/Dockerfile.js -t shikomi-judge-js:latest judge/ && docker build -f judge/Dockerfile.sql-mysql -t shikomi-judge-sql:latest judge/ && pytest -m docker` (root) |
+| Sandbox isolation tests | `docker build -t shikomi-judge:latest judge/ && docker build -f judge/Dockerfile.js -t shikomi-judge-js:latest judge/ && docker build -f judge/Dockerfile.rust -t shikomi-judge-rust:latest judge/ && docker build -f judge/Dockerfile.sql-mysql -t shikomi-judge-sql:latest judge/ && pytest -m docker` (root) |
 | Frontend unit/component tests | `pnpm test` (from `frontend/`, Vitest) |
 | Browser E2E | `pnpm e2e` (from `frontend/`, Playwright — needs `scripts/dev-up.sh` running; the 2FA spec shells out to `uv run python -m app.cli verify-email`, and the dev API must run with `AUTH_RATE_LIMIT_PER_MINUTE` raised, which `dev-up.sh` does — a hand-started API at the default 10/min makes auth specs fail with "Too many attempts") |
 
@@ -60,6 +60,12 @@ Run from `backend/` unless noted.
   reference solutions make it the slow part of the job — always run it locally
   when touching either), and the sandbox isolation
   tests (`-m docker`, real containers). These need no backend deps.
+  - **Every Rust test is `-m docker`** (`test_rust_protocol.py`,
+    `test_sandbox_rust.py`, Rust seed problems in `test_seed_solutions.py`): the
+    harness compiles with the rustc and prebuilt prelude that only
+    `shikomi-judge-rust:latest` has, so there's no bare-subprocess path the way
+    there is for `harness.py`/`harness.js`. Rebuild the image after touching
+    `judge/harness_rs/`, or the tests run the old harness.
   - **The root `.venv` must be 3.12**, because this suite executes seed
     solutions with whatever interpreter runs pytest — unlike `harness.py`
     itself, solution code is only ever run by the judge container
@@ -207,6 +213,18 @@ and `playwright`.
   stopped — under CI load that state update can lag a beat. A test asserting a
   killed container is gone via a single immediate `docker ps` check (rather than
   a short poll) is a latent flake — hit this in `test_sweep_orphans_kills_leftovers`.
+- **Docker's `--tmpfs` is `noexec` by default.** Any harness that writes a
+  binary into `/tmp` and runs it (today only Rust) needs
+  `build_run_args(tmpfs_exec=True)` (`TMPFS_EXEC_LANGUAGES` in
+  `worker/judging.py`); otherwise it fails with `Permission denied` at spawn.
+  Kubernetes `emptyDir` has no such option, so a k8s-only test would never
+  catch a missing flag.
+- **A judge harness that spawns processes is PID 1 and has to reap.** The
+  container's entrypoint inherits every orphan, and an unreaped zombie still
+  holds a `--pids-limit` slot. The Rust harness kills each case's process group
+  and `waitpid`s it, *blocking*: a non-blocking reap races the asynchronous
+  SIGKILL and misses most of them. That was measured: a case left 55 sleepers,
+  and the next could start 6 of 20 processes.
 - **Navbar height is load-bearing**: `Navbar.tsx` is `h-14` (3.5rem) and three
   layouts hard-code `calc(100vh-3.5rem)` against it (`Workspace.tsx`, and
   `AuthForm.tsx` twice). Changing the nav height silently breaks them — grep
@@ -308,14 +326,14 @@ slice ships, delete its entry here.
   `PROBLEMS_DIR`), which caps at 1 MiB — a real problem set needs a PVC, an
   init-container `git clone`, or an image layer instead.
 
-- **Rust judge:** spike done, design proposed in
-  [ADR-0004](docs/adr/0004-rust-judge-compile-in-sandbox.md) (probes in
-  `judge/spike_rust/`, to be deleted once `harness_rs` lands). v1 = function mode only:
-  `judge/Dockerfile.rust` with a pre-built JSON prelude rlib, a `main.rs` generator
-  from `params`, per-case child processes, a `compile_error` verdict, and a
-  Rust-only tmpfs `exec` flag in both runners. Open questions: the type-string →
-  Rust type table, a `memory_limit_mb` floor so rustc can't fail to compile, and
-  compile time under gVisor. Operations mode needs method signatures in `ProblemIn`.
+- **Rust judge follow-ups** (v1 shipped, [ADR-0004](docs/adr/0004-rust-judge-compile-in-sandbox.md)):
+  `kind: "operations"` for Rust. That needs machine-readable method signatures in
+  `ProblemIn` (today they exist only in the Python `starter_code`) and a second
+  glue generator that dispatches method names. Also: measure compile time and the
+  per-case spawn cost under gVisor (`runsc` adds syscall overhead that rustc and
+  `fork`/`exec` feel), and trim the ~1.1GB image (a `rustup --profile minimal`
+  build on `debian:slim`). A dedicated `compile_error` verdict would suit every
+  language at once, not just Rust.
 
 - **Auth roadmap:** revisit session strategy (currently JWT-in-memory access +
   httpOnly refresh cookie — consider server-side sessions / cookie-based access

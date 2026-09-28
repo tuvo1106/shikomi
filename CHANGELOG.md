@@ -6,6 +6,18 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Rust judge.** Problems can set `"language": "rust"` (function mode). Submissions
+  are compiled with `rustc` inside the sandbox. Each test case runs in its own
+  process, so a panic, stack overflow, allocation failure or `process::exit` fails
+  only that case. Compile errors come back as rustc's own diagnostics, and integer
+  overflow panics instead of silently wrapping. Build the image with
+  `docker build -f judge/Dockerfile.rust -t shikomi-judge-rust:latest judge/`.
+  Existing deployments need `alembic upgrade head` (it widens the `language` check
+  constraint) and a `JUDGE_IMAGE_RUST` setting if they don't use the default tag.
+- A per-case `memory_limit_exceeded` verdict (reported by the Rust judge).
+
 ### Fixed
 
 - The account menu (and its Sign out) no longer opens behind the code editor in the

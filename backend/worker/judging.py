@@ -19,13 +19,21 @@ PIDS_LIMIT = 64
 # server's data directory has to live entirely in this scratch space
 # (ADR-0002's Phase 0 spike: MariaDB's tuned template needs ~22MB, fits
 # comfortably in 32).
-TMPFS_SIZE_MB_BY_LANGUAGE = {"mysql": 32}
+# "rust" gets 32 as well: the tmpfs holds rustc's intermediate objects, the
+# compiled binary (~0.4MB stripped) and each case's captured stdout/stderr
+# (ADR-0004 measured it fitting in 16; 32 is headroom for a chatty submission).
+TMPFS_SIZE_MB_BY_LANGUAGE = {"mysql": 32, "rust": 32}
+# Languages whose harness executes a binary it wrote into /tmp, and so need the
+# tmpfs mounted `exec` (docker_runner.build_run_args). Everything else keeps
+# Docker's noexec default.
+TMPFS_EXEC_LANGUAGES = {"rust"}
 MAX_REVEAL_CHARS = 2000  # cap embedded input/expected so verdict_detail stays bounded
 
 # Sandbox image per problem `language` (DESIGN.md §13).
 IMAGE_BY_LANGUAGE = {
     "python": settings.judge_image,
     "js": settings.judge_image_js,
+    "rust": settings.judge_image_rust,
     "mysql": settings.judge_image_sql,
 }
 
@@ -70,6 +78,11 @@ async def run_judgement(*, code, comparison, time_limit_ms, memory_limit_mb,
 
     `language` (DESIGN.md §13) picks which harness/sandbox image judges the
     code — `_image_for` resolves it, so callers never hardcode an image.
+
+    `memory_limit_mb` rides in the payload as well as setting the container's
+    cgroup limit. The Rust harness applies it per case as `RLIMIT_AS`, so an
+    allocation bomb fails that one case as `memory_limit_exceeded` instead of
+    drawing the container OOM killer (ADR-0004). The other harnesses ignore it.
     """
     payload = json.dumps({
         "function_name": function_name,
@@ -77,6 +90,7 @@ async def run_judgement(*, code, comparison, time_limit_ms, memory_limit_mb,
         "test_cases": test_cases,
         "comparison": comparison,
         "time_limit_ms": time_limit_ms,
+        "memory_limit_mb": memory_limit_mb,
         "params": params or [],
         "return_type": return_type,
         "kind": kind,
@@ -88,6 +102,7 @@ async def run_judgement(*, code, comparison, time_limit_ms, memory_limit_mb,
         payload, image=_image_for(language), container_name=container_name,
         memory_mb=memory_limit_mb, cpus=CPUS, pids_limit=PIDS_LIMIT,
         tmpfs_size_mb=TMPFS_SIZE_MB_BY_LANGUAGE.get(language, 16),
+        tmpfs_exec=language in TMPFS_EXEC_LANGUAGES,
         wall_timeout_s=wall_timeout)
     return aggregate(result, parse_harness_output(result.stdout), total_cases=len(test_cases))
 

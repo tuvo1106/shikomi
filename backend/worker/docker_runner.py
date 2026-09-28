@@ -48,7 +48,8 @@ class ContainerResult:
         return self.exit_code == OOM_EXIT_CODE
 
 
-def build_run_args(*, image, container_name, memory_mb, cpus, pids_limit, tmpfs_size_mb=16):
+def build_run_args(*, image, container_name, memory_mb, cpus, pids_limit, tmpfs_size_mb=16,
+                   tmpfs_exec=False):
     """The `docker run` argv for one submission — the whole sandbox in one list.
 
     We run *arbitrary user code*, so the container is locked down along every axis
@@ -68,6 +69,12 @@ def build_run_args(*, image, container_name, memory_mb, cpus, pids_limit, tmpfs_
       `tmpfs_size_mb` defaults to 16 (python/js's stateless-interpreter needs);
       the SQL image passes a larger value since a database server's data
       directory has to live entirely in this scratch space too (ADR-0002).
+      Docker mounts a `--tmpfs` **noexec** by default; `tmpfs_exec=True` lifts
+      that for the Rust image only, whose harness compiles the submission into
+      /tmp and then has to run it (ADR-0004). That doesn't grant user code a new
+      power, since it's already arbitrary native code. It only lets that code
+      start a *second* binary, still inside this same cgroup/no-network/no-caps
+      box. Python/JS/SQL keep noexec.
     * `--security-opt=no-new-privileges` — a child can never gain privileges (e.g.
       via setuid), blocking a class of escalation.
     * `--cap-drop=ALL` — drop every Linux capability; the process keeps none of
@@ -83,7 +90,7 @@ def build_run_args(*, image, container_name, memory_mb, cpus, pids_limit, tmpfs_
         "--cpus=%s" % cpus,
         "--pids-limit=%d" % pids_limit,
         "--read-only",
-        "--tmpfs", "/tmp:size=%dm" % tmpfs_size_mb,
+        "--tmpfs", "/tmp:size=%dm%s" % (tmpfs_size_mb, ",exec" if tmpfs_exec else ""),
         "--security-opt=no-new-privileges",
         "--cap-drop=ALL",
         "--user", "1000:1000",
@@ -181,7 +188,8 @@ async def _kill_and_reap(container_name, proc):
 
 
 async def run_in_container(payload_json, *, image, container_name,
-                           memory_mb, cpus, pids_limit, wall_timeout_s, tmpfs_size_mb=16):
+                           memory_mb, cpus, pids_limit, wall_timeout_s, tmpfs_size_mb=16,
+                           tmpfs_exec=False):
     """Run the sandbox for one submission, piping payload JSON to its stdin.
 
     The wall-clock timeout is defense-in-depth: the harness enforces a per-case
@@ -196,7 +204,7 @@ async def run_in_container(payload_json, *, image, container_name,
     args = build_run_args(
         image=image, container_name=container_name,
         memory_mb=memory_mb, cpus=cpus, pids_limit=pids_limit,
-        tmpfs_size_mb=tmpfs_size_mb,
+        tmpfs_size_mb=tmpfs_size_mb, tmpfs_exec=tmpfs_exec,
     )
     # Registered for the container's whole lifetime (including the drain-after-
     # kill below) so `sweep_orphans` can't mistake it for an orphan while it's

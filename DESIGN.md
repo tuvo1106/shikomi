@@ -58,7 +58,7 @@ Deployment mirrors this: a single-VPS **Docker Compose** stack, or the same imag
 | Queue          | Redis 7 + arq                          | Also backs rate limits, login lockout, and the in-flight lock. |
 | Judge sandbox  | Docker container **or** Kubernetes Pod | One `judge` image (`python:3.12-slim`); runner selected by `JUDGE_RUNNER` (§5.5). |
 | Frontend       | React 19, Vite, TypeScript             | SPA, no SSR. TanStack Query for data fetching/polling.      |
-| Code editor    | Monaco Editor (`@monaco-editor/react`) | Python/JS/SQL highlighting; no LSP.                          |
+| Code editor    | Monaco Editor (`@monaco-editor/react`) | Python/JS/Rust/SQL highlighting; no LSP.                     |
 | Styling        | Tailwind CSS v4 + local UI primitives  | Small hand-written components (no component-library dep). See §6.5. |
 | Auth           | Email/password, JWT (access + refresh) | `bcrypt` + `pyjwt`, hand-rolled. Opaque DB refresh tokens (§3.6). |
 | Deployment     | Docker Compose (single VPS) / Helm on Kubernetes | Same images both ways (§9).                       |
@@ -95,6 +95,16 @@ tools whose internals stay legible over ones that hide the mechanism.
   `ContainerResult`. Stronger isolation (gVisor/Kata, Firecracker) is a drop-in `runtimeClassName` on a
   prod node pool — deferred because it's the one thing a laptop can't exercise. Tradeoff: the host
   Docker/Pod model shares the kernel; accepted for single-tenant, hardened before untrusted users.
+- **Rust judge — plain `rustc` + a hand-rolled JSON prelude (vs cargo + serde / compiling outside the
+  sandbox):** a Rust submission must be compiled, and the compile runs *inside* the locked-down sandbox,
+  because rustc is the part most exposed to hostile input (type-explosion and const-eval bombs). With
+  `--network=none` there are no crates to fetch, so there's nothing for cargo to do. serde could be
+  vendored into the image, but its proc-macros would cost compile time on every submission for the
+  handful of types a coding problem passes around. A ~700-line prelude (`judge/harness_rs/prelude.rs`),
+  prebuilt once into the image, keeps a submission's compile at ~150ms. Rejected: compiling in a
+  separate, less-locked-down container, which breaks the one-container-per-run contract and moves the
+  riskiest step outside the box. Measurements and alternatives are in
+  `docs/adr/0004-rust-judge-compile-in-sandbox.md`.
 - **Hand-rolled auth with bcrypt + pyjwt (vs Auth0/Clerk / fastapi-users):** auth is the thing most
   worth *understanding* in a learning project, so we build the primitives — password hashing, JWT
   access tokens, rotating opaque refresh tokens with reuse detection (§3.6). A hosted IdP (Auth0/Clerk)
@@ -166,7 +176,7 @@ All tables have `id UUID PRIMARY KEY DEFAULT gen_random_uuid()`, `created_at tim
 | title             | text    | NOT NULL                                                     |
 | difficulty        | text    | `easy` \| `medium` \| `hard`                                 |
 | statement_md      | text    | Problem statement, Markdown                                  |
-| language          | text    | `"python"` (default), `"js"`, or `"mysql"` (§13) — selects the harness/sandbox image (`judge/harness.py`, `judge/harness.js`, `judge/harness_sql.py`). A `CHECK` constraint enforces the value; `"js"` only supports `kind="function"`, no `ListNode`/`TreeNode`/`CyclicListNode`/`RandomListNode`/`GraphNode` `return_type`/param; `"mysql"` always pairs with `kind="sql"` (a second `CHECK`). |
+| language          | text    | `"python"` (default), `"js"`, `"rust"`, or `"mysql"` (§13) — selects the harness/sandbox image (`judge/harness.py`, `judge/harness.js`, `judge/harness_rs/`, `judge/harness_sql.py`). A `CHECK` constraint enforces the value; `"js"` and `"rust"` only support `kind="function"`, no `ListNode`/`TreeNode`/`CyclicListNode`/`RandomListNode`/`GraphNode` `return_type`/param; `"mysql"` always pairs with `kind="sql"` (a second `CHECK`). |
 | kind              | text    | `"function"` (default), `"operations"` (design/class-replay — a cache, a state machine; §5.3), or `"sql"` (a query against a seeded schema; §13). A `CHECK` constraint enforces exactly one of `function_name`/`class_name` matching `kind` (neither for `"sql"`). |
 | function_name     | text    | NULL for `kind="operations"`/`"sql"`. e.g. `pair_sum`        |
 | class_name        | text    | NULL for `kind="function"`. The class the harness instantiates and replays method calls against for `kind="operations"`. |
@@ -498,7 +508,7 @@ The judge image bakes in a harness script (`harness.py`) as its entrypoint. Cont
   ```
 - Harness mechanics:
   - **Code that doesn't compile / fails to load:** the user code is `compile()`d then `exec`d in a fresh namespace inside a `try`, **once, before the per-case loop** — so it inherently fails fast: a `SyntaxError`/`IndentationError` (won't compile) or any top-level exception (`NameError`, a bad `import`, etc.) is caught and returned as a **single `runtime_error` result** without ever running a test case. The error message carries the details — for a syntax error the file/line and caret (e.g. `SyntaxError: expected ':'`). The count is still reported against the real case count (`total` = number of cases, e.g. **0/10**, not 0/1), with the one error row explaining the failure. The container exits `0` with well-formed JSON — a non-compiling submission never crashes or hangs the judge. (Verified by `test_syntax_error` / `test_top_level_import_error`.)
-  - We do **not** distinguish a compile failure from a runtime crash — both are `runtime_error`. A separate `compile_error` status could be added later for nicer UX.
+  - We do **not** distinguish a compile failure from a runtime crash — both are `runtime_error`. A separate `compile_error` status could be added later for nicer UX. The Rust harness follows the same rule: a rustc failure is one `runtime_error` row whose `error` starts with `Compile error:` and carries rustc's diagnostics (§13).
   - Look up `function_name` in that namespace; missing → `runtime_error` with message `Function 'pair_sum' not found`.
   - Per test case: deep-copy the input args (so user mutation can't leak across cases, plus a second pristine copy for a `custom_validator` — §5.4), call the function, time it with `time.monotonic()`.
   - **`ListNode`/`TreeNode` codec:** if a param's declared `type` (or the problem's `return_type`) is `"ListNode"`/`"TreeNode"`, the harness converts that arg's flat/level-order JSON array into the corresponding node graph before the call, and converts the return value back to JSON before `compare()` — using its own `ListNode`/`TreeNode` classes, matched to the user's own same-shaped class by attribute name (`val`/`next`, `val`/`left`/`right`) rather than `isinstance`, since the two are different class objects. Trees use a null-padded level-order array (a `null` marks a missing child and reserves no slots for its own children). `"List[ListNode]"`/`"List[TreeNode]"` cover a flat list of nodes ("merge these k sorted lists"): each element of the JSON array is built/flattened independently by the same single-node codec (`judge/harness.py`'s `_build_each`/`_flatten_each`). Scope beyond that: a node whose own fields hold a list of other, arbitrary nodes (a graph's neighbor list) gets its own separate `"GraphNode"` type, not a mode of this codec — see below. A class-replay problem's (`kind: "operations"`, §12) *constructor* args go through this same codec keyed off `params` (e.g. a `TreeIterator(root: TreeNode)` constructor) — but a later method call's own args/return value never do, since the schema has no per-method param typing.
@@ -686,7 +696,7 @@ The platform executes arbitrary user-submitted Python. This section consolidates
 **Containment layers** (per submission, verified by `judge/tests/test_sandbox.py`):
 
 - **No network** (`--network=none`): no exfiltration, no calling out, no attacking other hosts, no `pip install`.
-- **Read-only root filesystem** (`--read-only`) with only a small `/tmp` tmpfs (16 MB): nothing can be written or persisted on the host.
+- **Read-only root filesystem** (`--read-only`) with only a small `/tmp` tmpfs (16 MB): nothing can be written or persisted on the host. Docker mounts that tmpfs `noexec`; only the Rust image opts out (`tmpfs_exec`, 32 MB), because its harness has to run the binary it compiles there (§13). On Kubernetes an `emptyDir` has no `noexec` option, so `/tmp` is executable in every judge Pod.
 - **Resource caps**: `--memory=256m` (swap disabled) → OOM-killed; `--pids-limit=64` → no fork bombs; `--cpus=1` → CPU bounded.
 - **Reduced privilege**: `--cap-drop=ALL`, `--security-opt=no-new-privileges`, `--user 1000:1000` (non-root).
 - **Ephemeral**: `--rm`, a fresh container per submission — no persistence or bleed between submissions or users.
@@ -813,8 +823,9 @@ shikomi/
 │   │   └── k8s_runner.py       # k8s-backend: per-submission Pod lifecycle
 │   └── tests/
 ├── judge/
-│   ├── Dockerfile · Dockerfile.js · Dockerfile.sql-mysql
+│   ├── Dockerfile · Dockerfile.js · Dockerfile.rust · Dockerfile.sql-mysql
 │   ├── harness.py · harness.js · harness_sql.py
+│   ├── harness_rs/          # Rust: prelude.rs (JSON core, prebuilt rlib) + harness.rs (driver)
 │   └── tests/                  # harness protocol, sandbox, and seed-solution tests
 ├── frontend/
 │   ├── package.json · vite.config.ts
@@ -868,7 +879,7 @@ The five starters (`design-vending-machine`, `design-undo-redo-editor`, `design-
 }
 ```
 
-Optional fields: `"language"` (`"python"` default, `"js"`, or `"mysql"` — §13), `"kind"` (`"function"` default, `"operations"`, `"sql"`), `"class_name"` (for `"operations"`), `"return_type"` (a node codec, §5.3), `"constraints"` (a list of Markdown bullets), `"collections"` (operator-curated sets, filterable in the UI).
+Optional fields: `"language"` (`"python"` default, `"js"`, `"rust"`, or `"mysql"` — §13), `"kind"` (`"function"` default, `"operations"`, `"sql"`), `"class_name"` (for `"operations"`), `"return_type"` (a node codec, §5.3), `"constraints"` (a list of Markdown bullets), `"collections"` (operator-curated sets, filterable in the UI).
 
 **Content and rights.** Shikomi ships no third-party problem content. Whatever an operator loads is theirs to have the rights to; the bundled starters are original to this project and MIT-licensed with the code.
 
@@ -889,6 +900,7 @@ All via environment variables (pydantic-settings). `.env` for dev, compose `envi
 | `JWT_REFRESH_TTL_SECONDS` | `2592000`                                    | api         |
 | `JUDGE_IMAGE`             | `shikomi-judge:latest`                    | worker      |
 | `JUDGE_IMAGE_JS`          | `shikomi-judge-js:latest` (§13; problems with `language="js"`) | worker |
+| `JUDGE_IMAGE_RUST`        | `shikomi-judge-rust:latest` (§13; problems with `language="rust"`) | worker |
 | `JUDGE_IMAGE_SQL`         | `shikomi-judge-sql:latest` (§13; problems with `language="mysql"`) | worker |
 | `JUDGE_MAX_CONCURRENCY`   | `4`                                          | worker      |
 | `JUDGE_RUNNER`            | `docker` \| `k8s`                            | worker      |
@@ -959,7 +971,7 @@ Both build the exact same `api`, `worker`, `web`, and `judge` images:
 Operational specifics:
 
 - **Migrations:** a dedicated one-shot runs `alembic upgrade head` (+ idempotent seed of the bundled starters) and must complete before `api`/`worker` start — the Compose `migrate` service (gated by `depends_on`) or the Helm post-install/upgrade hook Job (an initContainer waits for Postgres). Kept out of the api entrypoint so it runs exactly once even with replicas.
-- **Judge image delivery:** Compose — `scripts/prod-up.sh` runs `docker build` for the three judge images (`shikomi-judge`, `-js`, `-sql`) on the host daemon, exactly where the socket-mounted worker needs them (no registry). kind — `kind load docker-image` loads it onto the node (pull policy `Never`). A real cluster pushes to a registry. `JUDGE_IMAGE`/`JUDGE_IMAGE_JS`/`JUDGE_IMAGE_SQL` must match the built tags.
+- **Judge image delivery:** Compose — `scripts/prod-up.sh` runs `docker build` for the four judge images (`shikomi-judge`, `-js`, `-rust`, `-sql`) on the host daemon, exactly where the socket-mounted worker needs them (no registry). kind — `kind load docker-image` loads it onto the node (pull policy `Never`). A real cluster pushes to a registry. `JUDGE_IMAGE`/`JUDGE_IMAGE_JS`/`JUDGE_IMAGE_SQL` must match the built tags.
 - **Health checks:** api exposes `GET /api/v1/healthz` (deep-checks DB + Redis, 200/503, no auth) — used as the Compose healthcheck and the k8s **readiness** probe; `GET /api/v1/livez` (no I/O, always 200 while the process answers) is the k8s **liveness** probe. The split matters: a failing liveness probe *restarts* the pod, so pointing it at the deep check would make a Postgres or Redis outage crash-loop every healthy api pod, whereas a failing readiness probe only stops routing traffic to it. Compose also checks postgres (`pg_isready`) and redis (`redis-cli ping`).
 - **Logging:** structured lines to stdout everywhere (collect with `docker logs`/`kubectl logs` / journald; no log stack bundled). One request line (id, method, path, status, duration, user id); worker tags every judge line with the submission id; the audit logger (`app.audit`, §5.8) emits security events. Never log user code or JWT/refresh tokens.
 - **Backups:** not bundled; they're the operator's job. Postgres holds accounts and submission history (problems can always be re-seeded from their files), so a nightly `pg_dump` from host cron with an off-site copy is the suggested minimum.
@@ -1001,7 +1013,7 @@ Every PR runs, as separate jobs: lint (ruff + oxlint), backend unit/API tests wi
 
 ## 11. Status & roadmap
 
-**Shipped:** the judge (Python, JavaScript, SQL; function, operations and SQL kinds; node codecs), accounts with verified email, hardened auth (rate limit, lockout, password policy, breached-password screening, anti-enumeration, audit log, JWT key rotation, opt-in TOTP two-factor), the workspace (Run/Submit, verdict detail, submission history, runtime distribution, editorial solutions, sample-case diagrams), the operator CLI, a production-shaped Docker Compose stack, and a Helm chart with a per-submission Pod sandbox and KEDA scale-to-zero autoscaling.
+**Shipped:** the judge (Python, JavaScript, Rust, SQL; function, operations and SQL kinds; node codecs), accounts with verified email, hardened auth (rate limit, lockout, password policy, breached-password screening, anti-enumeration, audit log, JWT key rotation, opt-in TOTP two-factor), the workspace (Run/Submit, verdict detail, submission history, runtime distribution, editorial solutions, sample-case diagrams), the operator CLI, a production-shaped Docker Compose stack, and a Helm chart with a per-submission Pod sandbox and KEDA scale-to-zero autoscaling.
 
 **Roadmap** (live list: `AGENTS.md`):
 - **Single-user mode** — an optional `AUTH_MODE=single` that auto-signs-in one local user, so a solo self-hoster can skip SMTP and registration entirely.
@@ -1041,11 +1053,20 @@ Every PR runs, as separate jobs: lint (ruff + oxlint), backend unit/API tests wi
 
 ## 13. Multi-Language Judging
 
-**JavaScript.** Some problems are specifically about JavaScript (array/object method chains, `this` binding, closures, `debounce`/`throttle`) rather than being language-agnostic algorithms that happen to have a Python solution. `problems.language` (`"python"` default, or `"js"`) picks the harness/sandbox: `judge/harness.js` reuses the exact stdin-JSON-in/stdout-JSON-out protocol from `harness.py` (§5.3) — only the compile/exec core differs, via Node's `vm` module instead of CPython's `compile()`/`exec()` — and `judge/Dockerfile.js` (`node:20-slim`) gets the same lockdown posture as the Python image (§5.5), selected per submission by `worker/judging.py`'s `IMAGE_BY_LANGUAGE`/`_image_for`. Scope is deliberately **function-mode only**: no `kind: "operations"` and no `ListNode`/`TreeNode`/`CyclicListNode`/`RandomListNode`/`GraphNode` codecs on the JS path (`ProblemIn`'s `_js_requires_function_kind` validator enforces this at seed time) — a JS problem that is really about a class hand-rolls a driver function instead.
+**JavaScript.** Some problems are specifically about JavaScript (array/object method chains, `this` binding, closures, `debounce`/`throttle`) rather than being language-agnostic algorithms that happen to have a Python solution. `problems.language` (`"python"` default, or `"js"`) picks the harness/sandbox: `judge/harness.js` reuses the exact stdin-JSON-in/stdout-JSON-out protocol from `harness.py` (§5.3) — only the compile/exec core differs, via Node's `vm` module instead of CPython's `compile()`/`exec()` — and `judge/Dockerfile.js` (`node:20-slim`) gets the same lockdown posture as the Python image (§5.5), selected per submission by `worker/judging.py`'s `IMAGE_BY_LANGUAGE`/`_image_for`. Scope is deliberately **function-mode only**: no `kind: "operations"` and no `ListNode`/`TreeNode`/`CyclicListNode`/`RandomListNode`/`GraphNode` codecs on the JS path (`ProblemIn`'s `_function_mode_only_languages` validator enforces this at seed time) — a JS problem that is really about a class hand-rolls a driver function instead.
 
 **Async.** `vm`'s per-case `timeout` (the JS analogue of Python's SIGALRM) only interrupts *synchronous* execution, so a returned Promise needs its own timeout: `harness.js` awaits a thenable result via `awaitIfThenable`, racing it against whatever's left of `time_limit_ms` after the synchronous portion, on a real (host) timer — `setTimeout`/`clearTimeout`/`setInterval`/`clearInterval` are bound into the sandbox for exactly this. A rejected promise maps to `runtime_error` the same as a thrown exception; a promise that doesn't settle in time maps to `time_limit_exceeded` the same as an infinite synchronous loop. `main()` calls `process.exit()` explicitly after writing results so a submission's leaked `setInterval` or forever-pending promise can't hold the container's event loop — and its sandbox slot — open past that.
 
 One residual gap, not fully closed by the above: a submission that starves the event loop with an unyielding microtask chain (e.g. recursive `Promise.resolve().then(loop)`) never lets a macrotask timer — including the one racing it — get a turn. The worker's outer wall-clock kill (`docker_runner`'s `asyncio.wait_for` / k8s's `activeDeadlineSeconds`) remains the backstop for that specific pathological case, matching how it already backstops the Python harness's own escapes (`signal.signal`-based SIGALRM evasion).
+
+**Rust.** Function mode only, like JavaScript (`ProblemIn`'s `_function_mode_only_languages` validator). A compiled language changes the harness's shape, not its protocol: `judge/harness_rs/harness.rs` reads the same payload and writes the same `{"results": [...]}` document. The design and the spike measurements behind it are in `docs/adr/0004-rust-judge-compile-in-sandbox.md`.
+
+- **Generate, compile, run.** The harness writes the user's code to `solution.rs`, followed by a few lines of generated glue: a `main` that calls `function_name(arg(a, 0)?, arg(a, 1)?, …)`. It compiles that once with plain `rustc` (`-C opt-level=1`, overflow checks **on**, so `i32` overflow panics instead of wrapping into a wrong answer). Compiling fails as a single `runtime_error` row carrying rustc's diagnostics, with line numbers that match the user's code, because the glue comes *after* it. rustc gets 10s (`COMPILE_TIMEOUT`), reserved in the wall budget as `STARTUP_SLACK_S_BY_LANGUAGE["rust"]`.
+- **No type table.** The glue never names a type. rustc infers each `arg::<T>` from the user's own signature, so any parameter type with a `FromJson` impl in the prelude works (integers, `f64`, `bool`, `char`, `String`, `Vec`, `Option`, string-keyed maps, 2–4-tuples, nested freely). `params[].type` is display-only for Rust. An unsupported type fails at *compile* time, which the seed-solution tests catch at authoring time.
+- **One process per test case.** In a single process, a stack overflow (an uncatchable abort), an allocation failure, `process::exit` or an infinite loop would each lose *every* case's result, and the ADR-0004 spike showed all of them doing it. So the compiled program is spawned once per case, in its own process group, with `RLIMIT_AS = memory_limit_mb` (the worker adds it to the payload), so an allocation bomb becomes that case's `memory_limit_exceeded` instead of drawing the container's OOM killer. It also gets a 64MB stack (`RLIMIT_STACK`, for deep DFS recursion) and a SIGKILL at `time_limit_ms`. The child receives only the input and writes its return value to a result file, never stdout, so user prints are captured as the case's `stdout` and can't forge the protocol. The trusted parent does the comparison, so the submission never sees `expected`. Spawn overhead is about 0.3ms per case. `runtime_ms` is measured by the parent (spawn to exit), so a submission can't under-report it.
+- **PID 1 housekeeping.** The harness is the container's entrypoint, so any process a case leaves running gets reparented to it. After each case it SIGKILLs the case's process group and reaps it, or those zombies would hold `--pids-limit` slots and starve later cases (`test_processes_a_case_leaves_behind_do_not_starve_later_cases`).
+- **Sandbox deltas.** `judge/Dockerfile.rust` (`rust:1-slim`, ~1.1GB) prebuilds the prelude rlib and the harness binary. The worker gives it a 32MB `/tmp` mounted `exec` (`TMPFS_EXEC_LANGUAGES`); every other image keeps Docker's `noexec` default. A Rust problem needs `memory_limit_mb >= 128`, because rustc (~75MB peak) compiles inside the same limit.
+- **Per-case `memory_limit_exceeded`.** Only the Rust harness can attribute an OOM to a single case, so `worker/aggregate.py` maps that per-case status too. The other languages' OOMs still surface as the container-level exit 137.
 
 **SQL (MariaDB)** — harness, sandbox image, data model, authoring skill, and workspace. SQL problems (window functions, joins) don't fit the function-call model at all — there's no function to call, just a query to run against a seeded schema and a result set to diff — so this was a materially bigger lift than JS, not an incremental extension of it. Engine choice (MariaDB over MySQL 8 and SQLite) is `docs/adr/0002-sql-judge-engine-mysql-vs-mariadb.md`; `problems.language="mysql"` always pairs with the new `kind="sql"` (never any other combination — enforced by `ProblemIn`'s `_sql_kind_and_language_are_paired` validator and the DB-level `ck_problems_sql_kind_mysql_language` check).
 

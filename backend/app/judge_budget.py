@@ -25,7 +25,10 @@ WALL_CLOCK_SLACK_S = 10  # backstop above the harness's own per-case SIGALRM (§
 # boots more than an interpreter (today: "mysql" — judge/sql_entrypoint.sh copies the pre-baked
 # datadir into tmpfs and starts mariadbd before the harness even begins). ADR-0002's Phase 0
 # spike measured ~0.05-0.06s in practice; this is a generous multiple of that; python/js pay 0.
-STARTUP_SLACK_S_BY_LANGUAGE = {"mysql": 2}
+# "rust" compiles the submission first: ~0.15s normally, but judge/harness_rs/harness.rs lets
+# rustc run up to COMPILE_TIMEOUT (10s) before giving up, so the budget reserves all of it
+# (ADR-0004).
+STARTUP_SLACK_S_BY_LANGUAGE = {"mysql": 2, "rust": 10}
 
 # After the wall-clock kill the runner drains output (up to 5s) and the job writes the verdict
 # to Postgres; that has to fit inside the job timeout too.

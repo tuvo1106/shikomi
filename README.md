@@ -3,7 +3,7 @@
 **A self-hosted coding-practice judge for your own problems.**
 
 Shikomi is the platform half of a coding-practice site. It gives you a browser
-editor, a sandboxed judge for Python, JavaScript and SQL, accounts, submission
+editor, a sandboxed judge for Python, JavaScript, Rust and SQL, accounts, submission
 history, and editorial solutions. It ships **no problem catalog**. You write
 problems as JSON files and load them with one command. Five original starter
 problems are included to show the format.
@@ -26,8 +26,8 @@ vegetables, the part nobody sees. Practice is prep.
 
 ## Features
 
-- **Three languages, three problem shapes.**
-  - Python and JavaScript *functions*.
+- **Four languages, three problem shapes.**
+  - Python, JavaScript and Rust *functions*.
   - Python *classes* replayed against a sequence of method calls.
   - *SQL queries* against a per-test-case MariaDB database.
 - **Real data structures as input and output.** The harness builds and compares
@@ -74,10 +74,11 @@ scripts/dev-up.sh                               # → http://localhost:5173
 
 Stop the app processes with `scripts/dev-down.sh`. The containers keep running.
 
-For JavaScript and SQL problems, also build their sandbox images:
+For JavaScript, Rust and SQL problems, also build their sandbox images:
 
 ```bash
 docker build -f judge/Dockerfile.js        -t shikomi-judge-js:latest  judge/
+docker build -f judge/Dockerfile.rust      -t shikomi-judge-rust:latest judge/
 docker build -f judge/Dockerfile.sql-mysql -t shikomi-judge-sql:latest judge/
 ```
 
@@ -170,7 +171,7 @@ and the gotchas worth knowing before you change anything.
 
 ```
 backend/     FastAPI app (app/), judge worker (worker/), Alembic migrations, tests
-judge/       sandbox harnesses (Python, JS, SQL), their Dockerfiles, harness tests
+judge/       sandbox harnesses (Python, JS, Rust, SQL), their Dockerfiles, harness tests
 frontend/    React + Vite + Monaco workspace, Vitest + Playwright tests
 seed/        the five starter problems
 deploy/      Helm chart

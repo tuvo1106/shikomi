@@ -24,7 +24,7 @@ export type Kind = 'function' | 'operations' | 'sql'
 /** Which harness/sandbox judges the submission (DESIGN.md §13). "js" only
  * supports `kind: "function"` — no operations mode, no ListNode/TreeNode.
  * "mysql" always pairs with `kind: "sql"`, never any other kind. */
-export type Language = 'python' | 'js' | 'mysql'
+export type Language = 'python' | 'js' | 'rust' | 'mysql'
 
 export type ProblemListItem = {
   id: string
