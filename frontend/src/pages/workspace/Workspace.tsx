@@ -30,21 +30,26 @@ const draftKey = (slug: string, language: Language) => `code:${slug}:${language}
 /** localStorage key remembering which language a problem was last open in. */
 const languageKey = (slug: string) => `lang:${slug}`
 
-/**
- * The saved draft for `language`, or null. Drafts saved before problems had
- * several languages live under the bare `code:<slug>` key; that draft belongs to
- * the default language, so it's moved to the per-language key the first time it's
- * read (the E2E specs also seed that bare key).
- */
+/** The saved draft for `language`, or null. A pure read: safe during render. */
 function readDraft(problem: ProblemDetail, language: Language): string | null {
-  const key = draftKey(problem.slug, language)
+  return localStorage.getItem(draftKey(problem.slug, language))
+}
+
+/**
+ * Moves a draft saved before problems had several languages (under the bare
+ * `code:<slug>` key) to its per-language key. That's only safe when the problem
+ * has one language: a problem's default language can change when it gains more
+ * (`merge-booking-windows` went from Rust to Python), so on a multi-language
+ * problem nothing says which language an old draft was written in, and filing it
+ * under the wrong one would submit Rust as Python. There it's left untouched.
+ */
+function migrateLegacyDraft(problem: ProblemDetail) {
   const legacyKey = `code:${problem.slug}`
   const legacy = localStorage.getItem(legacyKey)
-  if (legacy !== null && language === problem.languages[0].language && localStorage.getItem(key) === null) {
-    localStorage.setItem(key, legacy)
-    localStorage.removeItem(legacyKey)
-  }
-  return localStorage.getItem(key)
+  if (legacy === null || problem.languages.length !== 1) return
+  const key = draftKey(problem.slug, problem.languages[0].language)
+  if (localStorage.getItem(key) === null) localStorage.setItem(key, legacy)
+  localStorage.removeItem(legacyKey)
 }
 
 /** The language to open in: the one last used on this problem if it still
@@ -112,6 +117,7 @@ function ProblemWorkspace() {
 
   useEffect(() => {
     if (!problem) return
+    migrateLegacyDraft(problem)
     const lang = initialLanguage(problem)
     const v = problem.languages.find((l) => l.language === lang)!
     setLanguage(lang)
@@ -125,9 +131,11 @@ function ProblemWorkspace() {
   }
 
   /** Switch the editor to `next`, bringing up that language's own draft. The
-   * current draft is already saved (every edit is), so nothing is lost. */
+   * current draft is already saved (every edit is), so nothing is lost. Refused
+   * while a verdict is pending: the result belongs to the language it was
+   * submitted in (every caller also disables its control; this is the backstop). */
   function switchLanguage(next: Language) {
-    if (!problem || next === variant?.language) return
+    if (!problem || next === variant?.language || judging) return
     const v = problem.languages.find((l) => l.language === next)
     if (!v) return
     setLanguage(next)
@@ -136,19 +144,24 @@ function ProblemWorkspace() {
   }
 
   /** Which languages hold a draft that differs from their starter code, for the
-   * switcher's "edited" dots. Read from storage because only the current
-   * language's code is in state; `code` in the deps re-reads after every edit. */
-  const edited = useMemo(() => {
-    if (!problem) return new Set<Language>()
-    return new Set(
-      problem.languages
-        .filter((v) => {
-          const draft = v.language === variant?.language ? code : readDraft(problem, v.language)
-          return draft !== null && draft !== v.starter_code
-        })
-        .map((v) => v.language),
-    )
-  }, [problem, variant?.language, code])
+   * switcher's "edited" dots. The other languages' drafts are read from storage
+   * once per switch (they can't change while this one is being edited); only the
+   * current language is compared per keystroke. */
+  const editedElsewhere = useMemo(() => {
+    if (!problem) return [] as Language[]
+    return problem.languages
+      .filter((v) => v.language !== variant?.language)
+      .filter((v) => {
+        const draft = readDraft(problem, v.language)
+        return draft !== null && draft !== v.starter_code
+      })
+      .map((v) => v.language)
+  }, [problem, variant?.language])
+  const currentEdited = !!variant && code !== variant.starter_code
+  const edited = useMemo(
+    () => new Set<Language>(currentEdited && variant ? [...editedElsewhere, variant.language] : editedElsewhere),
+    [editedElsewhere, currentEdited, variant],
+  )
 
   // Poll the active submission every second until its status is terminal, then
   // stop (returning false from refetchInterval halts polling). `enabled` keeps it
@@ -222,12 +235,13 @@ function ProblemWorkspace() {
   }
 
   /** Load code (a solution, a past submission) into `into`'s editor, switching
-   * to that language first when it isn't the current one. */
+   * to that language first when it isn't the current one. Like `switchLanguage`,
+   * it won't change the language while a verdict is pending. */
   function loadCode(c: string, into: Language) {
-    if (!problem) return
+    if (!problem || (judging && into !== variant?.language)) return
     const v = problem.languages.find((l) => l.language === into)
     if (!v) return
-    const next = withReferenceComment(c, v.starter_code)
+    const next = withReferenceComment(c, v.starter_code, into)
     setLanguage(into)
     setCode(next)
     localStorage.setItem(draftKey(problem.slug, into), next)
@@ -380,9 +394,15 @@ function ProblemWorkspace() {
                   languages={problem.languages.map((v) => v.language)}
                   onLoadCode={loadCode}
                   onSwitchLanguage={switchLanguage}
+                  languageLocked={judging}
                 />
               ) : (
-                <Submissions slug={problem.slug} multiLanguage={multiLanguage} onLoadCode={loadCode} />
+                <Submissions
+                  slug={problem.slug}
+                  multiLanguage={multiLanguage}
+                  onLoadCode={loadCode}
+                  lockedTo={judging ? variant.language : null}
+                />
               )}
             </div>
           </section>
@@ -439,7 +459,11 @@ function ProblemWorkspace() {
                   </div>
                 </header>
                 <div className="min-h-0 flex-1 py-2">
+                  {/* One Monaco model per language (`path`), so each keeps its own
+                      undo history: with one shared model, Ctrl+Z after a switch
+                      restored the other language's code into this draft. */}
                   <Editor
+                    path={`${problem.slug}/${variant.language}`}
                     height="100%"
                     language={MONACO_LANGUAGE[variant.language]}
                     theme={theme === 'dark' ? 'vs-dark' : 'light'}

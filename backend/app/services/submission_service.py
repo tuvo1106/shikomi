@@ -37,7 +37,8 @@ async def create_submission(session: AsyncSession, queue: Queue, user: User,
     abuse is rejected before doing real work: size cap → rate limit → problem
     exists → language offered → in-flight lock → write row → enqueue.
 
-    `language` None means the problem's default (its first language).
+    `language` None means the problem's only language; on a multi-language
+    problem it's required (400 LANGUAGE_REQUIRED).
 
     The row is written *before* the enqueue (§5.7): if enqueue then fails we mark
     the row `judge_error` and release the lock, so we never accept work we can't
@@ -71,7 +72,16 @@ async def create_submission(session: AsyncSession, queue: Queue, user: User,
     if problem is None or not problem.is_published:
         raise APIError(404, "NOT_FOUND", "Problem not found.")
     offered = [v.language for v in problem.languages]
-    language = language or offered[0]
+    if language is None:
+        # Only unambiguous with one language. A problem's default can change when it
+        # gains languages (merge-booking-windows went from Rust to Python), so on a
+        # multi-language problem a request without one may hold code written for a
+        # different default; guessing would judge Rust as Python and record it.
+        if len(offered) > 1:
+            raise APIError(400, "LANGUAGE_REQUIRED",
+                           f"This problem is offered in several languages; say which one "
+                           f"({', '.join(offered)}).")
+        language = offered[0]
     if language not in offered:
         raise APIError(400, "UNSUPPORTED_LANGUAGE",
                        f"This problem can't be solved in {language}. "

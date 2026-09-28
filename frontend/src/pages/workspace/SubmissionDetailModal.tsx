@@ -19,11 +19,15 @@ export function SubmissionDetailModal({
   multiLanguage,
   onClose,
   onLoadCode,
+  lockedTo = null,
 }: {
   submissionId: string
   multiLanguage: boolean
   onClose: () => void
   onLoadCode: (code: string, language: Language) => void
+  /** While a verdict is pending, the only language code can be loaded into: loading
+   * a submission in another language would switch the editor under the result. */
+  lockedTo?: Language | null
 }) {
   const { data: sub, isLoading } = useQuery({
     queryKey: ['submission-detail', submissionId],
@@ -54,7 +58,9 @@ export function SubmissionDetailModal({
             <span className="whitespace-nowrap text-zinc-500">{relativeTime(sub.created_at)}</span>
             <button
               onClick={() => onLoadCode(sub.code, sub.language)}
-              className="ml-auto whitespace-nowrap rounded border border-zinc-700 px-2 py-1 text-xs text-zinc-200 hover:bg-zinc-800"
+              disabled={lockedTo !== null && lockedTo !== sub.language}
+              title={lockedTo !== null && lockedTo !== sub.language ? 'Wait for the verdict to switch languages' : undefined}
+              className="ml-auto whitespace-nowrap rounded border border-zinc-700 px-2 py-1 text-xs text-zinc-200 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50"
             >
               Load into editor
             </button>

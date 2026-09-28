@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatInput, formatSqlSeed, isOperationsInput } from './format'
+import { formatInput, formatSqlSeed, isOperationsInput, withReferenceComment } from './format'
 
 describe('isOperationsInput', () => {
   it('matches the [ops, args] shape', () => {
@@ -52,5 +52,37 @@ describe('formatSqlSeed', () => {
 
   it('leaves a single statement with no trailing semicolon untouched', () => {
     expect(formatSqlSeed('SELECT 1')).toBe('SELECT 1')
+  })
+})
+
+describe('withReferenceComment', () => {
+  const RUST_STARTER = [
+    'use std::rc::Rc;',
+    '',
+    '// The judge defines TreeNode for you.',
+    '// pub struct TreeNode { ... }',
+    '',
+    'fn f() {}',
+  ].join('\n')
+
+  it("carries a Rust starter's `//` block, found after its `use` lines", () => {
+    expect(withReferenceComment('fn g() {}', RUST_STARTER, 'rust')).toBe(
+      '// The judge defines TreeNode for you.\n// pub struct TreeNode { ... }\n\nfn g() {}',
+    )
+  })
+
+  it("doesn't add the block twice", () => {
+    const once = withReferenceComment('fn g() {}', RUST_STARTER, 'rust')
+    expect(withReferenceComment(once, RUST_STARTER, 'rust')).toBe(once)
+  })
+
+  it('never takes a Rust attribute for a comment', () => {
+    expect(withReferenceComment('fn g() {}', '#[derive(Debug)]\nstruct S;', 'rust')).toBe('fn g() {}')
+  })
+
+  it("keeps Python's `#` block", () => {
+    expect(withReferenceComment('def g(): ...', '# class ListNode: ...\n\ndef f(): ...', 'python')).toBe(
+      '# class ListNode: ...\n\ndef g(): ...',
+    )
   })
 })

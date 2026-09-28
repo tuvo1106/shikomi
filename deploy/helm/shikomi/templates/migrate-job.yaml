@@ -1,7 +1,17 @@
 # Schema migration + seed, run as a Helm hook on every install/upgrade — the K8s
-# equivalent of compose's one-shot `migrate` service. post-install/post-upgrade
-# (not pre-) so the in-cluster Postgres/Redis already exist; an initContainer
-# then waits for Postgres to accept connections before Alembic runs.
+# equivalent of compose's one-shot `migrate` service.
+#
+# post-install, because on a first install the in-cluster Postgres doesn't exist
+# until the chart's resources are applied (the api's readiness doesn't need the
+# schema, so `helm --wait` can't deadlock on it). pre-upgrade, so on an upgrade the
+# schema is migrated *before* the new api/worker pods start: as a post-upgrade hook
+# it ran after them, and the new code met the old schema (every problem read failed
+# until the hook finished). Old pods still serve while it runs, so a migration must
+# keep the previous release working, or its release notes must say to scale api and
+# worker down first (AGENTS.md). A pre-upgrade hook runs with the release's
+# previous ConfigMap/Secret, which it only needs for the database URL.
+#
+# An initContainer waits for Postgres to accept connections before Alembic runs.
 #
 # before-hook-creation delete policy lets the immutable Job be recreated on each
 # `helm upgrade` (Jobs can't be patched in place).
@@ -10,7 +20,7 @@ kind: Job
 metadata:
   name: shikomi-migrate
   annotations:
-    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook": post-install,pre-upgrade
     "helm.sh/hook-weight": "0"
     "helm.sh/hook-delete-policy": before-hook-creation
 spec:

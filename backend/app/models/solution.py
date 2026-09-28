@@ -39,15 +39,16 @@ class Solution(Base, PKMixin, TimestampMixin):
     problem: Mapped["Problem"] = relationship(back_populates="solutions")  # noqa: F821
     codes: Mapped[list["SolutionCode"]] = relationship(
         back_populates="solution", cascade="all, delete-orphan",
-        order_by="SolutionCode.language", passive_deletes=True, lazy="selectin")
+        order_by="SolutionCode.language", passive_deletes=True)
 
 
 class SolutionCode(Base, PKMixin, TimestampMixin):
     """One solution's reference implementation in one language.
 
-    Unique per `(solution_id, language)`. `lazy="selectin"` on `Solution.codes`
-    loads them in one extra query with the solutions, which is what the
-    Solutions tab always wants (an async session can't lazy-load on access).
+    Unique per `(solution_id, language)`. Loaded explicitly where they're shown
+    (`get_solutions`' `selectinload`), not with every solution: the problem view
+    only needs to know that solutions exist, and an async session can't lazy-load
+    on access.
     """
 
     __tablename__ = "solution_codes"
