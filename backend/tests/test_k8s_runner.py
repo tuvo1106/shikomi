@@ -37,6 +37,29 @@ def test_pod_limits_and_payload_channel():
     assert tmp.empty_dir.medium == "Memory"
 
 
+def test_payload_is_not_mounted_into_the_judge_container():
+    """The ConfigMap (every hidden case's expected) must not be readable by the
+    submission. It's mounted only on the init container, which copies it into a
+    writable emptyDir; the judge container mounts that emptyDir, so the harness
+    parent can delete the payload before the submission runs."""
+    spec = _pod().spec
+    judge = spec.containers[0]
+    judge_mounts = {m.name: m for m in judge.volume_mounts}
+    # The judge sees the writable copy, never the ConfigMap.
+    assert "payload-src" not in judge_mounts
+    assert judge_mounts["payload"].read_only in (None, False)   # writable → deletable
+    assert next(v for v in spec.volumes if v.name == "payload").empty_dir is not None
+
+    # The ConfigMap is mounted read-only, only on the init container.
+    init = spec.init_containers[0]
+    src = next(m for m in init.volume_mounts if m.name == "payload-src")
+    assert src.read_only is True
+    assert next(v for v in spec.volumes if v.name == "payload-src").config_map is not None
+    # The init container is locked down like the judge.
+    assert init.security_context.read_only_root_filesystem is True
+    assert init.security_context.run_as_non_root is True
+
+
 def test_oom_maps_to_137():
     # ContainerResult.oom_killed keys off exit 137 (docker's OOM signal); the k8s
     # runner normalises reason=OOMKilled to the same code so aggregation is shared.
