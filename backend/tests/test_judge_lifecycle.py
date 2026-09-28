@@ -13,6 +13,8 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
+import re
+
 import pytest
 from pydantic import ValidationError
 
@@ -450,8 +452,9 @@ def test_rust_is_function_mode_only_like_js():
                                          function_name=None, class_name="C"))
 
 
-@pytest.mark.parametrize("node_type", ["ListNode", "TreeNode", "List[ListNode]", "List[TreeNode]"])
-def test_rust_accepts_the_list_and_tree_codecs(node_type):
+@pytest.mark.parametrize("node_type", ["ListNode", "TreeNode", "List[ListNode]", "List[TreeNode]",
+                                       "CyclicListNode", "RandomListNode", "GraphNode"])
+def test_rust_accepts_its_node_codecs(node_type):
     """prelude.rs `nodes` implements these, so a Rust variant may declare them
     (as a param or the return type) and the workspace draws its samples."""
     ProblemFile.model_validate(_file(1, language="rust", params=[{"name": "x", "type": node_type}]))
@@ -459,12 +462,13 @@ def test_rust_accepts_the_list_and_tree_codecs(node_type):
 
 
 @pytest.mark.parametrize("language,node_type", [
-    ("rust", "GraphNode"), ("rust", "CyclicListNode"), ("rust", "RandomListNode"),
-    ("js", "ListNode"), ("js", "TreeNode"),
+    ("rust", "Iterator"), ("js", "ListNode"), ("js", "TreeNode"), ("js", "GraphNode"),
 ])
 def test_a_language_refuses_node_types_its_harness_lacks(language, node_type):
     with pytest.raises(ValidationError, match=f"language '{language}' does not support the '{node_type}'"):
         ProblemFile.model_validate(_file(1, language=language, params=[{"name": "x", "type": node_type}]))
+    if node_type == "Iterator":
+        return  # decode-only: never a valid return_type, in any language
     with pytest.raises(ValidationError, match=f"does not support the '{node_type}'"):
         ProblemFile.model_validate(_file(1, language=language, return_type=node_type))
 
@@ -532,3 +536,45 @@ def test_rust_node_values_are_checked_in_each_any_of_option_and_tree_nulls_are_f
     tree["test_cases"][0]["expected"] = [[1], [2**40]]
     with pytest.raises(ValidationError, match="the expected output holds the node value"):
         ProblemFile.model_validate(tree)
+
+
+def _node_case_file(node_type, inp, expected=None, language="python"):
+    return {**BODY, "language": language, "params": [{"name": "x", "type": node_type}],
+            "test_cases": [{"ordinal": 0, "input": [inp], "expected": expected, "is_sample": True}]}
+
+
+@pytest.mark.parametrize("node_type,wire,why", [
+    ("CyclicListNode", [[1, 2], 2], "cycle position 2"),
+    ("CyclicListNode", [[1, 2], -2], "cycle position -2"),   # Python would wrap it to the last node
+    ("CyclicListNode", [[], 0], "cycle position 0"),
+    ("CyclicListNode", [1, 2, 3], "expected [values, pos]"),
+    ("RandomListNode", [[1, None], [2, -1]], "random index -1"),
+    ("RandomListNode", [[1, 2]], "random index 2"),
+    ("GraphNode", [[2], [0]], "neighbour 0"),                # Python: nodes[-1]
+    ("GraphNode", [[3], [1]], "neighbour 3"),
+])
+@pytest.mark.parametrize("language", ["python", "rust"])
+def test_node_encodings_with_indices_off_the_structure_are_refused(node_type, wire, why, language):
+    """harness.py wraps a bad index, harness_rs refuses it; either way it's an
+    authoring bug, refused at seed time for every language."""
+    with pytest.raises(ValidationError, match=f"test case 0: x is not a valid {node_type}: .*{re.escape(why)}"):
+        ProblemFile.model_validate(_node_case_file(node_type, wire, language=language))
+
+
+@pytest.mark.parametrize("node_type,wire", [
+    ("CyclicListNode", [[1, 2], -1]), ("CyclicListNode", [[1, 2], 1]), ("CyclicListNode", []),
+    ("RandomListNode", [[1, None], [2, 0]]), ("RandomListNode", []),
+    ("GraphNode", [[2], [1]]), ("GraphNode", [[]]), ("GraphNode", []),
+])
+def test_well_formed_node_encodings_load(node_type, wire):
+    ProblemFile.model_validate(_node_case_file(node_type, wire))
+
+
+def test_a_cyclic_list_output_is_an_index_not_a_list():
+    """A CyclicListNode return is the answer node's index (harness.py's `_idx`), so
+    the structural check applies to its input only."""
+    f = _node_case_file("CyclicListNode", [[3, 2, 0], 1], expected=1)
+    f["return_type"] = "CyclicListNode"
+    ProblemFile.model_validate(f)
+    ProblemFile.model_validate({**f, "language": "rust"})
+

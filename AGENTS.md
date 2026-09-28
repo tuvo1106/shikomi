@@ -330,6 +330,15 @@ and `playwright`.
 - **Drafts are keyed `code:<slug>:<language>`.** The bare `code:<slug>` key is a
   pre-multi-language draft; the workspace moves it to the default language on first
   read. The E2E helper `openProblemWithCode` seeds the per-language key.
+- **A schema change can refuse a bundled starter.** CI's seed-solution job only runs when
+  `seed/` or `judge/` changes, so a new `ProblemFile` rule is checked against the starters
+  by `test_the_bundled_starters_validate` (backend/tests/test_cli.py). A rule that reads a
+  node-typed `expected` must remember a `CyclicListNode` answer is an index, not a list:
+  that exact slip was caught this way.
+- **Rust node structs are generated per problem.** The glue defines only the node
+  structs the Rust variant declares (harness.rs `node_structs`), in the user's crate. A
+  Rust test payload that uses `ListNode` must declare it in `params`/`return_type`, or the
+  build fails with "cannot find type".
 
 ## Deferred / TODO
 
@@ -365,20 +374,16 @@ slice ships, delete its entry here.
   re-read. The Docker runner is unaffected (stdin only).
 
 - **Rust judge follow-ups** (v1 shipped,
-  [ADR-0004](docs/adr/0004-rust-judge-compile-in-sandbox.md); the `ListNode`/`TreeNode`
-  codecs shipped too): the remaining node codecs, then `kind: "operations"`, each
-  shipping with a Python + Rust starter per problem type. `CyclicListNode`,
-  `RandomListNode` and `GraphNode` need `Rc<RefCell<…>>` nodes throughout (`Weak` for
-  back edges) and cycle-aware encoding, defined in prelude.rs `nodes` like the others.
-  `CyclicListNode` can't reuse `ListNode` as Python does, because a `Box` list can't
-  form a cycle. Then `kind: "operations"` for Rust. That needs machine-readable method
-  signatures in `ProblemIn` (today they exist only in the Python `starter_code`) and a
-  second glue generator that dispatches method names. Also: measure compile time and
-  the per-case spawn cost under gVisor (`runsc` adds syscall overhead that rustc and
-  `fork`/`exec` feel), and trim the ~1.1GB image (a `rustup --profile minimal` build
-  on `debian:slim`). A dedicated `compile_error` verdict would suit every language at
-  once, not just Rust. The node structs fix `val: i32`, as LeetCode's do; a problem
-  that needs other values needs a generic or second node type.
+  [ADR-0004](docs/adr/0004-rust-judge-compile-in-sandbox.md); every node codec but the
+  decode-only `Iterator` shipped too): `kind: "operations"` for Rust, shipping with
+  Python + Rust design starters. That needs machine-readable method signatures in
+  `ProblemIn` (today they exist only in the Python `starter_code`), a second glue
+  generator that dispatches method names, and then `Iterator` for constructors. Also:
+  measure compile time and the per-case spawn cost under gVisor (`runsc` adds syscall
+  overhead that rustc and `fork`/`exec` feel), and trim the ~1.1GB image (a `rustup
+  --profile minimal` build on `debian:slim`). A dedicated `compile_error` verdict would
+  suit every language at once, not just Rust. The node structs fix `val: i32`, as
+  LeetCode's do; a problem that needs other values needs a generic or second node type.
 
 - **Multi-language follow-ups** ([ADR-0005](docs/adr/0005-multi-language-problems.md)):
   per-language `time_limit_ms` (limits are shared today, so they're calibrated to the

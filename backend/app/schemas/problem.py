@@ -60,7 +60,7 @@ Kind = Literal["function", "operations", "sql"]
 # function-mode only, no "operations" kind and no ListNode/TreeNode codecs on
 # that path at all. "rust": compiled by rustc and judged by judge/harness_rs/
 # (DESIGN.md §13, docs/adr/0004-rust-judge-compile-in-sandbox.md), function-mode only
-# like "js", but with the ListNode/TreeNode codecs (`SandboxProfile.node_types`). "mysql": judged by judge/harness_sql.py against an
+# like "js", but with every node codec except "Iterator" (`SandboxProfile.node_types`). "mysql": judged by judge/harness_sql.py against an
 # ephemeral MariaDB instance (DESIGN.md §13, docs/adr/0002-sql-judge-engine-
 # mysql-vs-mariadb.md) — always paired with kind="sql", never any other kind.
 Language = Literal["python", "js", "rust", "mysql"]
@@ -156,6 +156,45 @@ LEGACY_LANGUAGE_FIELDS = (
 # Every node codec name a param may declare (`SandboxProfile.node_types` says which each
 # language implements).
 _NODE_PARAM_TYPES = ALL_NODE_TYPES
+
+
+def _is_index(x: Any, size: int) -> bool:
+    return isinstance(x, int) and not isinstance(x, bool) and 0 <= x < size
+
+
+def _malformed_node_wire(node_type: str, wire: Any) -> str | None:
+    """Why `wire` isn't a well-formed encoding of `node_type`'s *structure*, or None.
+
+    Checks the indices that tie nodes together, which a harness would otherwise
+    wrap (Python) or refuse (Rust): a cycle position, a random pointer, a graph
+    neighbour. Node values are `_node_values`' business. A `CyclicListNode`
+    *output* is a node index (or null), not a list, so it isn't checked here.
+    """
+    if wire is None:
+        return None
+    if node_type.startswith("List["):
+        inner = node_type[len("List["):-1]
+        return next((m for m in map(lambda w: _malformed_node_wire(inner, w), wire or []) if m), None)
+    if node_type == "CyclicListNode":
+        if wire == []:
+            return None  # the empty list
+        if not (isinstance(wire, list) and len(wire) == 2 and isinstance(wire[0], list)):
+            return "expected [values, pos]"
+        values, pos = wire
+        if pos != -1 and not _is_index(pos, len(values)):
+            return f"cycle position {pos!r} is neither -1 nor an index into its {len(values)} values"
+    elif node_type == "RandomListNode" and isinstance(wire, list):
+        for i, pair in enumerate(wire):
+            if not (isinstance(pair, list) and len(pair) == 2):
+                return f"node {i} is not [val, random_index]"
+            if pair[1] is not None and not _is_index(pair[1], len(wire)):
+                return f"node {i}'s random index {pair[1]!r} is not an index into its {len(wire)} nodes"
+    elif node_type == "GraphNode" and isinstance(wire, list):
+        for i, row in enumerate(wire):
+            for nb in row if isinstance(row, list) else [row]:
+                if not _is_index(nb - 1 if isinstance(nb, int) and not isinstance(nb, bool) else None, len(wire)):
+                    return f"node {i + 1} lists neighbour {nb!r}, but nodes are numbered 1 to {len(wire)}"
+    return None
 
 
 def _node_values(node_type: str, wire: Any):
@@ -281,7 +320,7 @@ class ProblemIn(BaseModel):
     def _language_supports_kind_and_codecs(self) -> "ProblemIn":
         # judge/harness.js and judge/harness_rs/ only implement function mode
         # (DESIGN.md §13), and each harness implements its own set of node codecs
-        # (JS none; Rust the list and tree, prelude.rs `nodes`). Reject an
+        # (JS none; Rust all but the decode-only Iterator, prelude.rs `nodes`). Reject an
         # unsupported combination here rather than letting it surface as a
         # confusing runtime_error from the harness on every submission.
         for v in self.languages:
@@ -405,31 +444,56 @@ class ProblemFile(ProblemIn):
             raise ValueError("solution ordinals must be unique")
         return self
 
+    def _node_wires(self, tc: "TestCaseIn"):
+        """`(variant, where, node_type, wire)` for every node-typed argument and
+        expected output in function-mode case `tc` (an any_of case contributes each
+        option). Operations cases put constructor args elsewhere, so they're skipped."""
+        if self.kind != "function":
+            return
+        expected_options = self.comparison.get("mode") == "any_of"
+        for v in self.languages:
+            for i, p in enumerate(v.params):
+                if p.type in _NODE_PARAM_TYPES and i < len(tc.input):
+                    yield v, p.name, p.type, tc.input[i]
+            if v.return_type:
+                outputs = tc.expected if expected_options and isinstance(tc.expected, list) else [tc.expected]
+                for out in outputs:
+                    yield v, "the expected output", v.return_type, out
+
+    @model_validator(mode="after")
+    def _node_wires_are_well_formed(self) -> "ProblemFile":
+        # The indices inside a node encoding (a cycle's position, a random pointer, a
+        # graph neighbour) must point at a real node. harness.py silently wraps a bad
+        # one (`nodes[-1]` is the last node), harness_rs refuses it, so a case like
+        # that would pass its Python reference and fail every Rust submission. It's
+        # an authoring bug in every language, so it's refused here for all of them.
+        for tc in self.test_cases:
+            for _, where, node_type, wire in self._node_wires(tc):
+                if node_type == "CyclicListNode" and where == "the expected output":
+                    continue  # the answer is a node's index (or null), not a list
+                problem = _malformed_node_wire(node_type, wire)
+                if problem:
+                    raise ValueError(f"test case {tc.ordinal}: {where} is not a valid {node_type}: {problem}")
+        return self
+
     @model_validator(mode="after")
     def _node_values_fit_each_language(self) -> "ProblemFile":
         # The test cases are shared, but a language's node struct may hold less than
         # JSON does (Rust's `val` is an i32; `SandboxProfile.node_value_range`). A value
         # that doesn't fit would fail every submission in that language with a decode
         # error, so it fails here instead, at seed time.
-        expected_options = self.comparison.get("mode") == "any_of"
-        for v in self.languages:
-            value_range = profile_for(v.language).node_value_range
-            if value_range is None:
-                continue
-            lo, hi = value_range
-            for tc in self.test_cases:
-                wires = [(p.name, p.type, tc.input[i]) for i, p in enumerate(v.params)
-                         if p.type in _NODE_PARAM_TYPES and i < len(tc.input)]
-                if v.return_type:
-                    outputs = tc.expected if expected_options and isinstance(tc.expected, list) else [tc.expected]
-                    wires += [("the expected output", v.return_type, out) for out in outputs]
-                for where, node_type, wire in wires:
-                    for x in _node_values(node_type, wire):
-                        if isinstance(x, bool) or not isinstance(x, int) or not lo <= x <= hi:
-                            raise ValueError(
-                                f"test case {tc.ordinal}: {where} holds the node value {x!r}, but "
-                                f"language '{v.language}' stores a {node_type} value as an integer "
-                                f"in [{lo}, {hi}]")
+        for tc in self.test_cases:
+            for v, where, node_type, wire in self._node_wires(tc):
+                value_range = profile_for(v.language).node_value_range
+                if value_range is None:
+                    continue
+                lo, hi = value_range
+                for x in _node_values(node_type, wire):
+                    if isinstance(x, bool) or not isinstance(x, int) or not lo <= x <= hi:
+                        raise ValueError(
+                            f"test case {tc.ordinal}: {where} holds the node value {x!r}, but "
+                            f"language '{v.language}' stores a {node_type} value as an integer "
+                            f"in [{lo}, {hi}]")
         return self
 
     @model_validator(mode="after")

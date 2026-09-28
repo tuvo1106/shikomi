@@ -27,15 +27,17 @@ All notable changes to this project are recorded here. The format follows
   value types and every fixed comparison mode: *Matched Markers*,
   *Trailing Average*, *Carry Forward*, *Restock Ledger*, *Pairs to Target*, *Any Peak*
   and *Count Lakes*.
-- **Linked lists and trees in Rust.** A Rust problem can take and return linked lists
-  (`Option<Box<ListNode>>`) and binary trees (`Option<Rc<RefCell<TreeNode>>>`), including
-  a list of them (`Vec<…>`), in the same wire format as Python, so one problem's cases
-  serve both languages. The judge defines `ListNode` and `TreeNode` in the conventional
-  shapes, in the submission's own crate, so a solution can still add methods or trait
-  impls to them (`impl Ord for ListNode`). A submission that pastes the struct back in
-  gets a hint instead of a bare compile error. Three starters, each in Python and Rust, show it: *Deal from Both Ends*
-  (a list), *Trim to Price Band* (a binary search tree) and *Merge Sorted Feeds*
-  (several lists).
+- **Linked lists, trees and graphs in Rust.** A Rust problem can take and return linked
+  lists (`Option<Box<ListNode>>`) and binary trees (`Option<Rc<RefCell<TreeNode>>>`),
+  including a list of them (`Vec<…>`), plus cyclic lists, lists with random pointers and
+  graphs (`CyclicListNode`, `RandomListNode`, `GraphNode`, all `Rc<RefCell<…>>`). They use
+  the same wire format as Python, so one problem's cases serve both languages. The judge
+  defines the node structs in the submission's own crate, so a solution can still add
+  methods or trait impls to them (`impl Ord for ListNode`), and a submission that pastes
+  a struct back in gets a hint instead of a bare compile error. Six starters, each in Python and Rust, show them: *Deal from Both
+  Ends* (a list), *Trim to Price Band* (a binary search tree), *Merge Sorted Feeds*
+  (several lists), *Find the Loop's Entrance* (a cyclic list), *Copy the Referral Chain*
+  (random pointers) and *Copy the Station Map* (a graph).
 - **Problems in several languages.** A problem can be offered in any number of
   languages, with one shared statement and one shared set of test cases. The workspace
   gets a language switcher (shown only when there's more than one), keeps a separate
@@ -52,8 +54,12 @@ All notable changes to this project are recorded here. The format follows
 
 ### Fixed
 
-- A returned linked list or tree with a cycle is now a runtime error ("the returned list
-  has a cycle") in the Python judge, instead of being judged on its first pass. A
+- A problem file whose cyclic-list position, random-pointer index or graph neighbour
+  doesn't point at a real node is now refused when it's loaded. The Python judge used to
+  wrap such an index silently (`-1` became the last node).
+- A returned linked list (including a random-pointer list) or tree with a cycle is now a
+  runtime error ("the returned list has a cycle") in the Python judge, instead of being
+  judged on its first pass. A
   solution that forgot to end its list could be accepted, because that first pass
   matched the expected answer exactly. A tree that shares a subtree between two parents
   (no cycle) is still a valid answer.

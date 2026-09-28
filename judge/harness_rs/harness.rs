@@ -343,7 +343,7 @@ fn is_identifier(s: &str) -> bool {
 /// which is how a list or tree problem's starter code can use `ListNode`
 /// without defining it. Item order doesn't matter in a Rust module, so they
 /// work from down here.
-fn glue(function_name: &str, arity: usize, nodes: &[&str]) -> String {
+fn glue(function_name: &str, arity: usize, nodes: &[String]) -> String {
     let args: Vec<String> =
         (0..arity).map(|i| format!("::shikomi_prelude::arg(__args, {})?", i)).collect();
     format!(
@@ -370,7 +370,26 @@ fn glue(function_name: &str, arity: usize, nodes: &[&str]) -> String {
 // Each struct also implements the prelude's shape trait, the one-line
 // accessors its codec (prelude.rs `nodes`) is written against. Paths are fully
 // qualified, so a user's own imports can't change what these names mean.
-const LIST_NODE: &str = "\
+//
+// The three `Rc`-shared types (prelude.rs explains why every link is a strong
+// `Rc`) have a hand-written `Debug` that shows each link as its target's `val`.
+// A derived one would follow the links, and these structures are cyclic when
+// they're *right* (every undirected edge is a 2-cycle), so a learner's
+// `dbg!(&node)` would recurse until the stack overflowed.
+
+/// One node struct the glue can generate: the codec name a problem declares,
+/// the struct's source, and, for an `Rc`-shared type, its codec (the prelude's
+/// `decode_*`/`encode_*` suffix) and how it writes `None`.
+struct NodeStruct {
+    name: &'static str,
+    source: &'static str,
+    rc_codec: Option<(&'static str, &'static str)>,
+}
+
+const EMPTY_ARRAY: &str = "::shikomi_prelude::Json::Arr(::std::vec::Vec::new())";
+
+const NODE_STRUCTS: [NodeStruct; 5] = [
+    NodeStruct { name: "ListNode", rc_codec: None, source: "\
 #[derive(PartialEq, Eq, Clone, Debug)]
 pub struct ListNode {
     pub val: i32,
@@ -386,9 +405,8 @@ impl ::shikomi_prelude::nodes::ListShape for ListNode {
     fn next_node(&self) -> ::std::option::Option<&Self> { self.next.as_deref() }
     fn set_next_node(&mut self, next: ::std::option::Option<::std::boxed::Box<Self>>) { self.next = next; }
 }
-";
-
-const TREE_NODE: &str = "\
+" },
+    NodeStruct { name: "TreeNode", rc_codec: Some(("tree", EMPTY_ARRAY)), source: "\
 #[derive(Debug, PartialEq, Eq)]
 pub struct TreeNode {
     pub val: i32,
@@ -397,9 +415,7 @@ pub struct TreeNode {
 }
 impl TreeNode {
     #[inline]
-    pub fn new(val: i32) -> Self {
-        TreeNode { val, left: ::std::option::Option::None, right: ::std::option::Option::None }
-    }
+    pub fn new(val: i32) -> Self { TreeNode { val, left: ::std::option::Option::None, right: ::std::option::Option::None } }
 }
 impl ::shikomi_prelude::nodes::TreeShape for TreeNode {
     fn make(val: i32) -> Self { TreeNode::new(val) }
@@ -409,23 +425,100 @@ impl ::shikomi_prelude::nodes::TreeShape for TreeNode {
     fn set_left_node(&mut self, c: ::std::option::Option<::std::rc::Rc<::std::cell::RefCell<Self>>>) { self.left = c; }
     fn set_right_node(&mut self, c: ::std::option::Option<::std::rc::Rc<::std::cell::RefCell<Self>>>) { self.right = c; }
 }
-impl ::shikomi_prelude::nodes::RcNode for TreeNode {
-    fn decode(j: &::shikomi_prelude::Json)
-        -> ::std::result::Result<::std::option::Option<::std::rc::Rc<::std::cell::RefCell<Self>>>, ::std::string::String>
-    { ::shikomi_prelude::nodes::decode_tree(j) }
-    fn encode(n: &::std::rc::Rc<::std::cell::RefCell<Self>>)
-        -> ::std::result::Result<::shikomi_prelude::Json, ::std::string::String>
-    { ::shikomi_prelude::nodes::encode_tree(n) }
-    fn encode_none() -> ::shikomi_prelude::Json { ::shikomi_prelude::Json::Arr(::std::vec::Vec::new()) }
+" },
+    NodeStruct { name: "CyclicListNode", rc_codec: Some(("cyclic", "::shikomi_prelude::Json::Null")), source: "\
+pub struct CyclicListNode {
+    pub val: i32,
+    pub next: ::std::option::Option<::std::rc::Rc<::std::cell::RefCell<CyclicListNode>>>,
 }
-";
+impl CyclicListNode {
+    #[inline]
+    pub fn new(val: i32) -> Self { CyclicListNode { val, next: ::std::option::Option::None } }
+}
+impl ::std::fmt::Debug for CyclicListNode {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        f.debug_struct(\"CyclicListNode\").field(\"val\", &self.val)
+            .field(\"next\", &self.next.as_ref().and_then(|n| n.try_borrow().ok().map(|n| n.val))).finish()
+    }
+}
+impl ::shikomi_prelude::nodes::CyclicShape for CyclicListNode {
+    fn make(val: i32) -> Self { CyclicListNode::new(val) }
+    fn set_next_node(&mut self, next: ::std::option::Option<::std::rc::Rc<::std::cell::RefCell<Self>>>) { self.next = next; }
+}
+" },
+    NodeStruct { name: "RandomListNode", rc_codec: Some(("random", EMPTY_ARRAY)), source: "\
+pub struct RandomListNode {
+    pub val: i32,
+    pub next: ::std::option::Option<::std::rc::Rc<::std::cell::RefCell<RandomListNode>>>,
+    pub random: ::std::option::Option<::std::rc::Rc<::std::cell::RefCell<RandomListNode>>>,
+}
+impl RandomListNode {
+    #[inline]
+    pub fn new(val: i32) -> Self { RandomListNode { val, next: ::std::option::Option::None, random: ::std::option::Option::None } }
+}
+impl ::std::fmt::Debug for RandomListNode {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        f.debug_struct(\"RandomListNode\").field(\"val\", &self.val)
+            .field(\"next\", &self.next.as_ref().and_then(|n| n.try_borrow().ok().map(|n| n.val)))
+            .field(\"random\", &self.random.as_ref().and_then(|n| n.try_borrow().ok().map(|n| n.val))).finish()
+    }
+}
+impl ::shikomi_prelude::nodes::RandomShape for RandomListNode {
+    fn make(val: i32) -> Self { RandomListNode::new(val) }
+    fn value(&self) -> i32 { self.val }
+    fn next_node(&self) -> ::std::option::Option<::std::rc::Rc<::std::cell::RefCell<Self>>> { self.next.clone() }
+    fn random_node(&self) -> ::std::option::Option<::std::rc::Rc<::std::cell::RefCell<Self>>> { self.random.clone() }
+    fn set_next_node(&mut self, n: ::std::option::Option<::std::rc::Rc<::std::cell::RefCell<Self>>>) { self.next = n; }
+    fn set_random_node(&mut self, n: ::std::option::Option<::std::rc::Rc<::std::cell::RefCell<Self>>>) { self.random = n; }
+}
+" },
+    NodeStruct { name: "GraphNode", rc_codec: Some(("graph", EMPTY_ARRAY)), source: "\
+pub struct GraphNode {
+    pub val: i32,
+    pub neighbors: ::std::vec::Vec<::std::rc::Rc<::std::cell::RefCell<GraphNode>>>,
+}
+impl GraphNode {
+    #[inline]
+    pub fn new(val: i32) -> Self { GraphNode { val, neighbors: ::std::vec::Vec::new() } }
+}
+impl ::std::fmt::Debug for GraphNode {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        let neighbors: ::std::vec::Vec<i32> = self.neighbors.iter().filter_map(|n| n.try_borrow().ok().map(|n| n.val)).collect();
+        f.debug_struct(\"GraphNode\").field(\"val\", &self.val).field(\"neighbors\", &neighbors).finish()
+    }
+}
+impl ::shikomi_prelude::nodes::GraphShape for GraphNode {
+    fn make(val: i32) -> Self { GraphNode::new(val) }
+    fn value(&self) -> i32 { self.val }
+    fn neighbor_nodes(&self) -> &[::std::rc::Rc<::std::cell::RefCell<Self>>] { &self.neighbors }
+    fn push_neighbor(&mut self, n: ::std::rc::Rc<::std::cell::RefCell<Self>>) { self.neighbors.push(n); }
+}
+" },
+];
+
+/// The `RcNode` impl that routes an `Rc`-shared struct to its prelude codec
+/// (one blanket `FromJson`/`ToJson` impl for `Rc<RefCell<T>>` can exist, so each
+/// type names its codec here).
+fn rc_node_impl(name: &str, codec: &str, none: &str) -> String {
+    format!(
+        "impl ::shikomi_prelude::nodes::RcNode for {name} {{\n\
+         \x20   fn decode(j: &::shikomi_prelude::Json) -> ::std::result::Result<\
+         ::std::option::Option<::std::rc::Rc<::std::cell::RefCell<Self>>>, ::std::string::String> \
+         {{ ::shikomi_prelude::nodes::decode_{codec}(j) }}\n\
+         \x20   fn encode(n: &::std::rc::Rc<::std::cell::RefCell<Self>>) -> ::std::result::Result<\
+         ::shikomi_prelude::Json, ::std::string::String> \
+         {{ ::shikomi_prelude::nodes::encode_{codec}(n) }}\n\
+         \x20   fn encode_none() -> ::shikomi_prelude::Json {{ {none} }}\n\
+         }}\n"
+    )
+}
 
 /// The node structs a problem needs, from the codec names its Rust variant
 /// declares in `params[].type` and `return_type` (`"ListNode"`,
 /// `"List[TreeNode]"`, ...). Only those are generated: a problem that declares
 /// none leaves the names free, so a trie problem's own `struct TreeNode` can't
 /// collide with ours.
-fn node_structs(payload: &Json) -> Vec<&'static str> {
+fn node_structs(payload: &Json) -> Vec<String> {
     let mut declared: Vec<&str> = payload.get("params").as_arr().iter().filter_map(|p| match p.get("type") {
         Json::Str(t) => Some(t.as_str()),
         _ => None,
@@ -434,19 +527,19 @@ fn node_structs(payload: &Json) -> Vec<&'static str> {
         declared.push(t);
     }
     let uses = |name: &str| declared.iter().any(|t| *t == name || *t == format!("List[{}]", name));
-    let mut out = Vec::new();
-    if uses("ListNode") {
-        out.push(LIST_NODE);
-    }
-    if uses("TreeNode") {
-        out.push(TREE_NODE);
-    }
-    out
+    NODE_STRUCTS
+        .iter()
+        .filter(|n| uses(n.name))
+        .map(|n| match n.rc_codec {
+            Some((codec, none)) => format!("{}{}", n.source, rc_node_impl(n.name, codec, none)),
+            None => n.source.to_string(),
+        })
+        .collect()
 }
 
 /// The whole `solution.rs`: `#![no_main]` on the user's first line (see `glue`),
 /// their code, then the glue.
-fn source(user_code: &str, function_name: &str, arity: usize, nodes: &[&str]) -> String {
+fn source(user_code: &str, function_name: &str, arity: usize, nodes: &[String]) -> String {
     format!("#![no_main] {}{}", user_code, glue(function_name, arity, nodes))
 }
 
@@ -506,8 +599,8 @@ fn compile(timeout: Duration) -> Result<(), String> {
 /// that collision, so it can't fire for anything else (a node name that only
 /// appears in a comment, or a wrong signature).
 fn node_hint(diag: &str) -> &'static str {
-    const NODES: [&str; 2] = ["ListNode", "TreeNode"];
-    let redefined = NODES.iter().any(|n| diag.contains(&format!("the name `{}` is defined multiple times", n)));
+    let redefined =
+        NODE_STRUCTS.iter().any(|n| diag.contains(&format!("the name `{}` is defined multiple times", n.name)));
     if redefined || diag.contains("duplicate definitions with name `new`") {
         "\n\nHint: the judge already defines the node struct (the one described in the \
          starter's comment). Remove your own definition and its `new`. You can still add \

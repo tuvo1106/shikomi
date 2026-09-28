@@ -23,7 +23,7 @@ export type UserStatus = 'solved' | 'attempted' | 'unsolved'
 export type Kind = 'function' | 'operations' | 'sql'
 /** Which harness/sandbox judges the submission (DESIGN.md §13). "js" and
  * "rust" only support `kind: "function"` (no operations mode); "js" has no
- * node codecs, and "rust" has the ListNode/TreeNode ones. "mysql" always pairs
+ * node codecs, and "rust" has all but the decode-only Iterator. "mysql" always pairs
  * with `kind: "sql"`, never any other kind. */
 export type Language = 'python' | 'js' | 'rust' | 'mysql'
 

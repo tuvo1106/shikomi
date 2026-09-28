@@ -242,6 +242,15 @@ def test_validate_checks_every_rule_without_touching_the_db(tmp_path, capsys):
     assert cli.main(["validate", "--dir", str(tmp_path / "missing")]) == 1
 
 
+def test_the_bundled_starters_validate(capsys):
+    """Every file in seed/problems loads under the current schema. CI's seed-solution
+    job only runs when seed/ or judge/ changes, so without this a schema change could
+    refuse a bundled starter and nothing would notice until the next seed."""
+    from pathlib import Path
+    seed = Path(__file__).resolve().parents[2] / "seed" / "problems"
+    assert cli.main(["validate", "--dir", str(seed)]) == 0, capsys.readouterr().err
+
+
 async def test_verify_email_marks_verified(session_factory, monkeypatch):
     monkeypatch.setattr(cli, "SessionLocal", session_factory)
     async with session_factory() as s:

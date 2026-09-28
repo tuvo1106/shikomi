@@ -761,15 +761,17 @@ CYCLIC_RANDOM_RETURN = (
 )
 
 
-def test_randomlistnode_return_encoder_is_cycle_safe():
-    # A submission returning a .next-cyclic structure must not hang the
-    # encoder (run_harness's own subprocess timeout would fail this test if
-    # it did) — it should terminate and simply score as wrong_answer.
-    pl = payload(CYCLIC_RANDOM_RETURN, [case(0, [[]], [[9, None]])],
+def test_randomlistnode_return_with_a_looping_next_is_refused():
+    # A submission returning a .next-cyclic structure must not hang the encoder
+    # (run_harness's own subprocess timeout would fail this test if it did), and
+    # must not be judged on its first pass either: it fails as malformed, like a
+    # looping ListNode. Expected is that first pass, [[1, None], [2, None]].
+    pl = payload(CYCLIC_RANDOM_RETURN, [case(0, [[]], [[1, None], [2, None]])],
                  params=[{"name": "head", "type": "RandomListNode"}],
                  return_type="RandomListNode")
     res = results(pl)
-    assert res[0]["status"] == "wrong_answer"
+    assert res[0]["status"] == "runtime_error"
+    assert "MalformedResult: the returned list has a cycle: after 2 node(s)" in res[0]["error"]
 
 
 # --- GraphNode codec ------------------------------------------------------
@@ -860,3 +862,19 @@ def test_float_tolerance_accepts_matching_infinities():
     nested = "def f(x):\n    return [1.0, float('inf')]\n"
     assert results(payload(nested, [case(0, [0], [1.0, float("inf")])],
                            comparison=tol))[0]["status"] == "passed"
+
+
+
+HUGE_GRAPH_VALUE = (
+    "def f(node):\n"
+    "    node.val = 10**12\n"
+    "    return node\n"
+)
+
+
+def test_graph_return_with_a_huge_value_is_refused_not_allocated():
+    pl = payload(HUGE_GRAPH_VALUE, [case(0, [[[]]], [[]])],
+                 params=[{"name": "node", "type": "GraphNode"}], return_type="GraphNode")
+    res = results(pl, timeout=10)
+    assert res[0]["status"] == "runtime_error"
+    assert "too large to encode" in res[0]["error"]
