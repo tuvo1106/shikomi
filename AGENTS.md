@@ -355,8 +355,9 @@ slice ships, delete its entry here.
   policy-enforcing CNI before untrusted users, and wiring kind into CI for the
   Playwright job. Problems reach the migrate hook as a ConfigMap holding one gzipped
   tarball (`scripts/k8s-up.sh`, `PROBLEMS_DIR`). That stretches the 1 MiB cap to about
-  780 KB *compressed* (~2 MB of problem JSON is ~0.45 MB), and the script refuses
-  anything bigger. A large problem set needs a PVC, an init-container `git clone`,
+  780 KB *compressed* (~2.6 MB of problem JSON is ~0.66 MB), and the script refuses
+  anything bigger. The bundled starters alone are close to that now, so the next few
+  starters need this carrier first. A large problem set needs a PVC, an init-container `git clone`,
   or an image layer instead.
 
 - **Keep the k8s judge payload away from submissions:** the k8s runner mounts the
@@ -369,20 +370,20 @@ slice ships, delete its entry here.
   re-read. The Docker runner is unaffected (stdin only).
 
 - **Rust judge follow-ups** (v1 shipped,
-  [ADR-0004](docs/adr/0004-rust-judge-compile-in-sandbox.md)): node codecs, then
-  `kind: "operations"`, each shipping with a Python + Rust starter per problem type.
-  Codecs first: `ListNode`/`TreeNode` and their `List[...]` forms, in the conventional
-  Rust shapes (`Option<Box<ListNode>>`, `Option<Rc<RefCell<TreeNode>>>`, decided with
-  the maintainer), defined in the prelude and picked by the param's declared type as
-  in Python; then `CyclicListNode`, `RandomListNode` and `GraphNode`, which need
-  `Rc<RefCell<…>>` throughout (`Weak` for back edges) and cycle-aware encoding. Then
-  `kind: "operations"` for Rust. That needs machine-readable method signatures in
-  `ProblemIn` (today they exist only in the Python `starter_code`) and a second glue
-  generator that dispatches method names. Also: measure compile time and the per-case
-  spawn cost under gVisor (`runsc` adds syscall overhead that rustc and `fork`/`exec`
-  feel), and trim the ~1.1GB image (a `rustup --profile minimal` build on
-  `debian:slim`). A dedicated `compile_error` verdict would suit every language at
-  once, not just Rust.
+  [ADR-0004](docs/adr/0004-rust-judge-compile-in-sandbox.md); the `ListNode`/`TreeNode`
+  codecs shipped too): the remaining node codecs, then `kind: "operations"`, each
+  shipping with a Python + Rust starter per problem type. `CyclicListNode`,
+  `RandomListNode` and `GraphNode` need `Rc<RefCell<…>>` nodes throughout (`Weak` for
+  back edges) and cycle-aware encoding, defined in prelude.rs `nodes` like the others.
+  `CyclicListNode` can't reuse `ListNode` as Python does, because a `Box` list can't
+  form a cycle. Then `kind: "operations"` for Rust. That needs machine-readable method
+  signatures in `ProblemIn` (today they exist only in the Python `starter_code`) and a
+  second glue generator that dispatches method names. Also: measure compile time and
+  the per-case spawn cost under gVisor (`runsc` adds syscall overhead that rustc and
+  `fork`/`exec` feel), and trim the ~1.1GB image (a `rustup --profile minimal` build
+  on `debian:slim`). A dedicated `compile_error` verdict would suit every language at
+  once, not just Rust. The node structs fix `val: i32`, as LeetCode's do; a problem
+  that needs other values needs a generic or second node type.
 
 - **Multi-language follow-ups** ([ADR-0005](docs/adr/0005-multi-language-problems.md)):
   per-language `time_limit_ms` (limits are shared today, so they're calibrated to the

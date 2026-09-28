@@ -448,9 +448,25 @@ def test_rust_is_function_mode_only_like_js():
     with pytest.raises(ValidationError, match="language 'rust' only supports kind 'function'"):
         ProblemFile.model_validate(_file(1, language="rust", kind="operations",
                                          function_name=None, class_name="C"))
-    with pytest.raises(ValidationError, match="language 'rust' does not support a ListNode"):
-        ProblemFile.model_validate(_file(1, language="rust",
-                                         params=[{"name": "head", "type": "ListNode"}]))
+
+
+@pytest.mark.parametrize("node_type", ["ListNode", "TreeNode", "List[ListNode]", "List[TreeNode]"])
+def test_rust_accepts_the_list_and_tree_codecs(node_type):
+    """prelude.rs `nodes` implements these, so a Rust variant may declare them
+    (as a param or the return type) and the workspace draws its samples."""
+    ProblemFile.model_validate(_file(1, language="rust", params=[{"name": "x", "type": node_type}]))
+    ProblemFile.model_validate(_file(1, language="rust", return_type=node_type))
+
+
+@pytest.mark.parametrize("language,node_type", [
+    ("rust", "GraphNode"), ("rust", "CyclicListNode"), ("rust", "RandomListNode"),
+    ("js", "ListNode"), ("js", "TreeNode"),
+])
+def test_a_language_refuses_node_types_its_harness_lacks(language, node_type):
+    with pytest.raises(ValidationError, match=f"language '{language}' does not support the '{node_type}'"):
+        ProblemFile.model_validate(_file(1, language=language, params=[{"name": "x", "type": node_type}]))
+    with pytest.raises(ValidationError, match=f"does not support the '{node_type}'"):
+        ProblemFile.model_validate(_file(1, language=language, return_type=node_type))
 
 
 def test_rust_memory_limit_must_leave_room_for_rustc():
@@ -470,3 +486,49 @@ def test_rust_budget_reserves_the_compile_timeout_with_margin():
     assert profile_for("rust").startup_slack_s > RUST_COMPILE_TIMEOUT_S
     assert jb.wall_budget_s(1, 2000, "rust") == pytest.approx(
         2 + jb.WALL_CLOCK_SLACK_S + RUST_COMPILE_TIMEOUT_S + 2)
+
+
+def test_return_type_literal_is_every_node_type_but_iterator():
+    """One list of node types (`ALL_NODE_TYPES`); the `ReturnType` Literal has to be
+    spelled out for Pydantic, so this keeps the two from drifting."""
+    from typing import get_args
+
+    from app.sandbox import ALL_NODE_TYPES, PROFILES
+    from app.schemas.problem import ReturnType
+    assert set(get_args(ReturnType)) - {""} == ALL_NODE_TYPES - {"Iterator"}
+    for profile in PROFILES.values():
+        assert profile.node_types <= ALL_NODE_TYPES
+
+
+def _rust_node_file(inp, expected, **extra):
+    return {**BODY, "language": "rust", "params": [{"name": "head", "type": "ListNode"}],
+            "return_type": "ListNode",
+            "test_cases": [{"ordinal": 0, "input": [inp], "expected": expected, "is_sample": True}],
+            **extra}
+
+
+@pytest.mark.parametrize("bad", [2**31, -(2**31) - 1, 1.5, "7", True])
+def test_rust_node_values_must_fit_an_i32(bad):
+    """Rust's node structs hold an i32; a value that doesn't fit would fail every Rust
+    submission with a decode error, so the seed refuses it."""
+    with pytest.raises(ValidationError, match=r"test case 0: head holds the node value .* integer in"):
+        ProblemFile.model_validate(_rust_node_file([1, bad], [1]))
+    with pytest.raises(ValidationError, match="the expected output holds the node value"):
+        ProblemFile.model_validate(_rust_node_file([1], [bad]))
+
+
+def test_rust_node_values_at_the_i32_edges_load_and_python_takes_anything():
+    ProblemFile.model_validate(_rust_node_file([2**31 - 1, -(2**31)], []))
+    python = {**BODY, "params": [{"name": "head", "type": "ListNode"}], "return_type": "ListNode",
+              "test_cases": [{"ordinal": 0, "input": [["a", 2**40]], "expected": [], "is_sample": True}]}
+    ProblemFile.model_validate(python)
+
+
+def test_rust_node_values_are_checked_in_each_any_of_option_and_tree_nulls_are_fine():
+    tree = {**BODY, "language": "rust", "params": [{"name": "root", "type": "TreeNode"}],
+            "return_type": "TreeNode", "comparison": {"mode": "any_of"},
+            "test_cases": [{"ordinal": 0, "input": [[1, None, 2]], "expected": [[1], [2]], "is_sample": True}]}
+    ProblemFile.model_validate(tree)
+    tree["test_cases"][0]["expected"] = [[1], [2**40]]
+    with pytest.raises(ValidationError, match="the expected output holds the node value"):
+        ProblemFile.model_validate(tree)

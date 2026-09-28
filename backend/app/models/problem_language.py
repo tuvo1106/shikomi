@@ -30,8 +30,10 @@ class ProblemLanguage(Base, PKMixin, TimestampMixin):
       one is set follows the problem's `kind`, checked by `ProblemIn` for every
       variant (a CHECK can't read `problems.kind` from here).
     * `params` / `return_type` are per language too: the `type` strings are
-      display hints in that language (`list[int]`, `Vec<i32>`) and, for Python,
-      also the codec names (`ListNode`, …) the harness decodes with.
+      display hints in that language (`list[int]`, `Vec<i32>`), except the codec
+      names (`ListNode`, …), which the harness decodes with (Python), or which make
+      the glue define that node struct (Rust). `SandboxProfile.node_types` lists
+      each language's.
     * `note_md` is a short language-specific addendum to the shared statement,
       e.g. "times don't fit in an `i32`" for Rust. Empty for most variants.
     """
@@ -52,8 +54,9 @@ class ProblemLanguage(Base, PKMixin, TimestampMixin):
     function_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     class_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     params: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
-    # Non-empty only for a Python function returning a node graph (`ListNode`, …):
-    # the harness flattens it back to JSON before comparing. "" = plain JSON.
+    # Non-empty only for a function returning a node graph (`ListNode`, …), in a
+    # language with that codec: the harness flattens it back to JSON before
+    # comparing. "" = plain JSON.
     return_type: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
     note_md: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
 
