@@ -402,10 +402,6 @@ slice ships, delete its entry here.
   --profile minimal` build on `debian:slim`). A dedicated `compile_error` verdict would
   suit every language at once, not just Rust. The node structs fix `val: i32`, as
   LeetCode's do; a problem that needs other values needs a generic or second node type.
-  **k8s payload:** the Rust harness reads `JUDGE_PAYLOAD_FILE` but doesn't delete it, so on
-  the k8s runner a submission (same uid) can still open `expected` at the fixed path. Python
-  and JS now delete it (ADR-0006); the writable-`emptyDir` groundwork is already in place, so
-  Rust just needs the parent to `fs::remove_file` the payload right after reading it.
 
 - **Multi-language follow-ups** ([ADR-0005](docs/adr/0005-multi-language-problems.md)):
   per-language `time_limit_ms` (limits are shared today, so they're calibrated to the
