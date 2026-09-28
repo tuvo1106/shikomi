@@ -13,6 +13,8 @@ from typing import Literal
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.sandbox import PROFILES
+
 
 # The dev default is public (it's in the repo), so anyone could mint tokens for any
 # user against a deployment that kept it. `Settings` refuses it under ENV=prod.
@@ -62,18 +64,24 @@ class Settings(BaseSettings):
     jwt_access_ttl_seconds: int = 900
     jwt_refresh_ttl_seconds: int = 2_592_000
 
-    judge_image: str = "shikomi-judge:latest"
+    judge_image: str = PROFILES["python"].default_image
     # Sandbox image for `language="js"` problems (DESIGN.md §13) — a separate
     # node:slim-based image (judge/Dockerfile.js), selected per submission by
-    # worker/judging.py's `IMAGE_BY_LANGUAGE` instead of the single Python image.
-    judge_image_js: str = "shikomi-judge-js:latest"
+    # its sandbox profile (app/sandbox.py) instead of the single Python image.
+    judge_image_js: str = PROFILES["js"].default_image
+    # Sandbox image for `language="rust"` problems (DESIGN.md §13, docs/adr/
+    # 0004-rust-judge-compile-in-sandbox.md): the Rust toolchain plus a
+    # prebuilt harness (judge/Dockerfile.rust). It compiles the submission inside
+    # the sandbox, so it's the one image whose /tmp is mounted `exec`
+    # (its profile in app/sandbox.py).
+    judge_image_rust: str = PROFILES["rust"].default_image
     # Sandbox image for `language="mysql"` problems (DESIGN.md §13,
     # docs/adr/0002-sql-judge-engine-mysql-vs-mariadb.md) — a MariaDB-based
     # image (judge/Dockerfile.sql-mysql) that boots an ephemeral database
     # server per submission, unlike the two stateless-interpreter images
-    # above. Needs a larger `--tmpfs` than they do (worker/judging.py's
-    # TMPFS_SIZE_MB_BY_LANGUAGE) to fit MariaDB's data directory.
-    judge_image_sql: str = "shikomi-judge-sql:latest"
+    # above. Needs a larger `--tmpfs` than they do (its profile in
+    # app/sandbox.py) to fit MariaDB's data directory.
+    judge_image_sql: str = PROFILES["mysql"].default_image
     judge_max_concurrency: int = 4
     # How the worker runs a judge sandbox: `docker` shells `docker run` against the
     # host daemon (compose / single VPS); `k8s` launches a per-submission Pod via

@@ -1,0 +1,30 @@
+# Rust judge sandbox image (DESIGN.md §5.5, §13; ADR-0004). The toolchain is
+# the only thing installed: no crates (the sandbox runs with --network=none), and
+# the same lockdown posture as the other judge images.
+FROM rust:1-slim
+
+# Everything a submission links against is built here, once, so the
+# per-submission compile only touches the user's code and ~5 lines of glue:
+#   libshikomi_prelude.rlib  the JSON core + FromJson/ToJson (harness_rs/prelude.rs)
+#   /opt/judge/harness       the trusted driver (harness_rs/harness.rs), -O2
+COPY harness_rs/prelude.rs harness_rs/harness.rs /opt/judge/src/
+RUN mkdir -p /opt/judge/lib \
+ && rustc --edition 2024 --crate-type lib --crate-name shikomi_prelude \
+      -C opt-level=1 -C overflow-checks=on -C debuginfo=0 \
+      -o /opt/judge/lib/libshikomi_prelude.rlib /opt/judge/src/prelude.rs \
+ && rustc --edition 2024 -C opt-level=2 -C strip=symbols \
+      -L /opt/judge/lib --extern shikomi_prelude=/opt/judge/lib/libshikomi_prelude.rlib \
+      -o /opt/judge/harness /opt/judge/src/harness.rs \
+ # Link the real toolchain binary at a fixed path the harness calls directly
+ # (harness.rs `RUSTC`). Plain `rustc` on PATH is rustup's proxy shim, since the base
+ # image puts /usr/local/cargo/bin first, and the shim re-resolves the toolchain on
+ # every call. The image pins exactly one toolchain, so nothing needs the proxy.
+ && ln -sf "$(rustc --print sysroot)/bin/rustc" /usr/local/bin/rustc \
+ && useradd -m -u 1000 runner
+
+# rustc writes its intermediate objects to TMPDIR; /tmp is the only writable
+# path (a tmpfs, mounted `exec` for this image only; docker_runner.build_run_args).
+ENV TMPDIR=/tmp
+USER runner
+WORKDIR /home/runner
+ENTRYPOINT ["/opt/judge/harness"]

@@ -11,6 +11,10 @@ _CASE_STATUS = {
     "wrong_answer": "wrong_answer",
     "runtime_error": "runtime_error",
     "time_limit_exceeded": "time_limit_exceeded",
+    # Per-case only from the Rust harness, which runs each case in its own
+    # process under RLIMIT_AS (ADR-0004). The other harnesses can't attribute
+    # an OOM to one case; theirs surfaces as the container-level exit 137 below.
+    "memory_limit_exceeded": "memory_limit_exceeded",
 }
 
 

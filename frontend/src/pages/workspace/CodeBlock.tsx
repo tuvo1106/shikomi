@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { PrismLight as SyntaxHighlighter } from 'react-syntax-highlighter'
 import python from 'react-syntax-highlighter/dist/esm/languages/prism/python'
 import javascript from 'react-syntax-highlighter/dist/esm/languages/prism/javascript'
+import rust from 'react-syntax-highlighter/dist/esm/languages/prism/rust'
 import sql from 'react-syntax-highlighter/dist/esm/languages/prism/sql'
 import { oneDark, oneLight } from 'react-syntax-highlighter/dist/esm/styles/prism'
 import { useTheme } from '../../lib/theme'
@@ -9,9 +10,15 @@ import type { Language } from '../../api/types'
 
 SyntaxHighlighter.registerLanguage('python', python)
 SyntaxHighlighter.registerLanguage('javascript', javascript)
+SyntaxHighlighter.registerLanguage('rust', rust)
 SyntaxHighlighter.registerLanguage('sql', sql)
 
-const PRISM_LANGUAGE: Record<Language, string> = { python: 'python', js: 'javascript', mysql: 'sql' }
+const PRISM_LANGUAGE: Record<Language, string> = {
+  python: 'python',
+  js: 'javascript',
+  rust: 'rust',
+  mysql: 'sql',
+}
 
 /**
  * Read-only syntax-highlighted code block (theme-aware), with an optional copy

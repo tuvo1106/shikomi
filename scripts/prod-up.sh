@@ -16,10 +16,11 @@ fi
 # The worker launches judge sandboxes via `docker run` on the host daemon, so the
 # judge images must live on the host (not inside a compose service). Build them
 # here; the worker (host socket mounted) then finds them by tag. Must match
-# JUDGE_IMAGE / JUDGE_IMAGE_JS / JUDGE_IMAGE_SQL.
-echo "▶ building judge images (shikomi-judge:latest, shikomi-judge-js:latest, shikomi-judge-sql:latest)"
+# JUDGE_IMAGE / JUDGE_IMAGE_JS / JUDGE_IMAGE_RUST / JUDGE_IMAGE_SQL.
+echo "▶ building judge images (shikomi-judge:latest, shikomi-judge-js:latest, shikomi-judge-rust:latest, shikomi-judge-sql:latest)"
 docker build -t shikomi-judge:latest judge/
 docker build -f judge/Dockerfile.js -t shikomi-judge-js:latest judge/
+docker build -f judge/Dockerfile.rust -t shikomi-judge-rust:latest judge/
 docker build -f judge/Dockerfile.sql-mysql -t shikomi-judge-sql:latest judge/
 
 . scripts/_local_secrets.sh   # ENV=prod needs real JWT/TOTP secrets; kept stable across runs

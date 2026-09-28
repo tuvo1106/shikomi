@@ -24,9 +24,19 @@ import { SuccessModal } from './SuccessModal'
 import { ResultsBody } from './Results'
 
 // Monaco's built-in language id and the header's human label, per problem
-// `language` (DESIGN.md §13) — one place to add a fourth language later.
-const MONACO_LANGUAGE: Record<Language, string> = { python: 'python', js: 'javascript', mysql: 'sql' }
-const LANGUAGE_LABEL: Record<Language, string> = { python: 'Python3', js: 'JavaScript', mysql: 'MySQL' }
+// `language` (DESIGN.md §13) — one place to add another language later.
+const MONACO_LANGUAGE: Record<Language, string> = {
+  python: 'python',
+  js: 'javascript',
+  rust: 'rust',
+  mysql: 'sql',
+}
+const LANGUAGE_LABEL: Record<Language, string> = {
+  python: 'Python3',
+  js: 'JavaScript',
+  rust: 'Rust',
+  mysql: 'MySQL',
+}
 
 /**
  * The problem-solving screen: description/solutions/submissions on the left, the

@@ -62,6 +62,15 @@ def test_per_case_tle_mapping():
     assert aggregate(cr(), [{"status": "time_limit_exceeded", "runtime_ms": 2000}]).status == "time_limit_exceeded"
 
 
+def test_per_case_mle_mapping():
+    # Only the Rust harness reports this per case (RLIMIT_AS per case process);
+    # it must not fall through to judge_error as an unknown status.
+    v = aggregate(cr(), [{"status": "passed", "runtime_ms": 1},
+                         {"status": "memory_limit_exceeded", "runtime_ms": 30}])
+    assert v.status == "memory_limit_exceeded"
+    assert (v.passed, v.total) == (1, 2)
+
+
 def test_oom_takes_precedence_over_results():
     v = aggregate(cr(exit_code=137), [{"status": "passed", "runtime_ms": 1}])
     assert v.status == "memory_limit_exceeded"

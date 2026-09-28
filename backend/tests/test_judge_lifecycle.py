@@ -46,7 +46,8 @@ def test_the_job_timeout_bound_is_exact_at_its_edge():
 
 
 @pytest.mark.parametrize("limit_ms,language", [(500, "python"), (2000, "python"), (6000, "js"),
-                                               (30_000, "python"), (2000, "mysql")])
+                                               (30_000, "python"), (2000, "mysql"),
+                                               (2000, "rust")])
 def test_max_cases_always_agrees_with_fits_job_timeout(limit_ms, language):
     most = jb.max_cases_within_job_timeout(limit_ms, language)
     assert most == 0 or jb.fits_job_timeout(most, limit_ms, language)
@@ -437,3 +438,33 @@ async def test_enqueue_judge_uses_the_submission_id_as_the_job_id_on_the_judge_q
     assert created.calls == [(("judge_submission", "sub-1", "submit"),
                               {"_job_id": "sub-1", "_queue_name": default_queue_name})]
 
+
+
+# --- language rules the Rust judge relies on (ADR-0004) ---------------------------------------
+
+def test_rust_is_function_mode_only_like_js():
+    with pytest.raises(ValidationError, match="language 'rust' only supports kind 'function'"):
+        ProblemFile.model_validate(_file(1, language="rust", kind="operations",
+                                         function_name=None, class_name="C"))
+    with pytest.raises(ValidationError, match="language 'rust' does not support a ListNode"):
+        ProblemFile.model_validate(_file(1, language="rust",
+                                         params=[{"name": "head", "type": "ListNode"}]))
+
+
+def test_rust_memory_limit_must_leave_room_for_rustc():
+    """rustc runs inside the submission's own memory limit, so a Rust problem
+    can't declare less than the compiler needs."""
+    with pytest.raises(ValidationError, match="memory_limit_mb >= 128"):
+        ProblemFile.model_validate(_file(1, language="rust", memory_limit_mb=64))
+    ProblemFile.model_validate(_file(1, language="rust", memory_limit_mb=128))
+    ProblemFile.model_validate(_file(1, language="python", memory_limit_mb=64))  # unaffected
+
+
+def test_rust_budget_reserves_the_compile_timeout_with_margin():
+    # The worker sends RUST_COMPILE_TIMEOUT_S as the harness's rustc deadline; the wall
+    # budget must cover all of it (plus harness startup) or a slow compile would read
+    # as a whole-run TLE.
+    from app.sandbox import RUST_COMPILE_TIMEOUT_S, profile_for
+    assert profile_for("rust").startup_slack_s > RUST_COMPILE_TIMEOUT_S
+    assert jb.wall_budget_s(1, 2000, "rust") == pytest.approx(
+        2 + jb.WALL_CLOCK_SLACK_S + RUST_COMPILE_TIMEOUT_S + 2)

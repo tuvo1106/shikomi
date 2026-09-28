@@ -18,6 +18,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, model_validator
 
 from app.judge_budget import fits_job_timeout, max_cases_within_job_timeout
+from app.sandbox import profile_for
 from app.schemas.solution import SolutionIn
 
 UserStatus = Literal["solved", "attempted", "unsolved"]
@@ -57,10 +58,12 @@ Kind = Literal["function", "operations", "sql"]
 # "operations" problem's constructor params too, but never to a method call's own args/
 # return. "js": judged by judge/harness.js under Node (DESIGN.md §13) —
 # function-mode only, no "operations" kind and no ListNode/TreeNode codecs on
-# that path at all. "mysql": judged by judge/harness_sql.py against an
+# that path at all. "rust": compiled by rustc and judged by judge/harness_rs/
+# (DESIGN.md §13, docs/adr/0004-rust-judge-compile-in-sandbox.md), with the same
+# function-mode-only scope as "js". "mysql": judged by judge/harness_sql.py against an
 # ephemeral MariaDB instance (DESIGN.md §13, docs/adr/0002-sql-judge-engine-
 # mysql-vs-mariadb.md) — always paired with kind="sql", never any other kind.
-Language = Literal["python", "js", "mysql"]
+Language = Literal["python", "js", "rust", "mysql"]
 
 
 class ParamSpec(BaseModel):
@@ -184,23 +187,38 @@ class ProblemIn(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def _js_requires_function_kind(self) -> "ProblemIn":
-        # judge/harness.js only implements function mode (DESIGN.md §13) — no
-        # "operations" kind, no ListNode/TreeNode codecs. Reject the combination
-        # here rather than letting it surface as a confusing runtime_error from
-        # the JS harness on every submission.
-        if self.language == "js" and self.kind != "function":
-            raise ValueError("language 'js' only supports kind 'function'")
-        if self.language == "js" and self.return_type:
-            raise ValueError("language 'js' does not support a ListNode/TreeNode return_type")
-        if self.language == "js" and any(
+    def _function_mode_only_languages(self) -> "ProblemIn":
+        # judge/harness.js and judge/harness_rs/ only implement function mode
+        # (DESIGN.md §13): no "operations" kind, no ListNode/TreeNode codecs.
+        # Reject the combination here rather than letting it surface as a
+        # confusing runtime_error from the harness on every submission.
+        if not profile_for(self.language).function_mode_only:
+            return self
+        lang = self.language
+        if self.kind != "function":
+            raise ValueError(f"language '{lang}' only supports kind 'function'")
+        if self.return_type:
+            raise ValueError(f"language '{lang}' does not support a ListNode/TreeNode return_type")
+        if any(
             p.type in (
                 "ListNode", "TreeNode", "List[ListNode]", "List[TreeNode]",
                 "CyclicListNode", "RandomListNode", "GraphNode", "Iterator",
             )
             for p in self.params
         ):
-            raise ValueError("language 'js' does not support a ListNode/TreeNode param type")
+            raise ValueError(f"language '{lang}' does not support a ListNode/TreeNode param type")
+        return self
+
+    @model_validator(mode="after")
+    def _memory_fits_the_sandbox(self) -> "ProblemIn":
+        # A language can need a floor under memory_limit_mb: Rust's rustc compiles
+        # the submission inside the same limit (~75MB peak, ADR-0004), so below its
+        # profile's floor a problem could fail to *compile* on the judge.
+        floor = profile_for(self.language).min_memory_limit_mb
+        if self.memory_limit_mb < floor:
+            raise ValueError(
+                f"language '{self.language}' needs memory_limit_mb >= {floor}: "
+                "its judge's own work (rustc, for Rust) runs inside the same limit")
         return self
 
     @model_validator(mode="after")

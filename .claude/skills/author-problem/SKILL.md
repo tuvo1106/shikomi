@@ -52,6 +52,21 @@ it and returns a JSON-safe result, point `function_name` at the driver, and say
 so in `statement_md`. A Promise return is awaited. Give real-timer cases
 generous margins (a 50ms debounce window against a 500ms+ `time_limit_ms`).
 
+**Rust** (`"language": "rust"`) is function mode only too, with the same limits
+as JS. The harness compiles the submission with the user's own function
+signature and **infers each argument's Rust type from it**, so there's no type
+table: parameters can be integers (`i32`/`i64`/`u8`…`usize`), `f64`, `bool`,
+`char` (a one-character string), `String`, `Vec<T>`, `Option<T>` (`null` =
+`None`), `HashMap`/`BTreeMap<String, V>` (JSON objects), or tuples of 2–4
+elements (fixed-length arrays), all nested freely. Parameters must be **owned**
+(`Vec<i32>`, `String`), never borrowed (`&[i32]`, `&str`). Returns take the same
+types plus `()` (→ `null`). A type outside that list fails to *compile*, and
+the reference-solution run in step 5 catches it. Integer overflow **panics**
+(overflow checks are on), so pick `i64` wherever a sum or product can pass
+2^31. `memory_limit_mb` must be at least 128, because rustc compiles inside the
+same limit. Each case runs in a fresh process, so statics don't carry over
+between cases.
+
 **In-place mutation isn't observable.** The judge never inspects mutated
 arguments. A "modify the array in place" problem returns the resulting array
 instead, and the statement says so.
@@ -87,6 +102,10 @@ the references.
   which also drive decoding.
 - JS `starter_code` uses `var funcName = function(args) {\n    \n};`, and `params`
   use JS-ish names (`"number[]"`).
+- Rust `starter_code` is a free function, not LeetCode's `impl Solution`:
+  `fn func_name(nums: Vec<i32>, k: i32) -> i64 {\n    todo!()\n}\n`. `function_name`
+  is snake_case, and `params` types are the Rust types, which are display-only
+  (the signature is what's decoded against).
 - `operations` problems set `"kind": "operations"` and `"class_name"`, omit
   `function_name`/`return_type`, and give `starter_code` a class skeleton.
 - `sql` problems omit `function_name`/`class_name`/`params`/`return_type`
@@ -216,7 +235,8 @@ their `*_reason` fields, written with real prose depth.
 2. **Real harness**: from the repo root, run
    `SEED_DIR=<dir> .venv/bin/pytest judge/tests/test_seed_solutions.py -k <slug> -v --durations=0`.
    This runs every shipped solution against every case and shows per-case timing.
-   SQL problems need the built `shikomi-judge-sql` image and are docker-marked.
+   SQL and Rust problems need their built images (`shikomi-judge-sql`,
+   `shikomi-judge-rust`) and are docker-marked, so add `-m docker` for them.
 3. **Judge budget**: `ProblemFile` rejects a problem whose worst-case run
    (`cases × time_limit_ms` plus slack) wouldn't finish inside the worker's job
    timeout (`app/judge_budget.py`). The error names the maximum case count.

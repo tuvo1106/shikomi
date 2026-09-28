@@ -15,7 +15,7 @@ class Problem(Base, PKMixin, TimestampMixin):
 
     * `slug` — the stable, URL-friendly id used in routes (`/problems/design-vending-machine`);
       unique. `title` is the display name and can change without breaking links.
-    * `language` — `"python"` (default), `"js"`, or `"mysql"`; selects which
+    * `language` — `"python"` (default), `"js"`, `"rust"`, or `"mysql"`; selects which
       harness/sandbox image judges the submission (DESIGN.md §13). Independent
       of `kind` in general, but `"mysql"` always pairs with `kind="sql"` and
       nothing else (enforced in `ProblemIn`, backstopped below).
@@ -78,7 +78,7 @@ class Problem(Base, PKMixin, TimestampMixin):
             "(kind = 'sql' AND function_name IS NULL AND class_name IS NULL)",
             name="ck_problems_kind_name_consistency",
         ),
-        CheckConstraint("language IN ('python', 'js', 'mysql')", name="ck_problems_language"),
+        CheckConstraint("language IN ('python', 'js', 'rust', 'mysql')", name="ck_problems_language"),
         # kind='sql' and language='mysql' always travel together — see the
         # `language`/`kind` docstring bullets above. Backstops ProblemIn's
         # `_sql_kind_and_language_are_paired` validator at the DB level.
@@ -107,11 +107,13 @@ class Problem(Base, PKMixin, TimestampMixin):
     statement_md: Mapped[str] = mapped_column(Text, nullable=False)
     # "python" (default): the harness (judge/harness.py) compiles/execs the
     # submission with CPython. "js": judge/harness.js runs it under Node's `vm`
-    # module instead. "mysql": judge/harness_sql.py runs it as a query against
+    # module instead. "rust": judge/harness_rs/ compiles it with rustc and runs
+    # each case in its own process (docs/adr/0004-rust-judge-compile-in-
+    # sandbox.md). "mysql": judge/harness_sql.py runs it as a query against
     # an ephemeral MariaDB instance (docs/adr/0002-sql-judge-engine-mysql-vs-
-    # mariadb.md) — a different sandbox image either way (worker/judging.py's
-    # IMAGE_BY_LANGUAGE), same protocol/verdict shape (DESIGN.md §13). Only
-    # "function"-kind problems support "js"; "mysql" only ever pairs with
+    # mariadb.md) — a different sandbox image either way (its profile in
+    # app/sandbox.py), same protocol/verdict shape (DESIGN.md §13). Only
+    # "function"-kind problems support "js"/"rust"; "mysql" only ever pairs with
     # kind="sql".
     language: Mapped[str] = mapped_column(Text, nullable=False, server_default="python")
     kind: Mapped[str] = mapped_column(Text, nullable=False, server_default="function")

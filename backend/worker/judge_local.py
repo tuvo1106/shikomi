@@ -1,9 +1,12 @@
 """Offline judge CLI: run one sandbox payload and print the verdict (DESIGN.md §5.2).
 
-    python -m worker.judge_local payload.json               # real Docker sandbox
-    python -m worker.judge_local --subprocess payload.json   # run harness.py directly (dev, no Docker)
+    python -m worker.judge_local payload.json                   # real Docker sandbox
+    python -m worker.judge_local --language rust payload.json   # another language's sandbox
+    python -m worker.judge_local --subprocess payload.json       # run harness.py directly (dev, no Docker)
 
-The payload file is the sandbox payload described in DESIGN.md §5.2.
+The payload file is the sandbox payload described in DESIGN.md §5.2. `--language` picks the
+sandbox profile (app/sandbox.py): its image, unless `--image` overrides it, plus its tmpfs
+size and `exec` flag, which the Rust harness can't run without.
 """
 import argparse
 import asyncio
@@ -11,6 +14,7 @@ import json
 import pathlib
 import sys
 
+from app.sandbox import profile_for
 from worker import docker_runner
 from worker.aggregate import Verdict, aggregate, parse_harness_output
 
@@ -18,9 +22,12 @@ HARNESS = pathlib.Path(__file__).resolve().parents[2] / "judge" / "harness.py"
 
 
 async def _run_docker(payload_json, args):
+    profile = profile_for(args.language)
     result = await docker_runner.run_in_container(
         payload_json,
-        image=args.image,
+        image=args.image or profile.default_image,
+        tmpfs_size_mb=profile.tmpfs_size_mb,
+        tmpfs_exec=profile.tmpfs_exec,
         container_name="judge-local",
         memory_mb=args.memory_mb,
         cpus=args.cpus,
@@ -73,7 +80,8 @@ def main(argv=None):
     p.add_argument("payload", type=pathlib.Path, help="sandbox payload JSON file")
     p.add_argument("--subprocess", action="store_true",
                    help="run harness.py directly instead of via Docker")
-    p.add_argument("--image", default="shikomi-judge:latest")
+    p.add_argument("--language", default="python", help="python, js, rust or mysql")
+    p.add_argument("--image", default=None, help="override the language's default image")
     p.add_argument("--memory-mb", type=int, default=256)
     p.add_argument("--cpus", default="1")
     p.add_argument("--pids-limit", type=int, default=64)

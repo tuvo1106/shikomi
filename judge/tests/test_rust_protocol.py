@@ -1,0 +1,454 @@
+"""Harness protocol tests for the Rust harness (DESIGN.md §5.3, §13; ADR-0004).
+
+The same behavioral contract as test_protocol.py and test_js_protocol.py,
+plus the failure modes only a compiled language has: compile errors, stack
+overflow, allocation failure, `process::exit`, integer overflow. The last few
+tests pin the per-case process isolation that contains them: one case's crash
+must never cost another case its result.
+
+Docker-marked: the harness needs rustc and the prebuilt prelude, which only
+the image has (rust_runner.py). Build it first:
+
+    docker build -f judge/Dockerfile.rust -t shikomi-judge-rust:latest judge/
+"""
+import json
+import time
+
+import pytest
+
+from rust_runner import run_rust_container, rust_results
+
+pytestmark = pytest.mark.docker
+
+TRUNC_MAX = 4096 + len("…(truncated)")
+
+
+def payload(user_code, test_cases, function_name="f", comparison=None, time_limit_ms=2000,
+            stop_on_first_failure=False, params=None, memory_limit_mb=256, kind=None):
+    pl = {
+        "function_name": function_name,
+        "user_code": user_code,
+        "test_cases": test_cases,
+        "comparison": comparison or {"mode": "exact"},
+        "time_limit_ms": time_limit_ms,
+        "memory_limit_mb": memory_limit_mb,
+        "stop_on_first_failure": stop_on_first_failure,
+        "params": params if params is not None else [],
+    }
+    if kind:
+        pl["kind"] = kind
+    return pl
+
+
+def case(i, inp, expected):
+    return {"id": i, "input": inp, "expected": expected}
+
+
+PAIR_SUM = """use std::collections::HashMap;
+
+fn pair_sum(nums: Vec<i32>, target: i32) -> Vec<i32> {
+    let mut seen: HashMap<i32, i32> = HashMap::new();
+    for (i, &n) in nums.iter().enumerate() {
+        if let Some(&j) = seen.get(&(target - n)) {
+            return vec![j, i as i32];
+        }
+        seen.insert(n, i as i32);
+    }
+    vec![]
+}
+"""
+PAIR_SUM_PARAMS = [{"name": "nums", "type": "Vec<i32>"}, {"name": "target", "type": "i32"}]
+
+
+def test_correct_solution_all_pass():
+    res = rust_results(payload(PAIR_SUM, [
+        case(0, [[4, 9, 1, 6], 7], [2, 3]),
+        case(1, [[3, 3], 6], [0, 1]),
+    ], function_name="pair_sum", params=PAIR_SUM_PARAMS))
+    assert [r["status"] for r in res] == ["passed", "passed"]
+    assert res[0]["output"] == "[2,3]"  # compact JSON, like the other harnesses
+    assert res[0]["test_case_id"] == 0 and res[0]["error"] is None
+    assert isinstance(res[0]["runtime_ms"], float)
+
+
+def test_wrong_answer():
+    res = rust_results(payload("fn f(x: i32) -> i32 { x + 1 }", [case(0, [1], 3)]))
+    assert res[0]["status"] == "wrong_answer"
+    assert res[0]["output"] == "2"
+
+
+def test_compile_error_is_single_runtime_error_with_diagnostics():
+    # Like harness.py's SyntaxError: one row, no case runs, rustc's message names
+    # the user's line (the glue sits *after* their code, so line numbers match).
+    res = rust_results(payload("fn f(x: i32) -> i32 {\n    let s: String = x;\n    0\n}\n",
+                               [case(0, [1], 0), case(1, [2], 0)]))
+    assert len(res) == 1
+    assert res[0]["status"] == "runtime_error"
+    assert res[0]["error"].startswith("Compile error:")
+    assert "mismatched types" in res[0]["error"]
+    assert "solution.rs:2:" in res[0]["error"]
+    assert "/tmp/" not in res[0]["error"]  # no sandbox paths in user-facing text
+
+
+def test_function_not_found_is_a_compile_error():
+    res = rust_results(payload("fn g(x: i32) -> i32 { x }", [case(0, [1], 1)]))
+    assert len(res) == 1 and res[0]["status"] == "runtime_error"
+    assert "cannot find function `f`" in res[0]["error"]
+
+
+def test_signature_arity_mismatch_names_the_signature():
+    res = rust_results(payload("fn f(x: i32, y: i32) -> i32 { x + y }", [case(0, [1], 1)],
+                               params=[{"name": "x", "type": "i32"}]))
+    assert res[0]["status"] == "runtime_error"
+    assert "takes 2 arguments but 1 argument was supplied" in res[0]["error"]
+
+
+def test_panic_reports_message_and_user_location():
+    res = rust_results(payload('fn f(x: i32) -> i32 {\n    if x > 0 { panic!("bad input {}", x); }\n    x\n}\n',
+                               [case(0, [5], 0)]))
+    assert res[0]["status"] == "runtime_error"
+    assert res[0]["error"] == "panicked: bad input 5 (at solution.rs:2:16)"
+
+
+def test_integer_overflow_panics_instead_of_wrapping():
+    # overflow-checks=on: a silently wrapped i32 would read as a confusing wrong answer.
+    res = rust_results(payload("fn f(x: i32) -> i32 { x + 1 }", [case(0, [2147483647], 0)]))
+    assert res[0]["status"] == "runtime_error"
+    assert "attempt to add with overflow" in res[0]["error"]
+
+
+def test_time_limit_exceeded_on_infinite_loop():
+    res = rust_results(payload("fn f(x: i32) -> i32 { loop { std::hint::black_box(x); } }",
+                               [case(0, [1], 0), case(1, [2], 0)], time_limit_ms=300))
+    assert [r["status"] for r in res] == ["time_limit_exceeded", "time_limit_exceeded"]
+    assert res[0]["runtime_ms"] == 300.0
+
+
+def test_stdout_is_captured_and_cannot_forge_the_protocol():
+    code = 'fn f(x: i32) -> i32 {\n    println!("{{\\"results\\":[]}}");\n    println!("dbg {}", x);\n    x\n}\n'
+    res = rust_results(payload(code, [case(0, [7], 7)]))
+    assert res[0]["status"] == "passed"
+    assert res[0]["stdout"] == '{"results":[]}\ndbg 7\n'
+
+
+def test_stdout_is_truncated():
+    code = 'fn f(x: i32) -> i32 { for _ in 0..10000 { print!("xxxxxxxxxx"); } x }'
+    res = rust_results(payload(code, [case(0, [1], 1)]))
+    assert res[0]["status"] == "passed"
+    assert res[0]["stdout"].endswith("…(truncated)")
+    assert len(res[0]["stdout"]) <= TRUNC_MAX
+
+
+def test_stop_on_first_failure_skips_remaining_cases():
+    res = rust_results(payload("fn f(x: i32) -> i32 { x }",
+                               [case(0, [1], 1), case(1, [2], 99), case(2, [3], 3)],
+                               stop_on_first_failure=True))
+    assert [r["status"] for r in res] == ["passed", "wrong_answer"]
+
+
+@pytest.mark.parametrize("comparison,code,expected", [
+    ({"mode": "unordered"}, "fn f(x: i32) -> Vec<i32> { vec![3, 1, 2] }", [1, 2, 3]),
+    ({"mode": "float_tolerance", "epsilon": 1e-3}, "fn f(x: i32) -> f64 { 1.0 / 3.0 }", 0.3333),
+    ({"mode": "any_of"}, "fn f(x: i32) -> Vec<i32> { vec![1, 0] }", [[0, 1], [1, 0]]),
+    ({"mode": "exact"}, "fn f(x: i32) -> f64 { 2.0 }", 2),  # JSON 2 == 2.0, as in harness.py
+])
+def test_comparison_modes(comparison, code, expected):
+    res = rust_results(payload(code, [case(0, [0], expected)], comparison=comparison))
+    assert res[0]["status"] == "passed", res[0]
+
+
+def test_unordered_is_a_multiset_not_a_set():
+    res = rust_results(payload("fn f(x: i32) -> Vec<i32> { vec![1, 1, 2] }",
+                               [case(0, [0], [1, 2, 2])], comparison={"mode": "unordered"}))
+    assert res[0]["status"] == "wrong_answer"
+
+
+def test_argument_types_are_inferred_from_the_signature():
+    # No type table: rustc infers each decoded argument from the user's own
+    # parameter types (prelude.rs), so all of these just work.
+    code = """
+fn f(grid: Vec<Vec<char>>, words: Vec<String>, pair: (i64, bool), maybe: Option<u8>, ratio: f64)
+    -> (usize, String, Vec<Option<i64>>, f64) {
+    let joined = words.join("-");
+    let _ = (grid[0][1], maybe);
+    (grid.len(), joined, vec![Some(pair.0), None], ratio * 2.0)
+}
+"""
+    res = rust_results(payload(code, [case(
+        0,
+        [[["a", "b"], ["c", "d"]], ["héllo", "wörld 🚀"], [9007199254740993, True], None, 1.25],
+        [2, "héllo-wörld 🚀", [9007199254740993, None], 2.5],
+    )], params=[{"name": n, "type": "?"} for n in "abcde"]))
+    assert res[0]["status"] == "passed", res[0]
+    # i64 beyond 2^53 survives exactly (Int, not f64), and whole floats print as floats
+    assert res[0]["output"] == '[2,"héllo-wörld 🚀",[9007199254740993,null],2.5]'
+
+
+def test_type_the_prelude_cannot_decode_fails_at_compile_time():
+    # The flip side of inference: an unsupported parameter type is a compile
+    # error naming the missing FromJson impl, caught when the problem's own
+    # reference solution is judged (test_seed_solutions.py), not at submit time.
+    code = "use std::collections::HashSet;\nfn f(s: HashSet<i32>) -> usize { s.len() }"
+    res = rust_results(payload(code, [case(0, [[1, 2]], 2)]))
+    assert res[0]["status"] == "runtime_error"
+    assert "FromJson` is not implemented for `HashSet<i32>`" in res[0]["error"]
+
+
+def test_unit_return_encodes_as_null():
+    res = rust_results(payload("fn f(x: i32) { let _ = x; }", [case(0, [1], None)]))
+    assert res[0]["status"] == "passed"
+    assert res[0]["output"] == "null"
+
+
+def test_argument_that_does_not_fit_the_type_is_a_runtime_error():
+    res = rust_results(payload("fn f(x: u8) -> u8 { x }", [case(0, [300], 0), case(1, ["s"], 0)]))
+    assert res[0]["status"] == "runtime_error"
+    assert "argument 1: 300 is out of range for u8" in res[0]["error"]
+    assert "argument 1: expected u8, got \"s\"" in res[1]["error"]
+
+
+def test_unsupported_kind_is_reported_not_crashed():
+    res = rust_results(payload("struct C;", [case(3, [[], []], [])], kind="operations"))
+    assert res == [{
+        "test_case_id": 3, "status": "runtime_error", "runtime_ms": 0.0, "output": None,
+        "stdout": "", "error": "kind 'operations' is not supported by the Rust harness",
+    }]
+
+
+def test_function_name_that_is_not_an_identifier_is_refused():
+    # function_name is pasted into generated source, so it must be a plain
+    # identifier. A bad one is a problem-authoring fault, not the submitter's, so
+    # the harness exits without results (the worker reports judge_error).
+    proc = run_rust_container(json.dumps(payload("fn f() {}", [case(0, [], None)],
+                                                 function_name="f(); std::process::exit(0); g")))
+    assert proc.returncode == 3 and proc.stdout == ""
+    assert "invalid function_name" in proc.stderr
+
+
+def test_invalid_payload_json_exits_nonzero():
+    proc = run_rust_container("{not json")
+    assert proc.returncode == 2
+    assert "invalid payload JSON" in proc.stderr
+
+
+# --- per-case process isolation (ADR-0004) -----------------------------------
+# Each of these would, in a single shared process, lose *every* case's result.
+
+HOSTILE = """
+fn deep(n: u64) -> u64 {
+    let pad = [n; 64];
+    std::hint::black_box(&pad);
+    if n == 0 { 0 } else { deep(n - 1).wrapping_add(pad[3]) }
+}
+
+fn f(mode: i32) -> i32 {
+    match mode {
+        1 => { let mut v: Vec<Vec<u8>> = Vec::new(); loop { v.push(vec![1u8; 1 << 20]); } }
+        2 => deep(1 << 40) as i32,
+        3 => std::process::exit(0),
+        4 => std::process::abort(),
+        _ => mode,
+    }
+}
+"""
+
+
+def test_each_failure_is_contained_to_its_own_case():
+    res = rust_results(payload(HOSTILE, [
+        case(0, [0], 0),
+        case(1, [1], 0),
+        case(2, [2], 0),
+        case(3, [3], 0),
+        case(4, [4], 0),
+        case(5, [5], 5),
+    ], memory_limit_mb=256))
+    by_id = {r["test_case_id"]: r for r in res}
+    assert by_id[0]["status"] == "passed"
+    assert by_id[1]["status"] == "memory_limit_exceeded"  # RLIMIT_AS, not the container OOM
+    assert by_id[2]["status"] == "runtime_error"
+    assert "stack overflow" in by_id[2]["error"]
+    assert by_id[3]["status"] == "runtime_error"
+    assert "exited (code 0) before returning" in by_id[3]["error"]
+    assert by_id[4]["status"] == "runtime_error"
+    assert by_id[4]["error"].startswith("aborted")
+    assert by_id[5]["status"] == "passed"  # the run survived everything above
+
+
+def test_recursion_depth_typical_of_dfs_fits_the_stack():
+    # 10^5-deep recursion is routine in tree/graph solutions; the harness raises the
+    # case's stack limit to 64MB so it doesn't need rewriting as an explicit stack.
+    code = "fn depth(n: u64) -> u64 { if n == 0 { 0 } else { 1 + depth(n - 1) } }\nfn f(n: u64) -> u64 { depth(n) }"
+    res = rust_results(payload(code, [case(0, [100000], 100000)]))
+    assert res[0]["status"] == "passed", res[0]
+
+
+def test_one_case_mutating_state_does_not_leak_into_the_next():
+    # A static is per-process, so a fresh process per case resets it.
+    code = """
+use std::sync::atomic::{AtomicI32, Ordering};
+static CALLS: AtomicI32 = AtomicI32::new(0);
+fn f(x: i32) -> i32 { CALLS.fetch_add(1, Ordering::SeqCst) + x }
+"""
+    res = rust_results(payload(code, [case(0, [10], 10), case(1, [20], 20)]))
+    assert [r["status"] for r in res] == ["passed", "passed"]
+
+
+def test_submission_cannot_see_expected():
+    # The child only ever receives the input; reading its own stdin again or its
+    # environment turns up no `expected` to copy.
+    code = """
+fn f(x: i32) -> String {
+    let env: Vec<String> = std::env::vars().map(|(k, v)| format!("{}={}", k, v)).collect();
+    env.join(";")
+}
+"""
+    res = rust_results(payload(code, [case(0, [1], "SECRET-EXPECTED-VALUE")]))
+    assert res[0]["status"] == "wrong_answer"
+    assert "SECRET-EXPECTED-VALUE" not in json.dumps(res[0]["output"])
+
+
+def test_processes_a_case_leaves_behind_do_not_starve_later_cases():
+    # Case 0 fills most of --pids-limit (64) with background processes and
+    # returns. The harness is PID 1, so those are reparented to it. Unless it
+    # kills each case's whole process group and reaps the orphans, their pids
+    # stay taken and later cases can't spawn (or can't even be started).
+    code = """
+fn f(n: i32) -> i32 {
+    let mut started = 0;
+    for _ in 0..n {
+        if std::process::Command::new("sleep").arg("60").spawn().is_ok() { started += 1; }
+    }
+    started
+}
+"""
+    res = rust_results(payload(code, [case(0, [55], 55), case(1, [20], 20), case(2, [20], 20)]))
+    assert [r["status"] for r in res] == ["passed", "passed", "passed"], res
+
+
+def test_a_case_cannot_read_the_payload_out_of_the_harness():
+    # The case's process runs as the same uid as the harness (PID 1), which holds
+    # the whole payload, every `expected` included. The harness marks itself
+    # non-dumpable, so same-uid /proc access to its memory and environment is
+    # refused, and the case gets a scrubbed environment of its own.
+    code = """
+fn f(_x: i32) -> String {
+    let mem = std::fs::File::open("/proc/1/mem").is_ok();
+    let environ = std::fs::read("/proc/1/environ").is_ok();
+    let mut keys: Vec<String> = std::env::vars().map(|(k, _)| k).collect();
+    keys.sort();
+    format!("mem={} environ={} env={}", mem, environ, keys.join(","))
+}
+"""
+    res = rust_results(payload(code, [case(0, [1], "SECRET-EXPECTED-VALUE")]))
+    assert res[0]["output"] == '"mem=false environ=false env=HOME,PATH,SHIKOMI_RESULT,TMPDIR"'
+
+
+def test_large_input_to_a_program_that_never_reads_it_still_times_out_per_case():
+    # A static constructor runs before `main`, so the program never reads stdin.
+    # With a >64KB input the pipe fills and the write blocks; the harness has to
+    # be enforcing the deadline *during* that write, or it hangs until the
+    # container's outer wall-clock kill and every per-case result is lost.
+    code = """
+extern "C" fn stall() { loop { std::hint::black_box(0); } }
+#[used]
+#[unsafe(link_section = ".init_array")]
+static STALL: extern "C" fn() = stall;
+
+fn f(v: Vec<i64>) -> usize { v.len() }
+"""
+    big = list(range(40_000))  # ~230KB of JSON
+    res = rust_results(payload(code, [case(0, [big], 0), case(1, [big], 0)], time_limit_ms=300),
+                       timeout=30)
+    assert [r["status"] for r in res] == ["time_limit_exceeded", "time_limit_exceeded"]
+
+
+def test_integers_past_2_53_are_not_rounded_into_equality():
+    # 9007199254740993 isn't representable as f64 and rounds to ...992. Comparing
+    # through `as f64` would call this wrong answer correct.
+    res = rust_results(payload("fn f(_x: i32) -> i64 { 9007199254740993 }",
+                               [case(0, [0], 9007199254740992.0), case(1, [0], 9007199254740993)]))
+    assert [r["status"] for r in res] == ["wrong_answer", "passed"]
+
+
+def test_compile_timeout_comes_from_the_payload():
+    # The worker sends compile_timeout_s from app/judge_budget.py, the same number
+    # the wall budget reserves. Allowing `long_running_const_eval` stops rustc from
+    # giving up on this 2^40-step const loop by itself, so only the harness's 1s
+    # deadline can end the compile, and the harness must still report cleanly
+    # (rustc and any linker it started are killed as a group).
+    code = """#![allow(long_running_const_eval)]
+const fn spin(n: u64) -> u64 { let mut i = 0; let mut s = 0; while i < n { s += i; i += 1; } s }
+const X: u64 = spin(1u64 << 40);
+fn f(_x: i32) -> u64 { X }
+"""
+    pl = payload(code, [case(0, [0], 0)])
+    pl["compile_timeout_s"] = 1
+    res = rust_results(pl)
+    assert res[0]["status"] == "runtime_error"
+    assert res[0]["error"] == "Compilation timed out after 1s"
+
+
+# --- review round 2 ------------------------------------------------------------
+
+
+def test_unordered_compare_of_a_large_answer_stays_fast():
+    # The comparison runs untimed, bounded only by the worker's outer wall clock.
+    # An O(n^2) multiset match took ~6s at 100k elements and could turn a correct
+    # answer into a whole-run TLE (harness.py hit and fixed the same bug).
+    n = 100_000
+    code = f"fn f(_x: i32) -> Vec<i64> {{ (0..{n}).rev().collect() }}"
+    started = time.monotonic()
+    res = rust_results(payload(code, [case(0, [0], list(range(n)))],
+                               comparison={"mode": "unordered"}))
+    assert res[0]["status"] == "passed"
+    assert time.monotonic() - started < 4
+
+
+def test_unordered_still_treats_1_and_1_0_as_equal():
+    res = rust_results(payload("fn f(_x: i32) -> Vec<f64> { vec![2.0, 1.0] }",
+                               [case(0, [0], [1, 2])], comparison={"mode": "unordered"}))
+    assert res[0]["status"] == "passed"
+
+
+def test_output_larger_than_tmp_does_not_fail_a_correct_solution():
+    # 40MB of prints against a 32MB /tmp. Output is captured through pipes and
+    # truncated, so nothing lands in the tmpfs and the answer still counts.
+    code = """
+fn f(x: i32) -> i32 {
+    let chunk = "x".repeat(1 << 20);
+    for _ in 0..40 { print!("{}", chunk); }
+    x
+}
+"""
+    res = rust_results(payload(code, [case(0, [7], 7)], time_limit_ms=10000))
+    assert res[0]["status"] == "passed", res[0]
+    assert res[0]["stdout"].endswith("…(truncated)")
+
+
+def test_nan_and_infinity_are_values_not_crashes():
+    code = "fn f(x: i32) -> f64 { if x == 0 { f64::INFINITY } else { f64::NAN } }"
+    res = rust_results(payload(code, [case(0, [0], float("inf")), case(1, [1], 1.0)],
+                               comparison={"mode": "float_tolerance", "epsilon": 1e-9}))
+    assert [r["status"] for r in res] == ["passed", "wrong_answer"]
+    assert res[1]["output"] == "NaN"
+
+
+def test_user_code_may_define_main_and_shadow_ok():
+    # Keeping a `main` for local testing is common, and so is a `use MyEnum::*`
+    # whose variants include `Ok`. Neither may collide with the judge's glue.
+    code = """
+#[derive(Debug)]
+enum Verdict { Ok, Bad }
+use Verdict::*;
+
+fn f(x: i32) -> String {
+    let v = if x > 0 { Ok } else { Bad };
+    format!("{:?}", v)
+}
+
+fn main() {
+    println!("{}", f(1));
+}
+"""
+    res = rust_results(payload(code, [case(0, [1], "Ok"), case(1, [0], "Bad")]))
+    assert [r["status"] for r in res] == ["passed", "passed"], res

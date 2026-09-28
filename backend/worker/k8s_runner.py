@@ -214,7 +214,8 @@ def _delete_run(name):
 
 
 async def run_in_container(payload_json, *, image, container_name,
-                           memory_mb, cpus, pids_limit, wall_timeout_s, tmpfs_size_mb=16):
+                           memory_mb, cpus, pids_limit, wall_timeout_s, tmpfs_size_mb=16,
+                           tmpfs_exec=False):
     """Run one submission in a per-submission Pod; returns a ContainerResult.
 
     Signature mirrors `docker_runner.run_in_container` so `worker.runner` can swap
@@ -222,6 +223,10 @@ async def run_in_container(payload_json, *, image, container_name,
     (it's a node/runtime setting), so it's accepted for interface parity and
     enforced at the node/gVisor layer instead. `tmpfs_size_mb` *is* a real per-Pod
     field (the `tmp` emptyDir's `size_limit`) and is honored, not just accepted.
+    `tmpfs_exec` is accepted for parity only: an emptyDir has no `noexec` mount
+    option, so /tmp is already executable in every judge Pod. That's looser
+    than docker's default for Python/JS/SQL, and the Rust image depends on it
+    (ADR-0004).
     """
     # Registered for the pod's whole lifetime so `sweep_orphans` can't mistake
     # it for an orphan while it's still ours — see `_active`'s docstring.

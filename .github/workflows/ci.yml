@@ -73,6 +73,7 @@ jobs:
       - run: pip install pytest
       - run: docker build -t shikomi-judge:latest judge/
       - run: docker build -f judge/Dockerfile.js -t shikomi-judge-js:latest judge/
+      - run: docker build -f judge/Dockerfile.rust -t shikomi-judge-rust:latest judge/
       - run: docker build -f judge/Dockerfile.sql-mysql -t shikomi-judge-sql:latest judge/
       - run: pytest -m docker
 
@@ -153,6 +154,7 @@ jobs:
         run: |
           docker build -t shikomi-judge:latest judge/
           docker build -f judge/Dockerfile.js -t shikomi-judge-js:latest judge/
+          docker build -f judge/Dockerfile.rust -t shikomi-judge-rust:latest judge/
           docker build -f judge/Dockerfile.sql-mysql -t shikomi-judge-sql:latest judge/
       - name: Migrate + seed
         working-directory: backend
@@ -252,6 +254,7 @@ jobs:
         run: |
           docker build -t shikomi-judge:latest judge/
           docker build -f judge/Dockerfile.js -t shikomi-judge-js:latest judge/
+          docker build -f judge/Dockerfile.rust -t shikomi-judge-rust:latest judge/
           docker build -f judge/Dockerfile.sql-mysql -t shikomi-judge-sql:latest judge/
       - name: Migrate + seed (incl. the verified dev user the specs sign in as)
         working-directory: backend

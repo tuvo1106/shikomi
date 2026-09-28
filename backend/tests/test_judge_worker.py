@@ -4,6 +4,7 @@ Unit tests mock run_judgement so they need no Docker; the docker-marked test at
 the bottom exercises the whole job against a real container.
 """
 import asyncio
+import json
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -124,7 +125,7 @@ async def test_run_judgement_dispatches_sql_language_to_its_image_and_tmpfs(monk
     """language="mysql" must resolve to the SQL sandbox image and its larger
     tmpfs (DESIGN.md §13, docs/adr/0002-sql-judge-engine-mysql-vs-mariadb.md)
     — not silently fall through to the python defaults the way an unrecognized
-    language would (`_image_for`'s documented fallback)."""
+    language would (`profile_for`'s documented fallback)."""
     from worker import judging as judging_mod
 
     captured = {}
@@ -145,7 +146,7 @@ async def test_run_judgement_dispatches_sql_language_to_its_image_and_tmpfs(monk
 
     assert captured["image"] == judging_mod.settings.judge_image_sql
     assert captured["tmpfs_size_mb"] == 32
-    # WALL_CLOCK_SLACK_S (10) + STARTUP_SLACK_S_BY_LANGUAGE["mysql"] (2) + 1 case * 2s
+    # WALL_CLOCK_SLACK_S (10) + the mysql profile's startup_slack_s (2) + 1 case * 2s
     assert captured["wall_timeout_s"] == pytest.approx(2 + 10 + 2)
 
 
@@ -172,7 +173,42 @@ async def test_run_judgement_python_language_keeps_existing_defaults(monkeypatch
 
     assert captured["image"] == judging_mod.settings.judge_image
     assert captured["tmpfs_size_mb"] == 16
+    assert captured["tmpfs_exec"] is False
     assert captured["wall_timeout_s"] == pytest.approx(2 + 10)
+
+
+async def test_run_judgement_dispatches_rust_to_its_image_with_an_exec_tmpfs(monkeypatch):
+    """language="rust" needs its own image, a 32MB tmpfs mounted `exec` (the
+    harness runs the binary it compiles there), the compile timeout in its wall
+    budget, and memory_limit_mb in the payload for the per-case RLIMIT_AS
+    (ADR-0004)."""
+    from worker import judging as judging_mod
+
+    captured = {}
+
+    async def fake_run_in_container(payload, **kwargs):
+        captured.update(kwargs, payload=json.loads(payload))
+        return ContainerResult(
+            stdout='{"results": []}', stderr="", exit_code=0,
+            timed_out=False, stdout_truncated=False)
+
+    monkeypatch.setattr(judging_mod.runner, "run_in_container", fake_run_in_container)
+
+    await judging_mod.run_judgement(
+        code="fn f(x: i32) -> i32 { x }", comparison={"mode": "exact"}, time_limit_ms=2000,
+        memory_limit_mb=256, test_cases=[{"id": 0, "input": [1], "expected": 1}],
+        container_name="judge-test-rs", function_name="f", language="rust",
+    )
+
+    assert captured["image"] == judging_mod.settings.judge_image_rust
+    assert captured["tmpfs_size_mb"] == 32
+    assert captured["tmpfs_exec"] is True
+    # WALL_CLOCK_SLACK_S (10) + the rust profile's startup_slack_s (10 + 2) + 1 case * 2s
+    assert captured["wall_timeout_s"] == pytest.approx(2 + 10 + 12)
+    assert captured["payload"]["memory_limit_mb"] == 256
+    # The harness's compile deadline comes from the same constant the budget reserves.
+    from app.sandbox import RUST_COMPILE_TIMEOUT_S
+    assert captured["payload"]["compile_timeout_s"] == RUST_COMPILE_TIMEOUT_S
 
 
 async def _make_pending(session_factory, user_id, problem_id, code="x", is_run=False):
