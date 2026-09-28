@@ -1,6 +1,6 @@
 # ADR-0006: The interpreted harnesses run the submission in a child process
 
-- **Status:** Accepted: implemented in `judge/harness.py`, `judge/harness.js`, `backend/worker/aggregate.py`, and `backend/worker/k8s_runner.py`
+- **Status:** Accepted: implemented in `judge/harness.py`, `judge/harness.js`, `judge/harness_rs/harness.rs` (the k8s payload delete), `backend/worker/aggregate.py`, and `backend/worker/k8s_runner.py`
 - **Date:** 2026-09-28
 
 ## Context
@@ -66,9 +66,14 @@ Give the Python and JS harnesses the Rust harness's shape: a **trusted parent** 
   malformed or partial report can never read as "every case passed".
 - **Kubernetes payload.** The k8s runner used to mount the payload as a read-only ConfigMap file
   in the judge container, which the harness therefore couldn't delete before running the
-  submission — leaving `expected` readable at a fixed path. An init container now copies it into a
-  writable `emptyDir` the judge mounts instead, and the parent unlinks it before any user code
-  runs (as it already does for the stdin path). That `emptyDir` is node-backed, **not**
+  submission — leaving `expected` readable at a fixed path to a same-uid case process (the Rust
+  harness runs each case as the same uid too, so it had this gap even though it always isolated
+  the case). An init container now copies it into a writable `emptyDir` the judge mounts instead,
+  and the parent unlinks it before any user code runs (as it already does for the stdin path);
+  all three harnesses — Python, JS and Rust — do this, and **fail closed**: if the delete fails
+  they refuse the run as a judge fault rather than grade with `expected` still readable (the
+  emptyDir is world-writable and the parent owns the file, so this never fires in practice — it
+  guards a future misconfiguration). That `emptyDir` is node-backed, **not**
   `medium: Memory`: a tmpfs emptyDir's bytes are charged to the judge container's memory cgroup,
   which would silently shrink the `memory_limit_mb` a submission is graded under. The payload
   holds only `expected` (not a secret) and is gone before the submission's peak memory is

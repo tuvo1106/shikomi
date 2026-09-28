@@ -77,6 +77,54 @@ fn f(_x: i32) -> String {
     assert _first(run_rust_container(_payload(code)))["status"] == "passed"
 
 
+def _run_with_payload_file(payload_json):
+    """Deliver the payload the way the k8s runner does — as a file the harness
+    reads via JUDGE_PAYLOAD_FILE — instead of on stdin, so the parent's
+    read-then-unlink path runs. A shell wrapper writes stdin to /tmp/payload.json
+    (the writable tmpfs, since the root FS is read-only), points the harness at
+    it, and execs the real entrypoint."""
+    import subprocess
+    import uuid
+    sys.path.insert(0, str(BACKEND))
+    from app.sandbox import profile_for
+    from worker.docker_runner import build_run_args
+
+    profile = profile_for("rust")
+    # A unique name (not a fixed one) so a leftover container from a crashed
+    # prior run can't collide with `--name` and fail us on infra, not behavior.
+    container_name = "judge-rust-payload-%s" % uuid.uuid4().hex[:8]
+    base = build_run_args(image=IMAGE, container_name=container_name, memory_mb=256,
+                          cpus="1", pids_limit=64, tmpfs_size_mb=profile.tmpfs_size_mb,
+                          tmpfs_exec=profile.tmpfs_exec)
+    wrapper = ("cat > /tmp/payload.json && "
+               "JUDGE_PAYLOAD_FILE=/tmp/payload.json exec /opt/judge/harness")
+    args = base[:-1] + ["--entrypoint", "sh", IMAGE, "-c", wrapper]
+    try:
+        return subprocess.run(args, input=payload_json, capture_output=True, text=True, timeout=60)
+    finally:
+        # `--rm` cleans up on a normal exit; force-remove in case the run was killed.
+        subprocess.run(["docker", "rm", "-f", container_name], capture_output=True)
+
+
+def test_k8s_payload_file_is_deleted_before_the_submission_runs():
+    # On the k8s runner the payload is a file at a fixed path in a volume the
+    # case's process shares (same uid), so a submission could otherwise hardcode
+    # that path and read every hidden case's `expected` out of it. The parent
+    # reads the file and unlinks it before any case runs (mirroring harness.py/js;
+    # ADR-0006), so by the time the submission runs the path is gone.
+    code = """
+fn f(_x: i32) -> String {
+    match std::fs::read_to_string("/tmp/payload.json") {
+        Ok(_) => "leaked".into(),   // still readable → the gap is open
+        Err(_) => "blocked".into(), // deleted before we ran
+    }
+}
+"""
+    proc = _run_with_payload_file(_payload(code))
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout)["results"][0]["status"] == "passed"
+
+
 def test_tmp_is_noexec_without_the_rust_flag():
     # Regression guard for the reason `tmpfs_exec` exists: under Docker's default
     # noexec tmpfs the compiled program can't start. That's a judge fault, not the

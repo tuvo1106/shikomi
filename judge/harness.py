@@ -1198,8 +1198,14 @@ def main():
             raw = fh.read()
         try:
             os.unlink(payload_file)
-        except OSError:
-            pass
+        except OSError as exc:
+            # Fail closed: if we can't delete the payload we can't guarantee the
+            # child can't read `expected` back at the fixed path, so refuse the run
+            # (a judge-side fault, no report) rather than grade with it readable.
+            # The k8s emptyDir is world-writable and we own the file, so this never
+            # fires in practice; it guards against a future misconfiguration.
+            sys.stderr.write("harness: could not remove payload file: %s\n" % exc)
+            sys.exit(3)
     else:
         raw = sys.stdin.read()
     try:

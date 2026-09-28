@@ -75,10 +75,12 @@ All notable changes to this project are recorded here. The format follows
   accepted without solving the problem. Now the harness parent holds the expected answers and
   writes the report, while the submission runs in a child process that receives only the
   inputs and whose output goes to a private channel — so pass/fail is decided from an expected
-  the submission never sees, and it can't reach the report. Rust already worked this way; SQL
-  is unaffected. The worker also refuses a report that doesn't have one row per test case, and
-  on Kubernetes the payload is copied into a volume the harness deletes before running the
-  submission. See [ADR-0006](docs/adr/0006-harness-process-isolation.md).
+  the submission never sees, and it can't reach the report. Rust already isolated each case in
+  its own process; SQL is unaffected. The worker also refuses a report that doesn't have one
+  row per test case, and on Kubernetes the payload is copied into a volume that every harness
+  — Python, JavaScript and Rust — reads and then deletes before running the submission, so it
+  can't be read back off disk at the fixed path. See
+  [ADR-0006](docs/adr/0006-harness-process-isolation.md).
 
 ### Fixed
 

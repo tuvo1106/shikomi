@@ -34,10 +34,11 @@
 //!    its `/proc/1/environ` (readable without it; `/proc/1/mem` was already
 //!    refused by Docker's defaults, measured).
 //!    On k8s the payload arrives as a file (JUDGE_PAYLOAD_FILE) rather than on
-//!    stdin, but an init container copies it into a writable volume, so the
-//!    runner mounts a file the harness could delete before running the
-//!    submission if it needed to; this harness never exposes it to a case's
-//!    process anyway (the child gets only the input, over stdin).
+//!    stdin, at a fixed path in a volume the case's process shares (same uid).
+//!    An init container copies it into a *writable* volume, so this parent reads
+//!    it and then unlinks it up front (see `main`), before any case's process
+//!    runs — otherwise a submission could hardcode that path and read `expected`
+//!    even though the path never appears in a case's env.
 //!
 //! Limits applied to each case's process: wall time `time_limit_ms` (enforced
 //! here, with SIGKILL), address space `memory_limit_mb` (`RLIMIT_AS`, so an
@@ -1035,7 +1036,35 @@ fn main() {
     // runtime's (defense in depth).
     unsafe { prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) };
     let raw = match std::env::var("JUDGE_PAYLOAD_FILE") {
-        Ok(path) => fs::read_to_string(path),
+        Ok(path) => {
+            // Read the payload, then immediately unlink it. On k8s it's a file at
+            // a fixed path in a volume the case's process shares (same uid), so a
+            // submission could otherwise hardcode that path and read every hidden
+            // case's `expected` back out of it — not being in the case's env
+            // (CASE_ENV) doesn't hide the path. The parent has the payload in
+            // memory by now and the per-case children get their input over stdin,
+            // never this file, so deleting it costs nothing. This mirrors what
+            // harness.py/js do on their k8s path (ADR-0006). On the Docker path
+            // the payload arrives on stdin, so there's no file to remove.
+            let contents = match fs::read_to_string(&path) {
+                Ok(c) => c,
+                Err(e) => {
+                    // A judge-side I/O fault, not a malformed payload — say so.
+                    eprintln!("harness: could not read payload file: {}", e);
+                    std::process::exit(3);
+                }
+            };
+            // Fail closed: if we read a real payload but can't delete it, we can't
+            // guarantee `expected` is out of a case's reach, so refuse the run
+            // rather than grade every case with it still readable at the fixed
+            // path. The k8s emptyDir is world-writable and we own the file, so this
+            // never fires in practice; it guards against a future misconfiguration.
+            if let Err(e) = fs::remove_file(&path) {
+                eprintln!("harness: could not remove payload file: {}", e);
+                std::process::exit(3);
+            }
+            Ok(contents)
+        }
         Err(_) => {
             let mut s = String::new();
             std::io::stdin().read_to_string(&mut s).map(|_| s)
