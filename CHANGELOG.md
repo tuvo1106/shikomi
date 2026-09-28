@@ -8,6 +8,8 @@ All notable changes to this project are recorded here. The format follows
 
 ### Fixed
 
+- Python problems using `float_tolerance` now accept an infinite answer that matches an
+  infinite expected value (it was graded wrong, because `inf - inf` is NaN).
 - The account menu (and its Sign out) no longer opens behind the code editor in the
   workspace.
 

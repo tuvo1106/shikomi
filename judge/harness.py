@@ -538,7 +538,10 @@ def _float_equal(a, b, eps):
     if _is_number(a) and _is_number(b):
         if math.isnan(a) and math.isnan(b):
             return True
-        return abs(a - b) <= eps
+        # Exact equality first: inf - inf is NaN, which no tolerance accepts, but an
+        # infinite answer matching an infinite expectation is right. Opposite
+        # infinities fall through to abs(-inf - inf) = inf > eps, as they should.
+        return a == b or abs(a - b) <= eps
     if isinstance(a, list) and isinstance(b, list):
         return len(a) == len(b) and all(_float_equal(x, y, eps) for x, y in zip(a, b))
     return a == b

@@ -753,3 +753,17 @@ def test_graphnode_return_encoder_is_cycle_safe():
                  return_type="GraphNode")
     res = results(pl)
     assert res[0]["status"] == "wrong_answer"
+
+
+def test_float_tolerance_accepts_matching_infinities():
+    # inf - inf is NaN, and NaN <= eps is False, so a plain tolerance check
+    # rejects an infinite answer that exactly matches an infinite expectation
+    # (a "no path exists" distance, say). Opposite infinities must still differ.
+    tol = {"mode": "float_tolerance", "epsilon": 1e-9}
+    code = "def f(x):\n    return [float('inf'), float('-inf')][x]\n"
+    res = results(payload(code, [case(0, [0], float("inf")), case(1, [1], float("inf"))],
+                          comparison=tol))
+    assert [r["status"] for r in res] == ["passed", "wrong_answer"]
+    nested = "def f(x):\n    return [1.0, float('inf')]\n"
+    assert results(payload(nested, [case(0, [0], [1.0, float("inf")])],
+                           comparison=tol))[0]["status"] == "passed"
