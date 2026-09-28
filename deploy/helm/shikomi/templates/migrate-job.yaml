@@ -24,28 +24,28 @@ spec:
         - name: wait-postgres
           image: {{ .Values.postgres.image }}
           command: ["sh", "-c", "until pg_isready -h postgres -U {{ .Values.postgres.user }}; do echo waiting for postgres; sleep 2; done"]
+        # The problems ship as their own image (scripts/k8s-up.sh builds it from
+        # PROBLEMS_DIR; an operator pushes theirs to a registry), and this copies them
+        # into the emptyDir app.cli seed reads. An image has no size cap, unlike the
+        # 1MiB ConfigMap this replaced, and it versions the problem set like any
+        # other deployable.
+        - name: copy-problems
+          image: {{ .Values.images.seed }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          command: ["sh", "-c", "cp /problems/*.json /seed/problems/"]
+          volumeMounts:
+            - { name: seed, mountPath: /seed/problems }
       containers:
         - name: migrate
           image: {{ .Values.images.api }}
           imagePullPolicy: {{ .Values.images.pullPolicy }}
-          # The problems arrive as one gzipped tarball (a ConfigMap caps at 1MiB, and
-          # problem JSON is far smaller compressed; scripts/k8s-up.sh builds it), so
-          # unpack it into the writable emptyDir app.cli seed reads before seeding.
-          command:
-            - sh
-            - -c
-            - tar -xzf /seed-archive/problems.tgz -C /seed/problems && alembic upgrade head && python -m app.cli seed
+          command: ["sh", "-c", "alembic upgrade head && python -m app.cli seed"]
           envFrom:
             - configMapRef: { name: shikomi-config }
             - secretRef: { name: shikomi-secret }
           volumeMounts:
-            # Seed JSON lives at the repo root (outside the image); the deploy
-            # script publishes it as this ConfigMap, as problems.tgz.
-            - { name: seed-archive, mountPath: /seed-archive, readOnly: true }
-            # app.cli seed reads /seed/problems, extracted here by the command above.
+            # app.cli seed reads /seed/problems, filled by the copy-problems init container.
             - { name: seed, mountPath: /seed/problems }
       volumes:
-        - name: seed-archive
-          configMap: { name: shikomi-seed }
         - name: seed
           emptyDir: {}

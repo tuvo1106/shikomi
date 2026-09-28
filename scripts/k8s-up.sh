@@ -68,32 +68,27 @@ for img in shikomi-api:local shikomi-worker:local shikomi-web:local shikomi-judg
   kind load docker-image --name "$CLUSTER" "$img"
 done
 
-# 3. Seed data → ConfigMap (the JSON lives at the repo root, outside the image).
-#    Published as ONE gzipped tarball, not a key per file: a ConfigMap caps at 1MiB,
-#    and problem JSON (big hidden test cases) outgrows that long before it outgrows
-#    what it compresses to — the bundled starters are ~2MB raw, ~0.45MB gzipped.
-#    The migrate hook extracts it into /seed/problems before seeding. Server-side
-#    apply, because client-side apply's last-applied annotation caps at 256KB, and
-#    because it updates in place: a rejected update leaves the old ConfigMap intact,
-#    where delete-then-create would leave none. PROBLEMS_DIR swaps in an operator's
-#    own problems.
-echo "▶ publishing problems as a ConfigMap (gzipped tarball)"
-SEED_TGZ=$(mktemp)
-trap 'rm -f "$SEED_TGZ"' EXIT
-# COPYFILE_DISABLE: stop macOS tar adding AppleDouble "._*" entries for extended
-# attributes (they'd land in the extracted dir next to the real files).
-( cd "$PROBLEMS_DIR" && COPYFILE_DISABLE=1 tar -czf "$SEED_TGZ" -- *.json )
-# The ConfigMap stores the archive base64-encoded (4/3 larger), so ~780KB of archive
-# is the most that fits under 1MiB. Fail here with a useful message, not as an
-# opaque API rejection.
-SEED_BYTES=$(wc -c < "$SEED_TGZ" | tr -d ' ')
-if [ "$SEED_BYTES" -gt 780000 ]; then
-  echo "problems archive is ${SEED_BYTES} bytes gzipped; a ConfigMap holds ~780000." >&2
-  echo "A problem set this large needs another carrier (see the AGENTS.md TODO)." >&2
-  exit 1
+# 3. Seed data → an image (the JSON lives at the repo root, outside the app images).
+#    A tiny image holding PROBLEMS_DIR/*.json at /problems, which the migrate hook's
+#    init container copies out before seeding. It replaced a ConfigMap, which caps at
+#    1MiB: problem JSON with big hidden test cases outgrew even a gzipped tarball of
+#    it. The tag is a hash of the files, so a changed problem set is a new image the
+#    release picks up, and an unchanged one is neither rebuilt nor reloaded.
+echo "▶ building the problems image from $PROBLEMS_DIR"
+# Names and contents both go into the hash (a renamed file is a changed set).
+# sha256sum on Linux, shasum on macOS.
+SHA256=$(command -v sha256sum || echo "shasum -a 256")
+SEED_TAG=$( (cd "$PROBLEMS_DIR" && for f in *.json; do printf '%s\n' "$f"; cat -- "$f"; done) | $SHA256 | cut -c1-12)
+SEED_IMAGE="shikomi-seed:$SEED_TAG"
+if ! docker image inspect "$SEED_IMAGE" >/dev/null 2>&1; then
+  # The Dockerfile comes from stdin, so PROBLEMS_DIR itself is the build context and
+  # an operator's problem directory needs nothing added to it.
+  printf 'FROM busybox:1.36\nCOPY *.json /problems/\n' \
+    | docker build -q -t "$SEED_IMAGE" -f - "$PROBLEMS_DIR" >/dev/null
 fi
-kubectl create configmap shikomi-seed --from-file=problems.tgz="$SEED_TGZ" --dry-run=client -o yaml \
-  | kubectl apply --server-side --force-conflicts -f - >/dev/null
+kind load docker-image --name "$CLUSTER" "$SEED_IMAGE"
+# The ConfigMap earlier versions of this script published; nothing reads it now.
+kubectl delete configmap shikomi-seed --ignore-not-found >/dev/null
 
 # 4. Optional: KEDA (event-driven autoscaling for the worker)
 HELM_ARGS=()
@@ -110,6 +105,7 @@ fi
 # 5. Release
 . scripts/_local_secrets.sh   # the api refuses the dev secrets under ENV=prod; stable across runs
 HELM_ARGS+=(--set "secrets.jwtSecret=$JWT_SECRET" --set "secrets.totpEncryptionKey=$TOTP_ENCRYPTION_KEY")
+HELM_ARGS+=(--set "images.seed=$SEED_IMAGE")
 echo "▶ helm upgrade --install"
 # ${HELM_ARGS[@]+"${HELM_ARGS[@]}"} (not "${HELM_ARGS[@]}") — macOS ships bash 3.2,
 # where `set -u` treats expanding an empty array as an unbound variable. This
