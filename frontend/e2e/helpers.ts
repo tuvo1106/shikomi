@@ -19,9 +19,9 @@ export const SOLVE_PROBLEM: { slug: string; title: string } = {
   slug: SOLVE_SEED.slug,
   title: SOLVE_SEED.title,
 }
-export const SOLVE_CORRECT: string = SOLVE_SEED.solutions[0].code
-// The single-language shorthand: its one language's fields sit at the top level.
-export const SOLVE_WRONG: string = SOLVE_SEED.starter_code
+// Python, the problem's default language (`languages[0]`), which the workspace opens in.
+export const SOLVE_CORRECT: string = SOLVE_SEED.solutions[0].code.python
+export const SOLVE_WRONG: string = SOLVE_SEED.languages[0].starter_code
 
 function unique(prefix: string) {
   return `${prefix}${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`
