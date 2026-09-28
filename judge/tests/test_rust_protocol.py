@@ -208,10 +208,10 @@ def test_argument_that_does_not_fit_the_type_is_a_runtime_error():
 
 
 def test_unsupported_kind_is_reported_not_crashed():
-    res = rust_results(payload("struct C;", [case(3, [[], []], [])], kind="operations"))
+    res = rust_results(payload("-- SELECT 1", [case(3, [[], []], [])], kind="sql"))
     assert res == [{
         "test_case_id": 3, "status": "runtime_error", "runtime_ms": 0.0, "output": None,
-        "stdout": "", "error": "kind 'operations' is not supported by the Rust harness",
+        "stdout": "", "error": "kind 'sql' is not supported by the Rust harness",
     }]
 
 
@@ -855,3 +855,186 @@ def test_the_return_value_is_never_dropped():
     res = rust_results(payload(code, [case(0, [0], 1)], params=[{"name": "x", "type": "i32"}]))
     assert res[0]["status"] == "passed", res[0]
     assert "dropped" not in res[0]["stdout"]
+
+
+# --- operations mode (prelude.rs `ops`, harness.rs `operations_glue`) -------------------------
+
+def ops_payload(code, cases, class_name="Editor", params=None, **kw):
+    pl = payload(code, cases, params=params, kind="operations", **kw)
+    pl["class_name"] = class_name
+    del pl["function_name"]
+    return pl
+
+
+def ops_case(i, calls, expected, class_name="Editor"):
+    """`calls` is [(op, args), ...] after the constructor's args; the wire shape
+    is harness.py's `[ops, args]` with `ops[0]` the class name."""
+    ctor_args, *rest = calls
+    return case(i, [[class_name] + [op for op, _ in rest], [ctor_args] + [a for _, a in rest]],
+                [None] + expected)
+
+
+EDITOR = """struct Editor {
+    text: String,
+    done: Vec<String>,
+    undone: Vec<String>,
+}
+
+impl Editor {
+    fn new() -> Self {
+        Editor { text: String::new(), done: Vec::new(), undone: Vec::new() }
+    }
+
+    fn append(&mut self, s: String) -> String {
+        self.done.push(self.text.clone());
+        self.undone.clear();
+        self.text.push_str(&s);
+        self.text.clone()
+    }
+
+    fn undo(&mut self) -> String {
+        if let Some(t) = self.done.pop() {
+            self.undone.push(std::mem::replace(&mut self.text, t));
+        }
+        self.text.clone()
+    }
+
+    fn get_state(&self) -> (usize, usize) {
+        (self.done.len(), self.undone.len())
+    }
+
+    fn clear(&mut self) {
+        self.text.clear();
+    }
+}
+"""
+
+
+def test_operations_replay_passes_and_maps_op_names_to_snake_case():
+    """`getState` (the shared cases' spelling) calls `get_state`; `&self` and
+    `&mut self` methods both dispatch, and `()` encodes as null like Python's None."""
+    res = rust_results(ops_payload(EDITOR, [
+        ops_case(0, [[], ("append", ["ab"]), ("append", ["cd"]), ("undo", []), ("getState", []),
+                     ("clear", []), ("getState", [])],
+                 ["ab", "abcd", "ab", [1, 1], None, [1, 1]]),
+        ops_case(1, [[], ("undo", [])], [""]),
+    ]))
+    assert [r["status"] for r in res] == ["passed", "passed"]
+    assert res[0]["output"] == '[null,"ab","abcd","ab",[1,1],null,[1,1]]'
+
+
+def test_operations_wrong_answer_shows_every_call_result():
+    res = rust_results(ops_payload(EDITOR, [ops_case(0, [[], ("append", ["x"])], ["y"])]))
+    assert res[0]["status"] == "wrong_answer"
+    assert res[0]["output"] == '[null,"x"]'
+
+
+def test_operations_constructor_args_and_node_structs():
+    """`params` describe the constructor, as in Python: its arguments are the first
+    list, typed by `new`'s signature, and a declared node type gets its struct."""
+    code = """struct Walker { cur: Option<Box<ListNode>>, step: i64 }
+
+impl Walker {
+    fn new(head: Option<Box<ListNode>>, step: i64) -> Self { Walker { cur: head, step } }
+
+    fn next(&mut self) -> Option<i64> {
+        let node = self.cur.take()?;
+        self.cur = node.next;
+        Some(node.val as i64 * self.step)
+    }
+}
+"""
+    res = rust_results(ops_payload(code, [
+        ops_case(0, [[[1, 2], 10], ("next", []), ("next", []), ("next", [])], [10, 20, None],
+                 class_name="Walker"),
+    ], class_name="Walker", params=[{"name": "head", "type": "ListNode"}, {"name": "step", "type": "i64"}]))
+    assert res[0]["status"] == "passed", res[0]
+
+
+def test_operations_method_arguments_are_decoded_by_signature():
+    code = """use std::collections::HashMap;
+
+struct Book { prices: HashMap<String, f64> }
+
+impl Book {
+    fn new() -> Self { Book { prices: HashMap::new() } }
+    fn set(&mut self, items: Vec<(String, f64)>, scale: Option<f64>) -> usize {
+        for (k, v) in items { self.prices.insert(k, v * scale.unwrap_or(1.0)); }
+        self.prices.len()
+    }
+    fn price(&self, k: String) -> Option<f64> { self.prices.get(&k).copied() }
+}
+"""
+    res = rust_results(ops_payload(code, [ops_case(0, [
+        [], ("set", [[["a", 1.5], ["b", 2]], None]), ("set", [[["a", 1]], 3]),
+        ("price", ["a"]), ("price", ["z"]),
+    ], [2, 2, 3.0, None], class_name="Book")], class_name="Book"))
+    assert res[0]["status"] == "passed", res[0]
+
+
+def test_operations_argument_count_mismatch_is_a_runtime_error():
+    res = rust_results(ops_payload(EDITOR, [ops_case(0, [[], ("append", ["a", "b"])], ["a"])]))
+    assert res[0]["status"] == "runtime_error"
+    assert res[0]["error"] == ("could not decode the test case: `append`: takes 1 argument "
+                               "but the test case passes 2")
+
+
+def test_operations_panic_fails_only_its_case():
+    code = EDITOR.replace("fn undo(&mut self) -> String {",
+                          'fn undo(&mut self) -> String {\n        assert!(!self.done.is_empty(), "nothing to undo");')
+    res = rust_results(ops_payload(code, [
+        ops_case(0, [[], ("undo", [])], [""]),
+        ops_case(1, [[], ("append", ["a"])], ["a"]),
+    ]))
+    assert [r["status"] for r in res] == ["runtime_error", "passed"]
+    assert "nothing to undo" in res[0]["error"]
+
+
+def test_operations_method_named_like_the_case_gets_a_snake_case_hint():
+    res = rust_results(ops_payload(EDITOR.replace("fn get_state", "fn getState"),
+                                   [ops_case(0, [[], ("getState", [])], [[0, 0]])]))
+    assert res[0]["status"] == "runtime_error"
+    assert "Hint: the test cases call `getState`, which the judge calls as the Rust method " \
+           "`get_state`" in res[0]["error"]
+
+
+def test_operations_missing_constructor_gets_a_hint():
+    res = rust_results(ops_payload(EDITOR.replace("fn new()", "fn create()"),
+                                   [ops_case(0, [[], ("undo", [])], [""])]))
+    assert "Hint: the judge builds the object with `Editor::new(...)`" in res[0]["error"]
+
+
+def test_operations_method_returning_a_reference_gets_a_signature_hint():
+    code = EDITOR.replace("fn undo(&mut self) -> String {", "fn peek(&self) -> &str { &self.text }\n\n    fn undo(&mut self) -> String {")
+    res = rust_results(ops_payload(code, [ops_case(0, [[], ("peek", [])], [""])]))
+    assert res[0]["status"] == "runtime_error"
+    assert "Hint: the judge calls each method with arguments decoded" in res[0]["error"]
+
+
+def test_operations_only_dispatch_ops_the_cases_use():
+    """A Run judges only the samples, so a method no case calls needn't exist yet."""
+    res = rust_results(ops_payload(EDITOR, [ops_case(0, [[], ("append", ["a"])], ["a"])]))
+    assert res[0]["status"] == "passed"
+
+
+def test_operations_method_names_match_the_backend_mirror():
+    """harness.rs `method_name` and backend `rust_method_name` must agree, or seed
+    validation would pass an op the judge then can't dispatch (or refuse a good one).
+    Each method returns its own name, so the replay shows which one each op reached."""
+    from app.sandbox import rust_method_name
+
+    ops = ["push", "getState", "insertCoin", "toJSON", "parseHTTPHeader", "get2nd", "level2Up",
+           "already_snake", "type", "matchAll", "XMLHttp"]
+    methods = [rust_method_name(op) for op in ops]
+    body = "\n".join(f'    fn {m}(&self) -> &\'static str {{ "{m}" }}'.replace("&'static str", "String")
+                     .replace(f'"{m}" }}', f'"{m}".to_string() }}') for m in methods)
+    code = f"struct Names;\n\nimpl Names {{\n    fn new() -> Self {{ Names }}\n{body}\n}}\n"
+    res = rust_results(ops_payload(code, [ops_case(0, [[]] + [(op, []) for op in ops], methods,
+                                                   class_name="Names")], class_name="Names"))
+    assert res[0]["status"] == "passed", res[0]
+
+
+def test_operations_case_shape_errors_are_decode_errors():
+    res = rust_results(ops_payload(EDITOR, [case(0, [["Editor", "undo"], [[]]], [None, ""])]))
+    assert res[0]["status"] == "runtime_error"
+    assert "one argument list per op" in res[0]["error"]

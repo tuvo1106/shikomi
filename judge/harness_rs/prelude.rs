@@ -9,6 +9,8 @@
 //! * **the per-submission program** — the user's code plus a few lines of glue
 //!   `harness.rs` generates. Its `main` is just `__run(|a| ...)`: decode the
 //!   case's arguments, call the user's function, write the return value back.
+//!   An operations problem's glue replays a sequence of method calls instead
+//!   (the `ops` module).
 //!
 //! **No serde.** The sandbox has `--network=none`, so crates can't be fetched at
 //! judge time. Vendoring serde into the image would work, but its proc-macros
@@ -1229,4 +1231,162 @@ pub fn __entry<F: FnOnce(&[Json]) -> Result<Json, Fail>>(call: F) -> i32 {
     };
     let _ = std::io::stdout().flush();
     code
+}
+
+// --- operations mode -------------------------------------------------------------
+
+/// Operations mode (DESIGN.md §5.3): replay a sequence of calls on one object.
+///
+/// A case's input is `[ops, args]`. `ops[0]` names the class and `args[0]` holds
+/// the constructor's arguments. Each later `ops[i]` is a method called with
+/// `args[i]`. The result is the per-call list, with `null` in the constructor's
+/// slot, the same wire shape harness.py's `_run_operations` produces.
+///
+/// **No method table.** Function mode never names a parameter type, because
+/// rustc infers each `arg::<T>` from the user's signature. This module applies
+/// the same trick to a whole method. The glue writes
+/// `call(obj, super::Editor::append, "append", args)`, and the `Method` impl that
+/// matches `append`'s signature fixes the arity, every argument's type and the
+/// receiver. So a problem file doesn't have to declare method signatures, and a
+/// method with a parameter the prelude can't decode fails at *compile* time,
+/// like a bad function-mode signature.
+///
+/// The one-trait-many-impls pattern needs a marker type parameter
+/// (`Method<S, (ByMut, A, B)>`): without it, the impls for `Fn(&mut S, A)` and
+/// `Fn(&S, A)` would overlap as far as coherence can tell, although no function
+/// implements both.
+pub mod ops {
+    use super::{arg, ret, Fail, FromJson, Json, ToJson};
+
+    /// Marks a `&mut self` method in a `Method` impl's marker tuple.
+    pub struct ByMut;
+    /// Marks a `&self` method in a `Method` impl's marker tuple.
+    pub struct ByRef;
+
+    /// A constructor (`fn new(...) -> Self`) of up to six parameters, each decoded
+    /// from the case's first argument list.
+    pub trait Constructor<S, Args> {
+        fn construct(self, args: &[Json]) -> Result<S, Fail>;
+    }
+
+    /// A method of up to six parameters, taking `&mut self` or `&self`, whose
+    /// return value is encoded as that call's result. A method returning a
+    /// reference doesn't match (its return type would borrow from `self`), so
+    /// methods return owned values, as in the rest of the harness.
+    pub trait Method<S, Args> {
+        fn invoke(self, obj: &mut S, args: &[Json]) -> Result<Json, Fail>;
+    }
+
+    /// Refuses an argument list of the wrong length. The glue can't know an arity
+    /// up front (that's the user's signature), so a mismatch is found here.
+    /// Python raises a `TypeError` for the same mistake.
+    fn expect_len(args: &[Json], n: usize) -> Result<(), Fail> {
+        if args.len() == n {
+            Ok(())
+        } else {
+            let s = if n == 1 { "" } else { "s" };
+            Err(Fail::Decode(format!("takes {} argument{} but the test case passes {}", n, s, args.len())))
+        }
+    }
+
+    macro_rules! arity {
+        ($n:literal $(, $a:ident $i:literal)*) => {
+            impl<S, F, $($a: FromJson),*> Constructor<S, ($($a,)*)> for F
+            where
+                F: FnOnce($($a),*) -> S,
+            {
+                fn construct(self, _args: &[Json]) -> Result<S, Fail> {
+                    expect_len(_args, $n)?;
+                    Ok(self($(arg::<$a>(_args, $i)?),*))
+                }
+            }
+            impl<S, R: ToJson, F, $($a: FromJson),*> Method<S, (ByMut, $($a,)*)> for F
+            where
+                F: FnOnce(&mut S $(, $a)*) -> R,
+            {
+                fn invoke(self, obj: &mut S, _args: &[Json]) -> Result<Json, Fail> {
+                    expect_len(_args, $n)?;
+                    ret(self(obj $(, arg::<$a>(_args, $i)?)*))
+                }
+            }
+            impl<S, R: ToJson, F, $($a: FromJson),*> Method<S, (ByRef, $($a,)*)> for F
+            where
+                F: FnOnce(&S $(, $a)*) -> R,
+            {
+                fn invoke(self, obj: &mut S, _args: &[Json]) -> Result<Json, Fail> {
+                    expect_len(_args, $n)?;
+                    ret(self(&*obj $(, arg::<$a>(_args, $i)?)*))
+                }
+            }
+        };
+    }
+    arity!(0);
+    arity!(1, A 0);
+    arity!(2, A 0, B 1);
+    arity!(3, A 0, B 1, C 2);
+    arity!(4, A 0, B 1, C 2, D 3);
+    arity!(5, A 0, B 1, C 2, D 3, E 4);
+    arity!(6, A 0, B 1, C 2, D 3, E 4, G 5);
+
+    /// Prefixes a failure with the call it came from, so "argument 1: expected an
+    /// integer" says *which* call's argument.
+    fn at(what: &str, e: Fail) -> Fail {
+        match e {
+            Fail::Decode(m) => Fail::Decode(format!("{}: {}", what, m)),
+            Fail::Malformed(m) => Fail::Malformed(format!("{}: {}", what, m)),
+        }
+    }
+
+    /// One method call: what the glue's dispatch `match` runs for each op. `name`
+    /// is the Rust method's name, used in error messages.
+    pub fn call<S, K, M: Method<S, K>>(obj: &mut S, method: M, name: &str, args: &[Json]) -> Result<Json, Fail> {
+        method.invoke(obj, args).map_err(|e| at(&format!("`{}`", name), e))
+    }
+
+    fn arg_list<'a>(args: &'a [Json], i: usize) -> Result<&'a [Json], Fail> {
+        match args.get(i) {
+            Some(Json::Arr(a)) => Ok(a),
+            _ => Err(Fail::Decode(format!("operation {}'s arguments are not an array", i + 1))),
+        }
+    }
+
+    /// Runs a whole case. `new` is the class's constructor; `dispatch` maps a
+    /// case's op name to a `call`, or returns `None` for a name it doesn't know.
+    /// The glue generates `dispatch` from the op names the payload's cases use.
+    ///
+    /// The object is never dropped, for the same reason `ret` never drops a
+    /// return value: freeing a long linked structure recurses once per node, and
+    /// the process exits after this case anyway.
+    pub fn replay<S, K, C, D>(case: &[Json], new: C, mut dispatch: D) -> Result<Json, Fail>
+    where
+        C: Constructor<S, K>,
+        D: FnMut(&mut S, &str, &[Json]) -> Option<Result<Json, Fail>>,
+    {
+        let (ops, args) = match case {
+            [Json::Arr(ops), Json::Arr(args)] => (ops, args),
+            _ => return Err(Fail::Decode("an operations case's input must be [ops, args]".into())),
+        };
+        if ops.is_empty() || ops.len() != args.len() {
+            return Err(Fail::Decode(format!(
+                "an operations case needs one argument list per op (got {} ops, {} argument lists)",
+                ops.len(),
+                args.len()
+            )));
+        }
+        let mut obj = new.construct(arg_list(args, 0)?).map_err(|e| at("the constructor `new`", e))?;
+        let mut out = Vec::with_capacity(ops.len());
+        out.push(Json::Null);
+        for i in 1..ops.len() {
+            let op = match &ops[i] {
+                Json::Str(op) => op.as_str(),
+                other => return Err(Fail::Decode(format!("operation {} is not a name: {}", i + 1, other.dump()))),
+            };
+            match dispatch(&mut obj, op, arg_list(args, i)?) {
+                Some(result) => out.push(result?),
+                None => return Err(Fail::Decode(format!("unknown operation {:?}", op))),
+            }
+        }
+        std::mem::forget(obj);
+        Ok(Json::Arr(out))
+    }
 }

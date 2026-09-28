@@ -57,6 +57,15 @@ All notable changes to this project are recorded here. The format follows
   Kubernetes, scale both Deployments to 0, `helm upgrade`, then scale back up), or
   expect errors from the old pods until the rollout finishes.
 
+- **Design (operations) problems in Rust.** A Rust problem can be `kind: "operations"`:
+  the judge builds the object with `new` and calls each method, inferring its arguments
+  and return type from the user's own `impl`, so a problem file declares no method
+  signatures. Rust methods are snake_case, so the cases' `getState` calls `get_state`, and
+  a method named as the cases spell it gets a hint in the compile error. The five design
+  starters (*Vending Machine*, *Undo/Redo Editor*, *Price Feed*, *B-Tree*, *Lazy Segment
+  Tree*) are now offered in Rust too, and a new one, *Design a Sorted Tree Cursor*
+  (the Iterator pattern), takes a `TreeNode` in its constructor, in Python and Rust.
+
 ### Fixed
 
 - The Helm chart now migrates the database *before* an upgrade's new pods start

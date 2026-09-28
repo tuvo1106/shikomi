@@ -71,10 +71,10 @@ def test_every_variant_needs_the_name_its_kind_calls():
 
 
 def test_function_mode_only_languages_are_checked_per_variant():
-    """Adding Rust to an operations problem must fail even though Python is fine."""
+    """Adding JS to an operations problem must fail even though Python is fine."""
     ops = {"function_name": None, "class_name": "C"}
-    assert "language 'rust' only supports kind 'function'" in _error(
-        _file(_variant("python", **ops), _variant("rust", **ops), kind="operations"))
+    assert "language 'js' only supports kind 'function'" in _error(
+        _file(_variant("python", **ops), _variant("js", **ops), kind="operations"))
 
 
 def test_every_language_declares_the_same_number_of_params():

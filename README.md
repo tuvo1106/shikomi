@@ -28,7 +28,7 @@ vegetables, the part nobody sees. Practice is prep.
 
 - **Four languages, three problem shapes.**
   - Python, JavaScript and Rust *functions*.
-  - Python *classes* replayed against a sequence of method calls.
+  - Python and Rust *classes* replayed against a sequence of method calls.
   - *SQL queries* against a per-test-case MariaDB database.
 - **One problem, several languages.** A problem can be offered in any mix of Python,
   JavaScript and Rust, with one statement and one set of test cases. The editor
@@ -179,7 +179,7 @@ and the gotchas worth knowing before you change anything.
 backend/     FastAPI app (app/), judge worker (worker/), Alembic migrations, tests
 judge/       sandbox harnesses (Python, JS, Rust, SQL), their Dockerfiles, harness tests
 frontend/    React + Vite + Monaco workspace, Vitest + Playwright tests
-seed/        the twenty-two starter problems
+seed/        the twenty-three starter problems
 deploy/      Helm chart
 scripts/     dev/prod/k8s bring-up, local CI, problem-file formatter
 docs/        architecture diagrams, generated schema reference, ADRs

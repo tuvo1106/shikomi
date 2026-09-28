@@ -19,6 +19,7 @@ as an overridable setting (`JUDGE_IMAGE_RUST`, ...) whose default comes from thi
 the worker resolves the configured value by `image_setting`.
 """
 import dataclasses
+import re
 
 # rustc's hard stop inside the Rust harness. The worker sends it in the payload
 # (`compile_timeout_s`) and the wall budget reserves it through the Rust profile's
@@ -74,7 +75,7 @@ ALL_NODE_TYPES = frozenset({
     "CyclicListNode", "RandomListNode", "GraphNode", "Iterator",
 })
 # judge/harness_rs/prelude.rs `nodes`: every node codec except the decode-only "Iterator",
-# which only an operations constructor takes, and Rust has no operations mode yet.
+# an operations constructor's argument that Rust has no counterpart for yet (AGENTS.md TODO).
 RUST_NODE_TYPES = ALL_NODE_TYPES - {"Iterator"}
 I32_RANGE = (-(2**31), 2**31 - 1)
 
@@ -85,7 +86,7 @@ PROFILES = {
     # The margin over the compile timeout covers the harness's own startup and payload parsing.
     "rust": SandboxProfile("judge_image_rust", "shikomi-judge-rust:latest", tmpfs_size_mb=32,
                            tmpfs_exec=True, startup_slack_s=RUST_COMPILE_TIMEOUT_S + 2,
-                           function_mode_only=True, min_memory_limit_mb=128,
+                           min_memory_limit_mb=128,
                            node_types=RUST_NODE_TYPES, node_value_range=I32_RANGE),
     # ADR-0002: the tuned MariaDB datadir needs ~22MB of tmpfs and boots in ~0.05s; 2s is a
     # generous multiple.
@@ -101,3 +102,47 @@ def profile_for(language: str) -> SandboxProfile:
     `ck_problem_languages_language` constraint already reject anything else.
     """
     return PROFILES.get(language, PROFILES["python"])
+
+
+# --- Rust operations mode ---------------------------------------------------------------
+
+_RUST_KEYWORDS = frozenset({
+    "as", "break", "const", "continue", "else", "enum", "extern", "false", "fn", "for", "if",
+    "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref", "return",
+    "static", "struct", "trait", "true", "type", "unsafe", "use", "where", "while", "async",
+    "await", "dyn", "abstract", "become", "box", "do", "final", "macro", "override", "priv",
+    "typeof", "unsized", "virtual", "yield", "try", "gen",
+})
+_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def rust_method_name(op: str) -> str | None:
+    """The Rust method an operations case's op name calls, or None if there can't
+    be one. The name goes to snake_case (`getState` -> `get_state`, `toJSON` ->
+    `to_json`), since the cases are shared and Rust methods are snake_case; a
+    reserved word gets the raw-identifier prefix (`type` -> `r#type`).
+
+    A mirror of judge/harness_rs/harness.rs `method_name`, which is what the judge
+    actually runs. Seed validation (`ProblemFile._ops_are_rust_methods`) uses it to
+    refuse an op the Rust glue couldn't dispatch, or two ops that would land on one
+    method, before a submission ever compiles. It lives here rather than in
+    `app.schemas` so judge/tests/test_rust_protocol.py can import it without
+    pydantic and check it against the real harness.
+    """
+    if not _IDENTIFIER.fullmatch(op):
+        return None
+    out = []
+    for i, c in enumerate(op):
+        if c.isupper():
+            prev = op[i - 1] if i else ""
+            next_lower = i + 1 < len(op) and op[i + 1].islower()
+            boundary = prev.islower() or prev.isdigit() or (prev.isupper() and next_lower)
+            if boundary and out and out[-1] != "_":
+                out.append("_")
+            out.append(c.lower())
+        else:
+            out.append(c)
+    name = "".join(out)
+    if name in {"self", "super", "crate", "Self", "_"}:
+        return None
+    return f"r#{name}" if name in _RUST_KEYWORDS else name
