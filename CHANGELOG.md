@@ -18,6 +18,9 @@ All notable changes to this project are recorded here. The format follows
   constraint) and a `JUDGE_IMAGE_RUST` setting if they don't use the default tag.
 - A per-case `memory_limit_exceeded` verdict (reported by the Rust judge).
 - *Merge Booking Windows*, a Rust starter problem, shows the format for Rust problems.
+- Three more starter problems, so every judge path has an example: *Calm Stretch*
+  (Python function), *Curry Without Crosstalk* (JavaScript) and *Monthly Top Spender*
+  (SQL).
 - `python -m worker.judge_local --language <python|js|rust|mysql>` judges a payload in
   that language's sandbox (its image, tmpfs size and `exec` flag).
 
