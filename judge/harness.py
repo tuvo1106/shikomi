@@ -534,6 +534,26 @@ def _is_number(x):
     return isinstance(x, (int, float)) and not isinstance(x, bool)
 
 
+def _json_equal(a, b):
+    """`a == b` with JSON's types: a bool never equals a number.
+
+    Python's `bool` is an `int`, so plain `==` has `True == 1` and `[False] == [0]`,
+    and a submission returning `True` would pass a case expecting `1`. The JS and
+    Rust harnesses compare strictly, so every compare mode goes through this to
+    judge the same answer the same way in every language. Numbers still compare by
+    value across int/float (`2 == 2.0`), as they do elsewhere. Containers recurse;
+    a tuple still doesn't equal a list, as with `==`.
+    """
+    if isinstance(a, bool) or isinstance(b, bool):
+        return isinstance(a, bool) and isinstance(b, bool) and a == b
+    if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
+        return (type(a) is type(b) and len(a) == len(b)
+                and all(_json_equal(x, y) for x, y in zip(a, b)))
+    if isinstance(a, dict) and isinstance(b, dict):
+        return a.keys() == b.keys() and all(_json_equal(a[k], b[k]) for k in a)
+    return a == b
+
+
 def _float_equal(a, b, eps):
     if _is_number(a) and _is_number(b):
         if math.isnan(a) and math.isnan(b):
@@ -544,7 +564,7 @@ def _float_equal(a, b, eps):
         return a == b or abs(a - b) <= eps
     if isinstance(a, list) and isinstance(b, list):
         return len(a) == len(b) and all(_float_equal(x, y, eps) for x, y in zip(a, b))
-    return a == b
+    return _json_equal(a, b)
 
 
 def _hashable_key(value):
@@ -555,10 +575,20 @@ def _hashable_key(value):
     hashable passes through unchanged. Raises `TypeError` (same as bare
     `hash()` would) if some element still isn't hashable after conversion
     (e.g. a dict) — the caller falls back to its O(n²) loop in that case.
+
+    A bool is tagged, so `True` and `1` (equal, with equal hashes, in Python) count
+    as different elements, matching `_json_equal`.
     """
+    if isinstance(value, bool):
+        return (_BOOL_TAG, value)
     if isinstance(value, list):
         return tuple(_hashable_key(v) for v in value)
     return value
+
+
+# Marks a bool inside `_hashable_key`'s output; a private object, so no JSON value
+# can produce the same key.
+_BOOL_TAG = object()
 
 
 def _multiset_equal(a, b):
@@ -581,7 +611,7 @@ def _multiset_equal(a, b):
     just slow; no seed problem's `unordered` cases hit that today.
     """
     if not isinstance(a, list) or not isinstance(b, list):
-        return a == b
+        return _json_equal(a, b)
     if len(a) != len(b):
         return False
     try:
@@ -591,7 +621,7 @@ def _multiset_equal(a, b):
     remaining = list(b)
     for item in a:
         for i, candidate in enumerate(remaining):
-            if candidate == item:
+            if _json_equal(candidate, item):
                 del remaining[i]
                 break
         else:
@@ -615,9 +645,9 @@ def compare(actual, expected, comparison):
         return _float_equal(actual, expected, (comparison or {}).get("epsilon", 1e-6))
     if mode == "any_of":
         candidates = expected if isinstance(expected, list) else [expected]
-        return any(actual == candidate for candidate in candidates)
+        return any(_json_equal(actual, candidate) for candidate in candidates)
     # "exact" and any unknown mode fall back to strict equality.
-    return actual == expected
+    return _json_equal(actual, expected)
 
 
 # --- custom validator mode (DESIGN.md §5.4) ---------------------------------

@@ -6,6 +6,8 @@ import pathlib
 import subprocess
 import sys
 
+import pytest
+
 HARNESS = pathlib.Path(__file__).resolve().parents[1] / "harness.py"
 TRUNC_MAX = 4096 + len("…(truncated)")
 
@@ -204,6 +206,35 @@ def test_any_of_mode():
                            comparison={"mode": "any_of"}))[0]["status"] == "passed"
     assert results(payload(code, [case(0, [0], [5, 9])],
                            comparison={"mode": "any_of"}))[0]["status"] == "wrong_answer"
+
+
+@pytest.mark.parametrize("comparison,returned,expected", [
+    ({"mode": "exact"}, "True", 1),
+    ({"mode": "exact"}, "[False, 1]", [0, 1]),
+    ({"mode": "exact"}, "{'a': True}", {"a": 1}),
+    ({"mode": "any_of"}, "True", [1, 3]),
+    ({"mode": "unordered"}, "[True, 2]", [2, 1]),
+    ({"mode": "float_tolerance", "epsilon": 1e-6}, "[True]", [1.0]),
+])
+def test_a_bool_never_equals_a_number(comparison, returned, expected):
+    """Python has True == 1; JSON (and the JS and Rust harnesses) don't. Without
+    `_json_equal`, a submission returning True passed a case expecting 1 in Python
+    only, so the same answer was judged differently per language."""
+    code = f"def f(x):\n    return {returned}"
+    assert results(payload(code, [case(0, [0], expected)], comparison=comparison))[0]["status"] \
+        == "wrong_answer"
+
+
+@pytest.mark.parametrize("comparison,returned,expected", [
+    ({"mode": "exact"}, "[True, False]", [True, False]),
+    ({"mode": "exact"}, "2", 2.0),
+    ({"mode": "any_of"}, "False", [True, False]),
+    ({"mode": "unordered"}, "[True, 1]", [1, True]),
+])
+def test_bools_and_numbers_still_match_their_own_kind(comparison, returned, expected):
+    code = f"def f(x):\n    return {returned}"
+    assert results(payload(code, [case(0, [0], expected)], comparison=comparison))[0]["status"] \
+        == "passed"
 
 
 # --- custom_validator mode ---------------------------------------------------

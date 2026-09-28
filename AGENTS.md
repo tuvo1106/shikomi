@@ -353,9 +353,11 @@ slice ships, delete its entry here.
 - **Kubernetes (remaining):** HPA on the api, managed Postgres + Redis, Ingress +
   cert-manager TLS, a **gVisor/Kata node pool** (`runtimeClassName`) + a
   policy-enforcing CNI before untrusted users, and wiring kind into CI for the
-  Playwright job. Problems reach the migrate hook as a ConfigMap (`scripts/k8s-up.sh`,
-  `PROBLEMS_DIR`), which caps at 1 MiB — a real problem set needs a PVC, an
-  init-container `git clone`, or an image layer instead.
+  Playwright job. Problems reach the migrate hook as a ConfigMap holding one gzipped
+  tarball (`scripts/k8s-up.sh`, `PROBLEMS_DIR`). That stretches the 1 MiB cap to about
+  780 KB *compressed* (~2 MB of problem JSON is ~0.45 MB), and the script refuses
+  anything bigger. A large problem set needs a PVC, an init-container `git clone`,
+  or an image layer instead.
 
 - **Keep the k8s judge payload away from submissions:** the k8s runner mounts the
   payload (every hidden case's `expected`) as a ConfigMap file at a fixed path,
@@ -366,14 +368,21 @@ slice ships, delete its entry here.
   harness and then remove the file from a volume the main container can't
   re-read. The Docker runner is unaffected (stdin only).
 
-- **Rust judge follow-ups** (v1 shipped, [ADR-0004](docs/adr/0004-rust-judge-compile-in-sandbox.md)):
+- **Rust judge follow-ups** (v1 shipped,
+  [ADR-0004](docs/adr/0004-rust-judge-compile-in-sandbox.md)): node codecs, then
+  `kind: "operations"`, each shipping with a Python + Rust starter per problem type.
+  Codecs first: `ListNode`/`TreeNode` and their `List[...]` forms, in the conventional
+  Rust shapes (`Option<Box<ListNode>>`, `Option<Rc<RefCell<TreeNode>>>`, decided with
+  the maintainer), defined in the prelude and picked by the param's declared type as
+  in Python; then `CyclicListNode`, `RandomListNode` and `GraphNode`, which need
+  `Rc<RefCell<…>>` throughout (`Weak` for back edges) and cycle-aware encoding. Then
   `kind: "operations"` for Rust. That needs machine-readable method signatures in
-  `ProblemIn` (today they exist only in the Python `starter_code`) and a second
-  glue generator that dispatches method names. Also: measure compile time and the
-  per-case spawn cost under gVisor (`runsc` adds syscall overhead that rustc and
-  `fork`/`exec` feel), and trim the ~1.1GB image (a `rustup --profile minimal`
-  build on `debian:slim`). A dedicated `compile_error` verdict would suit every
-  language at once, not just Rust.
+  `ProblemIn` (today they exist only in the Python `starter_code`) and a second glue
+  generator that dispatches method names. Also: measure compile time and the per-case
+  spawn cost under gVisor (`runsc` adds syscall overhead that rustc and `fork`/`exec`
+  feel), and trim the ~1.1GB image (a `rustup --profile minimal` build on
+  `debian:slim`). A dedicated `compile_error` verdict would suit every language at
+  once, not just Rust.
 
 - **Multi-language follow-ups** ([ADR-0005](docs/adr/0005-multi-language-problems.md)):
   per-language `time_limit_ms` (limits are shared today, so they're calibrated to the
