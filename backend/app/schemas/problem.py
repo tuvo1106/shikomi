@@ -18,7 +18,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, model_validator
 
 from app.judge_budget import fits_job_timeout, max_cases_within_job_timeout
-from app.sandbox import PYTHON_NODE_TYPES, profile_for
+from app.sandbox import ALL_NODE_TYPES, profile_for
 from app.schemas.solution import SolutionIn
 
 UserStatus = Literal["solved", "attempted", "unsolved"]
@@ -59,8 +59,8 @@ Kind = Literal["function", "operations", "sql"]
 # return. "js": judged by judge/harness.js under Node (DESIGN.md §13) —
 # function-mode only, no "operations" kind and no ListNode/TreeNode codecs on
 # that path at all. "rust": compiled by rustc and judged by judge/harness_rs/
-# (DESIGN.md §13, docs/adr/0004-rust-judge-compile-in-sandbox.md), with the same
-# function-mode-only scope as "js". "mysql": judged by judge/harness_sql.py against an
+# (DESIGN.md §13, docs/adr/0004-rust-judge-compile-in-sandbox.md), function-mode only
+# like "js", but with the ListNode/TreeNode codecs (`SandboxProfile.node_types`). "mysql": judged by judge/harness_sql.py against an
 # ephemeral MariaDB instance (DESIGN.md §13, docs/adr/0002-sql-judge-engine-
 # mysql-vs-mariadb.md) — always paired with kind="sql", never any other kind.
 Language = Literal["python", "js", "rust", "mysql"]
@@ -153,9 +153,29 @@ class ProblemDetail(BaseModel):
 LEGACY_LANGUAGE_FIELDS = (
     "language", "starter_code", "function_name", "class_name", "params", "return_type")
 
-# Every node codec name a param may declare (judge/harness.py implements them all;
-# `SandboxProfile.node_types` says which each other language does).
-_NODE_PARAM_TYPES = PYTHON_NODE_TYPES
+# Every node codec name a param may declare (`SandboxProfile.node_types` says which each
+# language implements).
+_NODE_PARAM_TYPES = ALL_NODE_TYPES
+
+
+def _node_values(node_type: str, wire: Any):
+    """Every node value in `wire`, a test case's encoding of `node_type` (DESIGN.md §5.3).
+
+    Only values a node struct stores are yielded: a cycle position, a random
+    pointer's index or a graph's neighbour numbers are the codec's own bookkeeping.
+    Malformed wire data yields nothing here; decoding it is the harness's job.
+    """
+    if not isinstance(wire, list):
+        return
+    if node_type.startswith("List["):
+        for item in wire:
+            yield from _node_values(node_type[len("List["):-1], item)
+    elif node_type in ("ListNode", "TreeNode"):
+        yield from (v for v in wire if v is not None)
+    elif node_type == "CyclicListNode" and len(wire) == 2 and isinstance(wire[0], list):
+        yield from wire[0]
+    elif node_type == "RandomListNode":
+        yield from (pair[0] for pair in wire if isinstance(pair, list) and pair)
 
 
 class LanguageVariantIn(BaseModel):
@@ -383,6 +403,33 @@ class ProblemFile(ProblemIn):
         ordinals = [sol.ordinal for sol in self.solutions]
         if len(ordinals) != len(set(ordinals)):
             raise ValueError("solution ordinals must be unique")
+        return self
+
+    @model_validator(mode="after")
+    def _node_values_fit_each_language(self) -> "ProblemFile":
+        # The test cases are shared, but a language's node struct may hold less than
+        # JSON does (Rust's `val` is an i32; `SandboxProfile.node_value_range`). A value
+        # that doesn't fit would fail every submission in that language with a decode
+        # error, so it fails here instead, at seed time.
+        expected_options = self.comparison.get("mode") == "any_of"
+        for v in self.languages:
+            value_range = profile_for(v.language).node_value_range
+            if value_range is None:
+                continue
+            lo, hi = value_range
+            for tc in self.test_cases:
+                wires = [(p.name, p.type, tc.input[i]) for i, p in enumerate(v.params)
+                         if p.type in _NODE_PARAM_TYPES and i < len(tc.input)]
+                if v.return_type:
+                    outputs = tc.expected if expected_options and isinstance(tc.expected, list) else [tc.expected]
+                    wires += [("the expected output", v.return_type, out) for out in outputs]
+                for where, node_type, wire in wires:
+                    for x in _node_values(node_type, wire):
+                        if isinstance(x, bool) or not isinstance(x, int) or not lo <= x <= hi:
+                            raise ValueError(
+                                f"test case {tc.ordinal}: {where} holds the node value {x!r}, but "
+                                f"language '{v.language}' stores a {node_type} value as an integer "
+                                f"in [{lo}, {hi}]")
         return self
 
     @model_validator(mode="after")

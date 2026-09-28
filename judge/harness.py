@@ -216,26 +216,66 @@ def _build_tree(values):
     return root
 
 
+# The most entries an encoded tree may have (harness_rs `nodes::MAX_ENCODED`
+# matches). A tree may share subtrees, which can make its encoding exponentially
+# larger than its node count; a runaway answer fails with a message instead of
+# exhausting the sandbox's memory. Real answers are far smaller.
+_MAX_TREE_ENTRIES = 2_000_000
+
+
+def _tree_has_cycle(root):
+    """Whether some node is its own ancestor: a three-colour depth-first search,
+    iterative (trees in stress cases are deep), where reaching a node that's
+    still on the current path is a cycle. A node reached twice along
+    *different* paths (a shared subtree) is not one."""
+    on_path, done = set(), set()
+    stack = [(root, False)]
+    while stack:
+        node, leaving = stack.pop()
+        if leaving:
+            on_path.discard(id(node))
+            done.add(id(node))
+            continue
+        if id(node) in done:
+            continue
+        if id(node) in on_path:
+            return True
+        on_path.add(id(node))
+        stack.append((node, True))
+        for child in (getattr(node, "right", None), getattr(node, "left", None)):
+            if child is not None:
+                stack.append((child, False))
+    return False
+
+
 def _flatten_tree(root):
     """Binary tree -> null-padded level-order array (see `_build_tree`), trailing
-    `None`s trimmed. Duck-typed on `val`/`left`/`right` (see `ListNode`)."""
+    `None`s trimmed. Duck-typed on `val`/`left`/`right` (see `ListNode`).
+
+    Raises:
+        MalformedResult: the tree has a cycle (a child pointing back to an
+            ancestor), which has no finite encoding; stopping at the repeated
+            node could turn a wrong answer into a right one, as `_flatten_list`
+            explains. A subtree *shared* by two parents is accepted: it's a
+            finite tree with a clean encoding, and memoized solutions ("all full
+            binary trees of size n") build them on purpose. Also raised past
+            `_MAX_TREE_ENTRIES`.
+    """
     if root is None:
         return []
+    if _tree_has_cycle(root):
+        raise MalformedResult(
+            "the returned tree has a cycle: a child points back to one of its ancestors")
     out = []
-    seen = set()  # a buggy solution's cycle shouldn't hang the harness
     queue = deque([root])
     while queue:
+        if len(out) >= _MAX_TREE_ENTRIES:
+            raise MalformedResult(
+                f"the returned tree is too large to encode (over {_MAX_TREE_ENTRIES} entries)")
         node = queue.popleft()
         if node is None:
             out.append(None)
             continue
-        if id(node) in seen:
-            # A cycle, or a node shared by two parents: not a tree. Refused for the
-            # same reason as `_flatten_list`'s cycle (harness_rs `nodes` matches).
-            raise MalformedResult(
-                "the returned tree reaches the same node twice: a child points back to "
-                "an ancestor, or two parents share one child")
-        seen.add(id(node))
         out.append(getattr(node, "val", None))
         queue.append(getattr(node, "left", None))
         queue.append(getattr(node, "right", None))

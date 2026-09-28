@@ -454,9 +454,21 @@ fn main() {
     assert [r["status"] for r in res] == ["passed", "passed"], res
 
 
-# --- ListNode / TreeNode codecs (prelude.rs `nodes`) ------------------------
+# --- ListNode / TreeNode codecs (prelude.rs `nodes`, harness.rs `node_structs`) ----
 # The wire format must match harness.py's, since a problem's cases are shared
-# by every language it's offered in.
+# by every language it's offered in. The structs are generated into the
+# submission's crate for the node types a problem declares, so these payloads
+# declare them the way a problem file would.
+
+LIST = [{"name": "head", "type": "ListNode"}]
+TREE = [{"name": "root", "type": "TreeNode"}]
+
+
+def nodes_payload(code, cases, function_name, params, return_type="", **kw):
+    pl = payload(code, cases, function_name=function_name, params=params, **kw)
+    pl["return_type"] = return_type
+    return pl
+
 
 REVERSE_LIST = """fn reverse(head: Option<Box<ListNode>>) -> Option<Box<ListNode>> {
     let (mut prev, mut cur) = (None, head);
@@ -483,26 +495,28 @@ fn mirror(root: Option<Rc<RefCell<TreeNode>>>) -> Option<Rc<RefCell<TreeNode>>> 
 }
 """
 
+RC = "use std::cell::RefCell;\nuse std::rc::Rc;\n"
+
 
 def test_list_round_trips_and_empty_is_an_empty_array():
-    res = rust_results(payload(REVERSE_LIST, [
+    res = rust_results(nodes_payload(REVERSE_LIST, [
         case(0, [[1, 2, 3]], [3, 2, 1]),
         case(1, [[]], []),        # None encodes as [], as in harness.py
         case(2, [None], []),      # null also reads as an empty list
         case(3, [[7]], [7]),
-    ], function_name="reverse"))
+    ], "reverse", LIST, "ListNode"))
     assert [r["status"] for r in res] == ["passed"] * 4
     assert res[1]["output"] == "[]"
 
 
 def test_tree_round_trips_in_null_padded_level_order():
-    res = rust_results(payload(MIRROR_TREE, [
+    res = rust_results(nodes_payload(MIRROR_TREE, [
         case(0, [[4, 2, 7, 1, 3, 6, 9]], [4, 7, 2, 9, 6, 3, 1]),
         # A null keeps no slots for its absent children, and trailing nulls are trimmed.
         case(1, [[1, None, 2, 3]], [1, 2, None, None, 3]),
         case(2, [[]], []),
         case(3, [[5, 4]], [5, None, 4]),
-    ], function_name="mirror"))
+    ], "mirror", TREE, "TreeNode"))
     assert [r["status"] for r in res] == ["passed"] * 4
 
 
@@ -510,7 +524,7 @@ def test_node_values_are_encoded_not_the_struct():
     code = "fn sum(head: Option<Box<ListNode>>) -> i64 {\n" \
            "    let mut t = 0; let mut c = head.as_deref();\n" \
            "    while let Some(n) = c { t += n.val as i64; c = n.next.as_deref(); }\n    t\n}\n"
-    res = rust_results(payload(code, [case(0, [[1, 2, 3]], 6)], function_name="sum"))
+    res = rust_results(nodes_payload(code, [case(0, [[1, 2, 3]], 6)], "sum", LIST))
     assert res[0]["status"] == "passed"
 
 
@@ -518,15 +532,16 @@ def test_list_of_lists_uses_the_same_codec_per_element():
     code = "fn lens(lists: Vec<Option<Box<ListNode>>>) -> Vec<usize> {\n" \
            "    lists.iter().map(|l| { let mut n = 0; let mut c = l.as_deref();\n" \
            "        while let Some(x) = c { n += 1; c = x.next.as_deref(); } n }).collect()\n}\n"
-    res = rust_results(payload(code, [case(0, [[[1, 2], [], [3]]], [2, 0, 1])], function_name="lens"))
+    res = rust_results(nodes_payload(code, [case(0, [[[1, 2], [], [3]]], [2, 0, 1])], "lens",
+                                     [{"name": "lists", "type": "List[ListNode]"}]))
     assert res[0]["status"] == "passed", res[0]
 
 
 def test_vec_of_trees_returns_each_encoded():
-    code = "use std::rc::Rc; use std::cell::RefCell;\n" \
-           "fn two(a: i32) -> Vec<Option<Rc<RefCell<TreeNode>>>> {\n" \
-           "    vec![Some(Rc::new(RefCell::new(TreeNode::new(a)))), None]\n}\n"
-    res = rust_results(payload(code, [case(0, [8], [[8], []])], function_name="two"))
+    code = RC + "fn two(a: i32) -> Vec<Option<Rc<RefCell<TreeNode>>>> {\n" \
+                "    vec![Some(Rc::new(RefCell::new(TreeNode::new(a)))), None]\n}\n"
+    res = rust_results(nodes_payload(code, [case(0, [8], [[8], []])], "two",
+                                     [{"name": "a", "type": "i32"}], "List[TreeNode]"))
     assert res[0]["status"] == "passed", res[0]
     assert res[0]["output"] == "[[8],[]]"
 
@@ -536,53 +551,113 @@ def test_deep_list_and_degenerate_tree_do_not_overflow_the_codec():
     chain_tree = [0]
     for i in range(1, n):
         chain_tree += [None, i]   # every node a right child: depth n
-    res = rust_results(payload(
-        REVERSE_LIST, [case(0, [list(range(n))], list(range(n - 1, -1, -1)))], function_name="reverse"))
+    res = rust_results(nodes_payload(
+        REVERSE_LIST, [case(0, [list(range(n))], list(range(n - 1, -1, -1)))], "reverse", LIST, "ListNode"))
     assert res[0]["status"] == "passed", res[0]["error"]
-    code = "use std::rc::Rc; use std::cell::RefCell;\n" \
-           "fn same(root: Option<Rc<RefCell<TreeNode>>>) -> Option<Rc<RefCell<TreeNode>>> { root }\n"
-    res = rust_results(payload(code, [case(0, [chain_tree], chain_tree)], function_name="same"))
+    code = RC + "fn same(root: Option<Rc<RefCell<TreeNode>>>) -> Option<Rc<RefCell<TreeNode>>> { root }\n"
+    res = rust_results(nodes_payload(code, [case(0, [chain_tree], chain_tree)], "same", TREE, "TreeNode"))
     assert res[0]["status"] == "passed", res[0]["error"]
 
 
 def test_a_cyclic_tree_answer_is_refused_not_looped_on():
     # Rc makes a cycle expressible in safe code. The encoder must neither hang nor
     # judge a truncation (here [1], which would match an expected [1]).
-    code = "use std::rc::Rc; use std::cell::RefCell;\n" \
-           "fn loopy(root: Option<Rc<RefCell<TreeNode>>>) -> Option<Rc<RefCell<TreeNode>>> {\n" \
-           "    let r = root.clone().unwrap(); r.borrow_mut().left = root.clone(); root\n}\n"
-    res = rust_results(payload(code, [case(0, [[1]], [1])], function_name="loopy"))
+    code = RC + "fn loopy(root: Option<Rc<RefCell<TreeNode>>>) -> Option<Rc<RefCell<TreeNode>>> {\n" \
+                "    let r = root.clone().unwrap(); r.borrow_mut().left = root.clone(); root\n}\n"
+    res = rust_results(nodes_payload(code, [case(0, [[1]], [1])], "loopy", TREE, "TreeNode"))
     assert res[0]["status"] == "runtime_error"
-    assert res[0]["error"].startswith("the returned tree reaches the same node twice")
+    assert res[0]["error"].startswith("the returned tree has a cycle")
 
 
-def test_a_tree_sharing_one_child_between_parents_is_refused():
-    code = "use std::rc::Rc; use std::cell::RefCell;\n" \
-           "fn share(v: i32) -> Option<Rc<RefCell<TreeNode>>> {\n" \
-           "    let kid = Rc::new(RefCell::new(TreeNode::new(v)));\n" \
-           "    let root = Rc::new(RefCell::new(TreeNode::new(0)));\n" \
-           "    root.borrow_mut().left = Some(Rc::clone(&kid)); root.borrow_mut().right = Some(kid);\n" \
-           "    Some(root)\n}\n"
-    res = rust_results(payload(code, [case(0, [5], [0, 5, 5])], function_name="share"))
+def test_a_tree_sharing_a_subtree_between_parents_is_a_valid_answer():
+    # Memoized solutions ("all full binary trees") reuse equal subtrees on purpose;
+    # that's a finite tree with a clean encoding, not a cycle.
+    code = RC + "fn share(v: i32) -> Option<Rc<RefCell<TreeNode>>> {\n" \
+                "    let kid = Rc::new(RefCell::new(TreeNode::new(v)));\n" \
+                "    let root = Rc::new(RefCell::new(TreeNode::new(0)));\n" \
+                "    root.borrow_mut().left = Some(Rc::clone(&kid)); root.borrow_mut().right = Some(kid);\n" \
+                "    Some(root)\n}\n"
+    res = rust_results(nodes_payload(code, [case(0, [5], [0, 5, 5])], "share",
+                                     [{"name": "v", "type": "i32"}], "TreeNode"))
+    assert res[0]["status"] == "passed", res[0]
+
+
+def test_an_exponentially_shared_tree_is_refused_as_too_large():
+    # 30 levels, each node's two children the same node: 30 nodes, 2^30 entries.
+    code = RC + "fn big(n: i32) -> Option<Rc<RefCell<TreeNode>>> {\n" \
+                "    let mut t = Rc::new(RefCell::new(TreeNode::new(0)));\n" \
+                "    for _ in 0..n { let p = Rc::new(RefCell::new(TreeNode::new(0)));\n" \
+                "        p.borrow_mut().left = Some(Rc::clone(&t)); p.borrow_mut().right = Some(t); t = p; }\n" \
+                "    Some(t)\n}\n"
+    res = rust_results(nodes_payload(code, [case(0, [30], [0])], "big",
+                                     [{"name": "n", "type": "i32"}], "TreeNode"))
     assert res[0]["status"] == "runtime_error"
-    assert "same node twice" in res[0]["error"]
+    assert "too large to encode" in res[0]["error"]
 
 
 def test_null_inside_a_list_is_a_decode_error():
-    res = rust_results(payload(REVERSE_LIST, [case(0, [[1, None]], [])], function_name="reverse"))
+    res = rust_results(nodes_payload(REVERSE_LIST, [case(0, [[1, None]], [])], "reverse", LIST, "ListNode"))
     assert res[0]["status"] == "runtime_error"
     assert "can't be null" in res[0]["error"]
 
 
+def test_the_node_structs_are_the_submissions_own_types():
+    # The orphan rule would forbid both impls for a struct from another crate.
+    code = """use std::cmp::Ordering;
+use std::collections::BinaryHeap;
+
+impl Ord for ListNode {
+    fn cmp(&self, other: &Self) -> Ordering { other.val.cmp(&self.val) }
+}
+impl PartialOrd for ListNode {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> { Some(self.cmp(other)) }
+}
+impl ListNode {
+    fn detach(mut self: Box<Self>) -> (Box<Self>, Option<Box<Self>>) { let n = self.next.take(); (self, n) }
+}
+
+fn merge(lists: Vec<Option<Box<ListNode>>>) -> Option<Box<ListNode>> {
+    let mut heap: BinaryHeap<Box<ListNode>> = lists.into_iter().flatten().collect();
+    let mut out = None;
+    let mut tail = &mut out;
+    while let Some(node) = heap.pop() {
+        let (node, rest) = node.detach();
+        if let Some(r) = rest { heap.push(r); }
+        tail = &mut tail.insert(node).next;
+    }
+    out
+}
+"""
+    res = rust_results(nodes_payload(code, [case(0, [[[1, 4], [2, 3], []]], [1, 2, 3, 4])], "merge",
+                                     [{"name": "lists", "type": "List[ListNode]"}], "ListNode"))
+    assert res[0]["status"] == "passed", res[0]
+
+
 def test_redefining_listnode_gets_a_hint():
     code = "#[derive(Debug)]\npub struct ListNode { pub val: i32, pub next: Option<Box<ListNode>> }\n" + REVERSE_LIST
-    res = rust_results(payload(code, [case(0, [[1]], [1])], function_name="reverse"))
+    res = rust_results(nodes_payload(code, [case(0, [[1]], [1])], "reverse", LIST, "ListNode"))
     assert res[0]["status"] == "runtime_error"
     assert "Compile error" in res[0]["error"]
-    assert "judge already defines ListNode" in res[0]["error"]
+    assert "judge already defines the node struct" in res[0]["error"]
 
 
-def test_an_explicit_import_of_the_nodes_is_fine_too():
-    code = "use shikomi_prelude::nodes::ListNode;\n" + REVERSE_LIST
-    res = rust_results(payload(code, [case(0, [[1, 2]], [2, 1])], function_name="reverse"))
+def test_a_node_name_in_a_comment_does_not_trigger_the_hint():
+    # The starter's shape comment names the struct; a wrong signature must get
+    # rustc's own error, not advice to remove a struct the user never wrote.
+    code = "// pub struct ListNode {\n//     pub val: i32,\n// }\n" \
+           "fn reverse(head: &ListNode) -> i32 { head.val }\n"
+    res = rust_results(nodes_payload(code, [case(0, [[1]], 1)], "reverse", LIST))
+    assert res[0]["status"] == "runtime_error"
+    assert "Compile error" in res[0]["error"]
+    assert "Hint" not in res[0]["error"]
+
+
+def test_a_problem_without_node_types_leaves_the_names_free():
+    # A trie problem declares no node codec, so its own TreeNode can't collide.
+    code = "use std::collections::HashMap;\n#[derive(Default)]\nstruct TreeNode { kids: HashMap<char, TreeNode>, end: bool }\n" \
+           "fn count(words: Vec<String>) -> usize {\n    let mut root = TreeNode::default();\n" \
+           "    for w in &words { let mut n = &mut root; for c in w.chars() { n = n.kids.entry(c).or_default(); } n.end = true; }\n" \
+           "    fn walk(n: &TreeNode) -> usize { n.end as usize + n.kids.values().map(walk).sum::<usize>() }\n    walk(&root)\n}\n"
+    res = rust_results(payload(code, [case(0, [["ab", "abc", "ab"]], 2)], function_name="count",
+                               params=[{"name": "words", "type": "Vec<String>"}]))
     assert res[0]["status"] == "passed", res[0]

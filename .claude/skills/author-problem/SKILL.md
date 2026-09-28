@@ -63,11 +63,14 @@ elements (fixed-length arrays), all nested freely. Parameters must be **owned**
 (`Vec<i32>`, `String`), never borrowed (`&[i32]`, `&str`). Returns take the same
 types plus `()` (→ `null`). Lists and trees take the conventional shapes,
 `Option<Box<ListNode>>` and `Option<Rc<RefCell<TreeNode>>>` (`val: i32`), which the
-**judge defines**: the starter describes the struct in a comment and never defines
-it (`deal-from-both-ends` and `trim-price-band` are the references, and their Rust
+**judge defines** in the submission's crate, for the node types the Rust variant
+declares: the starter describes the struct in a comment and never defines it (a
+solution may still add impls to it, like `impl Ord for ListNode`), and node values
+must fit an `i32`, which the seed checks (`deal-from-both-ends` and `trim-price-band` are the references, and their Rust
 solutions start with the `use std::rc::Rc;`/`RefCell` lines a tree needs). Declare
 the codec name (`"ListNode"`) in the Rust variant's `params`/`return_type` too, the
-same as Python: it's what the workspace draws samples from. A type outside that list fails to *compile*, and
+same as Python: it's what makes the judge define the struct, and what the workspace
+draws samples from. A type outside that list fails to *compile*, and
 the reference-solution run in step 5 catches it. Integer overflow **panics**
 (overflow checks are on), so pick `i64` wherever a sum or product can pass
 2^31. `memory_limit_mb` must be at least 128, because rustc compiles inside the

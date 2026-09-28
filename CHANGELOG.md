@@ -31,8 +31,9 @@ All notable changes to this project are recorded here. The format follows
   (`Option<Box<ListNode>>`) and binary trees (`Option<Rc<RefCell<TreeNode>>>`), including
   a list of them (`Vec<…>`), in the same wire format as Python, so one problem's cases
   serve both languages. The judge defines `ListNode` and `TreeNode` in the conventional
-  shapes, and a submission that defines its own gets a hint instead of a bare compile
-  error. Three starters, each in Python and Rust, show it: *Deal from Both Ends*
+  shapes, in the submission's own crate, so a solution can still add methods or trait
+  impls to them (`impl Ord for ListNode`). A submission that pastes the struct back in
+  gets a hint instead of a bare compile error. Three starters, each in Python and Rust, show it: *Deal from Both Ends*
   (a list), *Trim to Price Band* (a binary search tree) and *Merge Sorted Feeds*
   (several lists).
 - **Problems in several languages.** A problem can be offered in any number of
@@ -54,7 +55,8 @@ All notable changes to this project are recorded here. The format follows
 - A returned linked list or tree with a cycle is now a runtime error ("the returned list
   has a cycle") in the Python judge, instead of being judged on its first pass. A
   solution that forgot to end its list could be accepted, because that first pass
-  matched the expected answer exactly.
+  matched the expected answer exactly. A tree that shares a subtree between two parents
+  (no cycle) is still a valid answer.
 - The Python judge no longer counts a bool as equal to a number (`True` against an
   expected `1`, in any comparison mode). The JavaScript and Rust judges already
   rejected it, so the same answer could be judged differently depending on the language.

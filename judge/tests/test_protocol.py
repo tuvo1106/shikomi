@@ -448,8 +448,39 @@ def test_treenode_cyclic_return_is_refused_not_hung_on():
                  params=[{"name": "root", "type": "TreeNode"}], return_type="TreeNode")
     res = results(pl, timeout=5)
     assert res[0]["status"] == "runtime_error"
-    assert "MalformedResult: the returned tree reaches the same node twice" in res[0]["error"]
+    assert "MalformedResult: the returned tree has a cycle" in res[0]["error"]
     assert "harness" not in res[0]["error"]  # only the diagnosis, no harness frames
+
+
+SHARED_SUBTREE = (
+    "class TreeNode:\n"
+    "    def __init__(self, val=0, left=None, right=None):\n"
+    "        self.val = val\n"
+    "        self.left = left\n"
+    "        self.right = right\n"
+    "\n"
+    "def f(n):\n"
+    "    # Memoized-style sharing: each level's two children are the same subtree.\n"
+    "    t = TreeNode(0)\n"
+    "    for _ in range(n):\n"
+    "        t = TreeNode(0, t, t)\n"
+    "    return t\n"
+)
+
+
+def test_treenode_shared_subtree_is_a_valid_answer():
+    pl = payload(SHARED_SUBTREE, [case(0, [2], [0, 0, 0, 0, 0, 0, 0])],
+                 params=[{"name": "n", "type": "int"}], return_type="TreeNode")
+    res = results(pl, timeout=5)
+    assert res[0]["status"] == "passed", res[0]
+
+
+def test_treenode_exponentially_shared_answer_is_refused_as_too_large():
+    pl = payload(SHARED_SUBTREE, [case(0, [30], [0])],
+                 params=[{"name": "n", "type": "int"}], return_type="TreeNode")
+    res = results(pl, timeout=20)
+    assert res[0]["status"] == "runtime_error"
+    assert "too large to encode" in res[0]["error"]
 
 
 UNTERMINATED_LIST = (

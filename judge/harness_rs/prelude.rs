@@ -28,11 +28,12 @@
 //! not borrowed (`&[i32]`, `&str`): a borrow would need a value that outlives
 //! the call, and owned is the convention Rust problem sets already use.
 //!
-//! The same inference covers linked lists and trees. The prelude defines
-//! `ListNode` and `TreeNode` (the `nodes` module), and a parameter typed
+//! The same inference covers linked lists and trees: a parameter typed
 //! `Option<Box<ListNode>>` decodes from the same wire array harness.py's
-//! `"ListNode"` codec reads. So `params[].type` declares the codec name
-//! (`"ListNode"`) for Rust too, but only so the workspace can draw the sample.
+//! `"ListNode"` codec reads (the `nodes` module). There, `params[].type` does
+//! matter for Rust: declaring `"ListNode"` is what makes the glue define the
+//! struct in the submission's crate (harness.rs `node_structs`), and the
+//! workspace draws the sample from it too.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
@@ -537,8 +538,8 @@ macro_rules! tuple_json {
             }
         }
         impl<$($t: ToJson),+> ToJson for ($($t,)+) {
-            fn to_json(&self) -> Json {
-                Json::Arr(vec![$(self.$i.to_json()),+])
+            fn to_json(&self) -> Result<Json, String> {
+                Ok(Json::Arr(vec![$(self.$i.to_json()?),+]))
             }
         }
     };
@@ -547,26 +548,32 @@ macro_rules! tuple_json {
 // --- encoding return values (Rust -> JSON) --------------------------------
 
 /// Encode a function's return value for comparison against `expected`.
+///
+/// Fallible, though almost every impl can't fail: a node type can hold a value
+/// its wire format can't express (a tree with a cycle), and that must fail the
+/// case, not encode as a truncation that might happen to match. An `Err` is the
+/// reason, reported to the user as the case's runtime error (`ret`). Carrying it
+/// in the type means no caller can drop it by accident.
 pub trait ToJson {
-    fn to_json(&self) -> Json;
+    fn to_json(&self) -> Result<Json, String>;
 
     /// Encode an `Option<Self>`: the encoding side of `FromJson::from_json_opt`,
     /// so a node type's `None` comes back as `[]` rather than `null`.
-    fn to_json_opt(v: Option<&Self>) -> Json
+    fn to_json_opt(v: Option<&Self>) -> Result<Json, String>
     where
         Self: Sized,
     {
-        v.map_or(Json::Null, ToJson::to_json)
+        v.map_or(Ok(Json::Null), ToJson::to_json)
     }
 }
 
 macro_rules! to_json_int {
     ($($t:ty),*) => {$(
         impl ToJson for $t {
-            fn to_json(&self) -> Json {
+            fn to_json(&self) -> Result<Json, String> {
                 // Unsigned values past i64::MAX can't be an exact Int; fall back to
                 // a float rather than wrap to a negative number.
-                i64::try_from(*self).map_or(Json::Num(*self as f64), Json::Int)
+                Ok(i64::try_from(*self).map_or(Json::Num(*self as f64), Json::Int))
             }
         }
     )*};
@@ -578,105 +585,107 @@ tuple_json!(3; A.0, B.1, C.2);
 tuple_json!(4; A.0, B.1, C.2, D.3);
 
 impl ToJson for f64 {
-    fn to_json(&self) -> Json {
-        Json::Num(*self)
+    fn to_json(&self) -> Result<Json, String> {
+        Ok(Json::Num(*self))
     }
 }
 
 impl ToJson for f32 {
-    fn to_json(&self) -> Json {
-        Json::Num(*self as f64)
+    fn to_json(&self) -> Result<Json, String> {
+        Ok(Json::Num(*self as f64))
     }
 }
 
 impl ToJson for bool {
-    fn to_json(&self) -> Json {
-        Json::Bool(*self)
+    fn to_json(&self) -> Result<Json, String> {
+        Ok(Json::Bool(*self))
     }
 }
 
 impl ToJson for String {
-    fn to_json(&self) -> Json {
-        Json::Str(self.clone())
+    fn to_json(&self) -> Result<Json, String> {
+        Ok(Json::Str(self.clone()))
     }
 }
 
 impl ToJson for str {
-    fn to_json(&self) -> Json {
-        Json::Str(self.to_string())
+    fn to_json(&self) -> Result<Json, String> {
+        Ok(Json::Str(self.to_string()))
     }
 }
 
 impl ToJson for char {
-    fn to_json(&self) -> Json {
-        Json::Str(self.to_string())
+    fn to_json(&self) -> Result<Json, String> {
+        Ok(Json::Str(self.to_string()))
     }
 }
 
 /// `()` (a function with no return value) encodes as `null`, like Python's `None`.
 impl ToJson for () {
-    fn to_json(&self) -> Json {
-        Json::Null
+    fn to_json(&self) -> Result<Json, String> {
+        Ok(Json::Null)
     }
 }
 
 impl<T: ToJson + ?Sized> ToJson for &T {
-    fn to_json(&self) -> Json {
+    fn to_json(&self) -> Result<Json, String> {
         (**self).to_json()
     }
 }
 
 impl<T: ToJson> ToJson for Vec<T> {
-    fn to_json(&self) -> Json {
-        Json::Arr(self.iter().map(ToJson::to_json).collect())
+    fn to_json(&self) -> Result<Json, String> {
+        self.iter().map(ToJson::to_json).collect::<Result<_, _>>().map(Json::Arr)
     }
 }
 
 impl<T: ToJson> ToJson for [T] {
-    fn to_json(&self) -> Json {
-        Json::Arr(self.iter().map(ToJson::to_json).collect())
+    fn to_json(&self) -> Result<Json, String> {
+        self.iter().map(ToJson::to_json).collect::<Result<_, _>>().map(Json::Arr)
     }
 }
 
 impl<T: ToJson, const N: usize> ToJson for [T; N] {
-    fn to_json(&self) -> Json {
-        Json::Arr(self.iter().map(ToJson::to_json).collect())
+    fn to_json(&self) -> Result<Json, String> {
+        self.iter().map(ToJson::to_json).collect::<Result<_, _>>().map(Json::Arr)
     }
 }
 
 impl<T: ToJson> ToJson for Option<T> {
-    fn to_json(&self) -> Json {
+    fn to_json(&self) -> Result<Json, String> {
         T::to_json_opt(self.as_ref())
     }
 }
 
 impl<V: ToJson> ToJson for HashMap<String, V> {
-    fn to_json(&self) -> Json {
-        Json::Obj(self.iter().map(|(k, v)| (k.clone(), v.to_json())).collect())
+    fn to_json(&self) -> Result<Json, String> {
+        self.iter().map(|(k, v)| Ok((k.clone(), v.to_json()?))).collect::<Result<_, String>>().map(Json::Obj)
     }
 }
 
 impl<V: ToJson> ToJson for BTreeMap<String, V> {
-    fn to_json(&self) -> Json {
-        Json::Obj(self.iter().map(|(k, v)| (k.clone(), v.to_json())).collect())
+    fn to_json(&self) -> Result<Json, String> {
+        self.iter().map(|(k, v)| Ok((k.clone(), v.to_json()?))).collect::<Result<_, String>>().map(Json::Obj)
     }
 }
 
 // --- linked-list and tree nodes ---------------------------------------------
 
-/// The node types a list or tree problem passes around, in the conventional
-/// Rust shapes (the ones LeetCode's Rust problems use, so a learner's muscle
-/// memory transfers): a list is `Option<Box<ListNode>>`, a tree is
-/// `Option<Rc<RefCell<TreeNode>>>`.
+/// The codecs for the node types a list or tree problem passes around, in the
+/// conventional Rust shapes (the ones LeetCode's Rust problems use, so a
+/// learner's muscle memory transfers): a list is `Option<Box<ListNode>>`, a
+/// tree is `Option<Rc<RefCell<TreeNode>>>`.
 ///
-/// **The judge defines them, not the submission.** The glue glob-imports this
-/// module into the user's crate (`use ::shikomi_prelude::nodes::*;`, harness.rs
-/// `glue`), and the starter code only *describes* the struct in a comment.
-/// That's what lets the codecs below exist at all: `FromJson`/`ToJson` can
-/// only be implemented for a type the prelude can name. A glob import is also
-/// the one kind of import a local item silently shadows, so a submission that
-/// defines its own `ListNode` still compiles up to the glue, where rustc reports
-/// that `FromJson` isn't implemented for it (harness.rs adds a hint then).
+/// **The structs themselves aren't here.** harness.rs's glue defines each one a
+/// problem declares *in the submission's own crate*, from `harness.rs`
+/// `LIST_NODE`/`TREE_NODE`, and the starter code only describes it in a comment.
+/// That's what lets a solution treat the struct as its own: Rust's orphan rule
+/// forbids `impl Ord for ListNode` (the usual way to put nodes in a
+/// `BinaryHeap`) or a helper `impl ListNode { … }` for a type from another
+/// crate, and a struct defined in this prelude would be exactly that. The
+/// prelude can't name a type defined later in the user's crate, so the codecs
+/// are written against small shape traits (`ListShape`, `TreeShape`), and the
+/// glue implements them for the generated structs with one-line accessors.
 ///
 /// Wire format, identical to harness.py's `ListNode`/`TreeNode` codecs
 /// (DESIGN.md §5.3):
@@ -694,38 +703,22 @@ impl<V: ToJson> ToJson for BTreeMap<String, V> {
 pub mod nodes {
     use super::{FromJson, Json, ToJson};
     use std::cell::RefCell;
-    use std::collections::{HashSet, VecDeque};
+    use std::collections::{HashMap, VecDeque};
     use std::rc::Rc;
 
-    /// A singly linked list node. The same fields, derives and `new` as the
-    /// definition LeetCode's Rust problems print, so solutions port over as-is.
-    #[derive(PartialEq, Eq, Clone, Debug)]
-    pub struct ListNode {
-        pub val: i32,
-        pub next: Option<Box<ListNode>>,
-    }
+    /// The most entries an encoded tree may have. A tree may share subtrees
+    /// (below), and sharing can make the encoding exponentially larger than
+    /// the node count, so a runaway answer fails with a message instead of
+    /// exhausting the case's memory. Real answers are far smaller.
+    pub const MAX_ENCODED: usize = 2_000_000;
 
-    impl ListNode {
-        #[inline]
-        pub fn new(val: i32) -> Self {
-            ListNode { next: None, val }
-        }
-    }
-
-    /// A binary tree node, shared through `Rc<RefCell<…>>` (the conventional
-    /// shape, which lets a solution hold parent pointers or revisit a node).
-    #[derive(Debug, PartialEq, Eq)]
-    pub struct TreeNode {
-        pub val: i32,
-        pub left: Option<Rc<RefCell<TreeNode>>>,
-        pub right: Option<Rc<RefCell<TreeNode>>>,
-    }
-
-    impl TreeNode {
-        #[inline]
-        pub fn new(val: i32) -> Self {
-            TreeNode { val, left: None, right: None }
-        }
+    /// What the codecs need from a singly linked list node. harness.rs's glue
+    /// implements it for the generated `ListNode`.
+    pub trait ListShape: Sized {
+        fn make(val: i32) -> Self;
+        fn value(&self) -> i32;
+        fn next_node(&self) -> Option<&Self>;
+        fn set_next_node(&mut self, next: Option<Box<Self>>);
     }
 
     fn values(j: &Json, what: &str) -> Result<Vec<Option<i32>>, String> {
@@ -736,7 +729,7 @@ pub mod nodes {
         }
     }
 
-    impl FromJson for Box<ListNode> {
+    impl<T: ListShape> FromJson for Box<T> {
         /// Only reached for a bare `Box<ListNode>` parameter, which can't be
         /// empty; the usual `Option<Box<ListNode>>` goes through `from_json_opt`.
         fn from_json(j: &Json) -> Result<Self, String> {
@@ -746,100 +739,155 @@ pub mod nodes {
         fn from_json_opt(j: &Json) -> Result<Option<Self>, String> {
             let vals = values(j, "a list as an array of values")?;
             // Built back to front, so each node is boxed once with its tail in hand.
-            let mut head: Option<Box<ListNode>> = None;
+            let mut head: Option<Box<T>> = None;
             for v in vals.into_iter().rev() {
-                let val = v.ok_or("a list's values can't be null")?;
-                head = Some(Box::new(ListNode { val, next: head }));
+                let mut node = Box::new(T::make(v.ok_or("a list's values can't be null")?));
+                node.set_next_node(head);
+                head = Some(node);
             }
             Ok(head)
         }
     }
 
-    impl ToJson for Box<ListNode> {
-        fn to_json(&self) -> Json {
+    impl<T: ListShape> ToJson for Box<T> {
+        fn to_json(&self) -> Result<Json, String> {
             // A `Box` list can't be cyclic in safe code, so no visited set is needed.
             let mut out = Vec::new();
-            let mut cur: Option<&ListNode> = Some(self);
+            let mut cur: Option<&T> = Some(self);
             while let Some(node) = cur {
-                out.push(Json::Int(node.val as i64));
-                cur = node.next.as_deref();
+                out.push(Json::Int(node.value() as i64));
+                cur = node.next_node();
             }
-            Json::Arr(out)
+            Ok(Json::Arr(out))
         }
 
-        fn to_json_opt(v: Option<&Self>) -> Json {
-            v.map_or(Json::Arr(Vec::new()), ToJson::to_json)
+        fn to_json_opt(v: Option<&Self>) -> Result<Json, String> {
+            v.map_or(Ok(Json::Arr(Vec::new())), ToJson::to_json)
         }
     }
 
-    impl FromJson for Rc<RefCell<TreeNode>> {
+    /// What the codecs need from a binary tree node. harness.rs's glue
+    /// implements it for the generated `TreeNode`.
+    pub trait TreeShape: Sized {
+        fn make(val: i32) -> Self;
+        fn value(&self) -> i32;
+        fn left_node(&self) -> Option<Rc<RefCell<Self>>>;
+        fn right_node(&self) -> Option<Rc<RefCell<Self>>>;
+        fn set_left_node(&mut self, child: Option<Rc<RefCell<Self>>>);
+        fn set_right_node(&mut self, child: Option<Rc<RefCell<Self>>>);
+    }
+
+    /// A node type shared through `Rc<RefCell<…>>`. Rust allows only one blanket
+    /// `FromJson`/`ToJson` impl for `Rc<RefCell<T>>`, so every such shape routes
+    /// through this trait, and the glue's impl for each generated struct names
+    /// its codec (`decode_tree`/`encode_tree` for `TreeNode`).
+    pub trait RcNode: Sized {
+        fn decode(j: &Json) -> Result<Option<Rc<RefCell<Self>>>, String>;
+        fn encode(node: &Rc<RefCell<Self>>) -> Result<Json, String>;
+        /// How this type writes `None`.
+        fn encode_none() -> Json;
+    }
+
+    impl<T: RcNode> FromJson for Rc<RefCell<T>> {
         fn from_json(j: &Json) -> Result<Self, String> {
-            Self::from_json_opt(j)?.ok_or_else(|| "expected a non-empty tree".to_string())
+            T::decode(j)?.ok_or_else(|| "expected a non-empty value".to_string())
         }
 
-        /// The same fill as harness.py's `_build_tree`: each value after the root
-        /// takes the next open child slot in BFS order, and a `null` leaves its
-        /// slot empty.
         fn from_json_opt(j: &Json) -> Result<Option<Self>, String> {
-            let vals = values(j, "a tree as a level-order array")?;
-            let mut it = vals.into_iter();
-            let root = match it.next() {
-                Some(Some(v)) => Rc::new(RefCell::new(TreeNode::new(v))),
-                _ => return Ok(None),
-            };
-            let mut queue = VecDeque::from([Rc::clone(&root)]);
-            'fill: while let Some(node) = queue.pop_front() {
-                for left in [true, false] {
-                    let Some(slot) = it.next() else { break 'fill };
-                    if let Some(v) = slot {
-                        let child = Rc::new(RefCell::new(TreeNode::new(v)));
-                        queue.push_back(Rc::clone(&child));
-                        let mut n = node.borrow_mut();
-                        if left { n.left = Some(child) } else { n.right = Some(child) }
-                    }
-                }
-            }
-            Ok(Some(root))
+            T::decode(j)
         }
     }
 
-    impl ToJson for Rc<RefCell<TreeNode>> {
-        /// Level order with `null` for each missing child, trailing nulls
-        /// trimmed (harness.py's `_flatten_tree`). An `Rc` lets a buggy
-        /// solution point a child back at an ancestor (or share one child
-        /// between two parents), so a node seen twice ends the walk, and the
-        /// answer is refused through `super::malformed` rather than judged on
-        /// a truncation that might happen to match (harness.py does the same).
-        fn to_json(&self) -> Json {
-            let mut out = Vec::new();
-            let mut seen = HashSet::new();
-            let mut queue = VecDeque::from([Some(Rc::clone(self))]);
-            while let Some(slot) = queue.pop_front() {
-                let Some(node) = slot else {
-                    out.push(Json::Null);
-                    continue;
-                };
-                if !seen.insert(Rc::as_ptr(&node)) {
-                    super::malformed(
-                        "the returned tree reaches the same node twice: a child points back \
-                         to an ancestor, or two parents share one child",
-                    );
-                    break;
-                }
-                let n = node.borrow();
-                out.push(Json::Int(n.val as i64));
-                queue.push_back(n.left.clone());
-                queue.push_back(n.right.clone());
-            }
-            while out.last() == Some(&Json::Null) {
-                out.pop();
-            }
-            Json::Arr(out)
+    impl<T: RcNode> ToJson for Rc<RefCell<T>> {
+        fn to_json(&self) -> Result<Json, String> {
+            T::encode(self)
         }
 
-        fn to_json_opt(v: Option<&Self>) -> Json {
-            v.map_or(Json::Arr(Vec::new()), ToJson::to_json)
+        fn to_json_opt(v: Option<&Self>) -> Result<Json, String> {
+            v.map_or_else(|| Ok(T::encode_none()), T::encode)
         }
+    }
+
+    /// Null-padded level order -> tree: the same fill as harness.py's
+    /// `_build_tree`. Each value after the root takes the next open child slot
+    /// in BFS order, and a `null` leaves its slot empty.
+    pub fn decode_tree<T: TreeShape>(j: &Json) -> Result<Option<Rc<RefCell<T>>>, String> {
+        let vals = values(j, "a tree as a level-order array")?;
+        let mut it = vals.into_iter();
+        let root = match it.next() {
+            Some(Some(v)) => Rc::new(RefCell::new(T::make(v))),
+            _ => return Ok(None),
+        };
+        let mut queue = VecDeque::from([Rc::clone(&root)]);
+        'fill: while let Some(node) = queue.pop_front() {
+            for left in [true, false] {
+                let Some(slot) = it.next() else { break 'fill };
+                if let Some(v) = slot {
+                    let child = Rc::new(RefCell::new(T::make(v)));
+                    queue.push_back(Rc::clone(&child));
+                    let mut n = node.borrow_mut();
+                    if left { n.set_left_node(Some(child)) } else { n.set_right_node(Some(child)) }
+                }
+            }
+        }
+        Ok(Some(root))
+    }
+
+    /// Tree -> null-padded level order, trailing nulls trimmed (harness.py's
+    /// `_flatten_tree`).
+    ///
+    /// An `Rc` lets a buggy solution point a child back at an ancestor, and a
+    /// cycle has no finite encoding, so it's refused rather than encoded up to
+    /// the repeated node (a truncation can match the expected answer exactly).
+    /// A subtree *shared* by two parents is fine, though: it's a finite tree
+    /// that encodes cleanly, and memoized solutions build them on purpose
+    /// ("all full binary trees of size n" reuses equal-sized subtrees). So the
+    /// check is for a node that is its own ancestor: a three-colour depth-first
+    /// search, where reaching a node still on the current path is a cycle. Then
+    /// the breadth-first encoding needs no visited set, just `MAX_ENCODED`.
+    pub fn encode_tree<T: TreeShape>(root: &Rc<RefCell<T>>) -> Result<Json, String> {
+        // false = on the current path (grey), true = finished (black).
+        let mut state: HashMap<*const RefCell<T>, bool> = HashMap::new();
+        let mut stack = vec![(Rc::clone(root), false)];
+        while let Some((node, leaving)) = stack.pop() {
+            let key = Rc::as_ptr(&node);
+            if leaving {
+                state.insert(key, true);
+                continue;
+            }
+            match state.get(&key) {
+                Some(true) => continue,
+                Some(false) => {
+                    return Err("the returned tree has a cycle: a child points back to one of its \
+                                ancestors"
+                        .into())
+                }
+                None => {}
+            }
+            state.insert(key, false);
+            let (l, r) = { let n = node.borrow(); (n.left_node(), n.right_node()) };
+            stack.push((node, true));
+            stack.extend(r.into_iter().chain(l).map(|c| (c, false)));
+        }
+        let mut out = Vec::new();
+        let mut queue = VecDeque::from([Some(Rc::clone(root))]);
+        while let Some(slot) = queue.pop_front() {
+            if out.len() >= MAX_ENCODED {
+                return Err(format!("the returned tree is too large to encode (over {} entries)", MAX_ENCODED));
+            }
+            let Some(node) = slot else {
+                out.push(Json::Null);
+                continue;
+            };
+            let n = node.borrow();
+            out.push(Json::Int(n.value() as i64));
+            queue.push_back(n.left_node());
+            queue.push_back(n.right_node());
+        }
+        while out.last() == Some(&Json::Null) {
+            out.pop();
+        }
+        Ok(Json::Arr(out))
     }
 }
 
@@ -857,7 +905,8 @@ pub mod nodes {
 /// Why a case produced no value to compare. `Decode` is the test data not
 /// fitting the signature (an authoring bug); `Malformed` is the submission
 /// returning something its type allows but the problem doesn't, like a tree
-/// with a cycle. `From<String>` lets the glue's `arg(..)?` produce a `Decode`.
+/// with a cycle (a `ToJson` error). `From<String>` lets the glue's `arg(..)?`
+/// produce a `Decode`.
 pub enum Fail {
     Decode(String),
     Malformed(String),
@@ -867,18 +916,6 @@ impl From<String> for Fail {
     fn from(e: String) -> Fail {
         Fail::Decode(e)
     }
-}
-
-thread_local! {
-    static MALFORMED: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
-}
-
-/// Record, from inside a `to_json`, that the value being encoded isn't a valid
-/// answer. `ToJson` returns a plain `Json` (it has no error channel, and giving
-/// every impl one would be noise for the one encoder that can fail), so `ret`
-/// checks this flag once encoding is done.
-fn malformed(why: &'static str) {
-    MALFORMED.with(|m| m.set(Some(why)));
 }
 
 /// Environment variable naming the per-case result file.
@@ -903,13 +940,10 @@ pub fn arg<T: FromJson>(args: &[Json], i: usize) -> Result<T, String> {
 
 /// Encode a return value. It's a function (not a bare `.to_json()` in the glue)
 /// so the call site stays readable in a rustc error that points at the glue.
-/// `Err` when an encoder flagged the value as malformed (`malformed`).
+/// An encoding error means the answer can't be expressed on the wire (a tree
+/// with a cycle), which fails the case as malformed.
 pub fn ret<T: ToJson>(v: T) -> Result<Json, Fail> {
-    let j = v.to_json();
-    match MALFORMED.with(|m| m.take()) {
-        Some(why) => Err(Fail::Malformed(why.to_string())),
-        None => Ok(j),
-    }
+    v.to_json().map_err(Fail::Malformed)
 }
 
 /// Entry point of every generated program: read the argument array from
