@@ -164,29 +164,38 @@ class MalformedResult(ValueError):
     the message (`_format_user_traceback`), so it reads as a diagnosis."""
 
 
-def _flatten_list(node):
-    """Linked list -> flat array, walking `.next` by duck-typed attribute
-    access so it works on the user's own `ListNode` instances too.
+def _walk_next(head):
+    """The nodes reachable from `head` along `.next`, in order.
+
+    Shared by every encoder that walks a list (`_flatten_list`,
+    `_encode_random_list`), so the cycle refusal and its message live in one place.
 
     Raises:
         MalformedResult: the list loops back on itself. Stopping quietly at the
             repeated node (the old behavior) could turn a wrong answer into a
             right one: a solution that forgets to clear its last node's `next`
             produces a cycle whose truncation equals the expected list exactly.
-            harness_rs can't get here: a `Box` list can't be cyclic in safe Rust.
     """
-    out = []
+    order = []
     seen = set()  # a buggy solution's cycle must neither hang the harness nor pass
-    while node is not None:
-        if id(node) in seen:
+    while head is not None:
+        if id(head) in seen:
             raise MalformedResult(
-                f"the returned list has a cycle: after {len(out)} node(s), a `next` "
+                f"the returned list has a cycle: after {len(order)} node(s), a `next` "
                 "points back to an earlier node (did you forget to set the last node's "
                 "`next` to None?)")
-        seen.add(id(node))
-        out.append(getattr(node, "val", None))
-        node = getattr(node, "next", None)
-    return out
+        seen.add(id(head))
+        order.append(head)
+        head = getattr(head, "next", None)
+    return order
+
+
+def _flatten_list(node):
+    """Linked list -> flat array, walking `.next` by duck-typed attribute
+    access so it works on the user's own `ListNode` instances too. A cycle is
+    refused (`_walk_next`); harness_rs can't get one, since a `Box` list can't
+    be cyclic in safe Rust."""
+    return [getattr(n, "val", None) for n in _walk_next(node)]
 
 
 def _build_tree(values):
@@ -216,8 +225,8 @@ def _build_tree(values):
     return root
 
 
-# The most entries an encoded tree may have (harness_rs `nodes::MAX_ENCODED`
-# matches). A tree may share subtrees, which can make its encoding exponentially
+# The most entries an encoded tree may have, and the largest value a returned graph
+# node may carry (harness_rs `nodes::MAX_ENCODED` matches). A tree may share subtrees, which can make its encoding exponentially
 # larger than its node count; a runaway answer fails with a message instead of
 # exhausting the sandbox's memory. Real answers are far smaller.
 _MAX_TREE_ENTRIES = 2_000_000
@@ -391,18 +400,7 @@ def _encode_random_list(head):
     doesn't land on any node from this traversal (a submission bug — e.g. it
     points outside the returned list) encodes as `None` rather than crashing.
     """
-    order = []
-    seen = set()
-    node = head
-    while node is not None:
-        if id(node) in seen:
-            raise MalformedResult(
-                f"the returned list has a cycle: after {len(order)} node(s), a `next` "
-                "points back to an earlier node (did you forget to set the last node's "
-                "`next` to None?)")
-        seen.add(id(node))
-        order.append(node)
-        node = getattr(node, "next", None)
+    order = _walk_next(head)
     index_by_id = {id(n): i for i, n in enumerate(order)}
     out = []
     for n in order:
@@ -483,6 +481,10 @@ def _encode_graph(node):
                 visited.append(neighbor)
                 queue.append(neighbor)
     max_val = max((getattr(n, "val", 0) or 0 for n in visited), default=0)
+    # Rows are keyed by value, so the largest value sizes the output; a buggy clone
+    # can set any value, and a huge one would exhaust memory (harness_rs matches).
+    if max_val > _MAX_TREE_ENTRIES:
+        raise MalformedResult(f"the returned graph has a node valued {max_val}, too large to encode")
     out = [[] for _ in range(max_val)]
     for n in visited:
         v = getattr(n, "val", None)

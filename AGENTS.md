@@ -330,6 +330,15 @@ and `playwright`.
 - **Drafts are keyed `code:<slug>:<language>`.** The bare `code:<slug>` key is a
   pre-multi-language draft; the workspace moves it to the default language on first
   read. The E2E helper `openProblemWithCode` seeds the per-language key.
+- **A schema change can refuse a bundled starter.** CI's seed-solution job only runs when
+  `seed/` or `judge/` changes, so a new `ProblemFile` rule is checked against the starters
+  by `test_the_bundled_starters_validate` (backend/tests/test_cli.py). A rule that reads a
+  node-typed `expected` must remember a `CyclicListNode` answer is an index, not a list:
+  that exact slip was caught this way.
+- **Rust node structs are generated per problem.** The glue defines only the node
+  structs the Rust variant declares (harness.rs `node_structs`), in the user's crate. A
+  Rust test payload that uses `ListNode` must declare it in `params`/`return_type`, or the
+  build fails with "cannot find type".
 
 ## Deferred / TODO
 

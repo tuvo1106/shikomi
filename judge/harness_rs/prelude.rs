@@ -781,6 +781,23 @@ pub mod nodes {
         fn set_right_node(&mut self, child: Option<Rc<RefCell<Self>>>);
     }
 
+    thread_local! {
+        /// Every `Rc` node a decoder built, kept alive until the process exits.
+        ///
+        /// Dropping a long `Rc` chain recurses once per node (`Rc` -> `RefCell` ->
+        /// the next `Rc`), so a 10^6-node input freed at the end of the user's
+        /// function could overflow the stack after their code already finished.
+        /// Holding one extra reference to each node means no drop ever cascades:
+        /// the user's handles drop one refcount at a time, and the process (one per
+        /// case) exits before the registry itself would be freed. The return value
+        /// is leaked for the same reason (`super::ret`).
+        static KEEP: RefCell<Vec<Rc<dyn std::any::Any>>> = const { RefCell::new(Vec::new()) };
+    }
+
+    fn keep_alive<T: 'static>(nodes: &[Rc<RefCell<T>>]) {
+        KEEP.with(|k| k.borrow_mut().extend(nodes.iter().map(|n| Rc::clone(n) as Rc<dyn std::any::Any>)));
+    }
+
     /// A node type shared through `Rc<RefCell<…>>`. Rust allows only one blanket
     /// `FromJson`/`ToJson` impl for `Rc<RefCell<T>>`, so every such shape routes
     /// through this trait, and the glue's impl for each generated struct names
@@ -815,13 +832,14 @@ pub mod nodes {
     /// Null-padded level order -> tree: the same fill as harness.py's
     /// `_build_tree`. Each value after the root takes the next open child slot
     /// in BFS order, and a `null` leaves its slot empty.
-    pub fn decode_tree<T: TreeShape>(j: &Json) -> Result<Option<Rc<RefCell<T>>>, String> {
+    pub fn decode_tree<T: TreeShape + 'static>(j: &Json) -> Result<Option<Rc<RefCell<T>>>, String> {
         let vals = values(j, "a tree as a level-order array")?;
         let mut it = vals.into_iter();
         let root = match it.next() {
             Some(Some(v)) => Rc::new(RefCell::new(T::make(v))),
             _ => return Ok(None),
         };
+        let mut built = vec![Rc::clone(&root)];
         let mut queue = VecDeque::from([Rc::clone(&root)]);
         'fill: while let Some(node) = queue.pop_front() {
             for left in [true, false] {
@@ -829,11 +847,13 @@ pub mod nodes {
                 if let Some(v) = slot {
                     let child = Rc::new(RefCell::new(T::make(v)));
                     queue.push_back(Rc::clone(&child));
+                    built.push(Rc::clone(&child));
                     let mut n = node.borrow_mut();
                     if left { n.set_left_node(Some(child)) } else { n.set_right_node(Some(child)) }
                 }
             }
         }
+        keep_alive(&built);
         Ok(Some(root))
     }
 
@@ -914,13 +934,14 @@ pub mod nodes {
     }
 
     thread_local! {
-        /// Every cyclic-list node the decoder built, in input order, so a returned
-        /// node can be answered by *identity* (its index), as harness.py's `_idx`
-        /// stamp does: values may repeat, so "the node with value 1" is ambiguous.
-        /// Holding the `Rc`s also keeps each node alive, so no node the user
-        /// allocates later can reuse a built node's address and pass for it.
-        /// `dyn Any`, because a thread-local can't be generic over the node type.
-        static CYCLIC_BUILT: RefCell<Vec<Rc<dyn std::any::Any>>> = const { RefCell::new(Vec::new()) };
+        /// Every cyclic-list node the decoder built, with its index *within its
+        /// own list*, so a returned node can be answered by identity, as
+        /// harness.py's per-list `_idx` stamp does: values may repeat, so "the node
+        /// with value 1" is ambiguous. Holding the `Rc`s also keeps each node
+        /// alive, so no node the user allocates later can reuse a built node's
+        /// address and pass for it. `dyn Any`, because a thread-local can't be
+        /// generic over the node type.
+        static CYCLIC_BUILT: RefCell<Vec<(Rc<dyn std::any::Any>, usize)>> = const { RefCell::new(Vec::new()) };
     }
 
     /// `[values, pos]` -> a list whose last node's `next` points back to index
@@ -944,7 +965,9 @@ pub mod nodes {
             last.borrow_mut().set_next_node(Some(Rc::clone(target)));
         }
         let head = nodes.first().cloned();
-        CYCLIC_BUILT.with(|b| b.borrow_mut().extend(nodes.into_iter().map(|n| n as Rc<dyn std::any::Any>)));
+        CYCLIC_BUILT.with(|b| {
+            b.borrow_mut().extend(nodes.into_iter().enumerate().map(|(i, n)| (n as Rc<dyn std::any::Any>, i)))
+        });
         Ok(head)
     }
 
@@ -954,7 +977,10 @@ pub mod nodes {
     pub fn encode_cyclic<T: CyclicShape>(node: &Rc<RefCell<T>>) -> Result<Json, String> {
         let want = Rc::as_ptr(node) as *const ();
         Ok(CYCLIC_BUILT.with(|b| {
-            b.borrow().iter().position(|n| Rc::as_ptr(n) as *const () == want).map_or(Json::Null, |i| Json::Int(i as i64))
+            b.borrow()
+                .iter()
+                .find(|(n, _)| Rc::as_ptr(n) as *const () == want)
+                .map_or(Json::Null, |&(_, i)| Json::Int(i as i64))
         }))
     }
 
@@ -972,7 +998,7 @@ pub mod nodes {
     /// `[[val, random_index], ...]`, `random_index` indexing this same array (or
     /// `null`). Two passes, as in harness.py: chain `next`, then resolve
     /// `random`, whose target may come later in the list.
-    pub fn decode_random<T: RandomShape>(j: &Json) -> Result<Option<Rc<RefCell<T>>>, String> {
+    pub fn decode_random<T: RandomShape + 'static>(j: &Json) -> Result<Option<Rc<RefCell<T>>>, String> {
         let pairs = Option::<Vec<(i32, Option<usize>)>>::from_json(j)?.unwrap_or_default();
         let nodes: Vec<Rc<RefCell<T>>> = pairs.iter().map(|&(v, _)| Rc::new(RefCell::new(T::make(v)))).collect();
         for w in nodes.windows(2) {
@@ -984,6 +1010,7 @@ pub mod nodes {
                 node.borrow_mut().set_random_node(Some(Rc::clone(target)));
             }
         }
+        keep_alive(&nodes);
         Ok(nodes.into_iter().next())
     }
 
@@ -1024,14 +1051,14 @@ pub mod nodes {
     pub trait GraphShape: Sized {
         fn make(val: i32) -> Self;
         fn value(&self) -> i32;
-        fn neighbor_nodes(&self) -> Vec<Rc<RefCell<Self>>>;
+        fn neighbor_nodes(&self) -> &[Rc<RefCell<Self>>];
         fn push_neighbor(&mut self, node: Rc<RefCell<Self>>);
     }
 
     /// An adjacency list keyed by value: row `i` lists the neighbour values of
     /// the node valued `i + 1`. `[]` is the empty graph, `[[]]` a single node.
     /// The argument is the node valued 1, as in harness.py.
-    pub fn decode_graph<T: GraphShape>(j: &Json) -> Result<Option<Rc<RefCell<T>>>, String> {
+    pub fn decode_graph<T: GraphShape + 'static>(j: &Json) -> Result<Option<Rc<RefCell<T>>>, String> {
         let adj = Option::<Vec<Vec<usize>>>::from_json(j)?.unwrap_or_default();
         let nodes: Vec<Rc<RefCell<T>>> =
             (1..=adj.len()).map(|v| Rc::new(RefCell::new(T::make(v as i32)))).collect();
@@ -1042,6 +1069,7 @@ pub mod nodes {
                 node.borrow_mut().push_neighbor(Rc::clone(nb));
             }
         }
+        keep_alive(&nodes);
         Ok(nodes.into_iter().next())
     }
 
@@ -1055,13 +1083,19 @@ pub mod nodes {
         let mut queue = VecDeque::from([Rc::clone(start)]);
         while let Some(node) = queue.pop_front() {
             for nb in node.borrow().neighbor_nodes() {
-                if seen.insert(Rc::as_ptr(&nb)) {
-                    queue.push_back(nb);
+                if seen.insert(Rc::as_ptr(nb)) {
+                    queue.push_back(Rc::clone(nb));
                 }
             }
             visited.push(node);
         }
+        // Rows are keyed by value, so the largest value sizes the output. A buggy
+        // clone can set any value, and `i32::MAX` rows would exhaust memory before
+        // any comparison; the cap fails it readably instead (harness.py matches).
         let max = visited.iter().map(|n| n.borrow().value()).max().unwrap_or(0).max(0) as usize;
+        if max > MAX_ENCODED {
+            return Err(format!("the returned graph has a node valued {}, too large to encode", max));
+        }
         let mut rows = vec![Json::Arr(Vec::new()); max];
         for n in &visited {
             let n = n.borrow();
@@ -1126,7 +1160,11 @@ pub fn arg<T: FromJson>(args: &[Json], i: usize) -> Result<T, String> {
 /// An encoding error means the answer can't be expressed on the wire (a tree
 /// with a cycle), which fails the case as malformed.
 pub fn ret<T: ToJson>(v: T) -> Result<Json, Fail> {
-    v.to_json().map_err(Fail::Malformed)
+    let j = v.to_json().map_err(Fail::Malformed);
+    // Never dropped: freeing a long `Rc` or `Box` chain recurses once per node, and
+    // the process exits right after this case anyway (see `nodes::KEEP`).
+    std::mem::forget(v);
+    j
 }
 
 /// Entry point of every generated program: read the argument array from

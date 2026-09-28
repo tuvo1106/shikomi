@@ -796,3 +796,62 @@ def test_a_bad_cycle_position_is_a_decode_error():
     res = rust_results(nodes_payload(CYCLE_START, [case(0, [[[1, 2], 5]], None)], "start", CYC, "CyclicListNode"))
     assert res[0]["status"] == "runtime_error"
     assert "outside the list" in res[0]["error"]
+
+
+def test_debug_printing_a_cyclic_graph_does_not_recurse():
+    # A correct graph is cyclic; a derived Debug would follow the links forever.
+    code = RC + ("fn clone(node: Option<Rc<RefCell<GraphNode>>>) -> Option<Rc<RefCell<GraphNode>>> {\n"
+                 "    let n = node.clone().unwrap(); println!(\"{:?}\", n.borrow()); dbg!(&n); node\n}\n")
+    res = rust_results(nodes_payload(code, [case(0, [[[2], [1]]], [[2], [1]])], "clone", GRAPH, "GraphNode"))
+    assert res[0]["status"] == "passed", res[0]
+    assert "GraphNode { val: 1, neighbors: [2] }" in res[0]["stdout"]
+
+
+def test_debug_shows_list_links_as_their_targets_values():
+    code = RC + ("fn start(head: Option<Rc<RefCell<CyclicListNode>>>) -> Option<Rc<RefCell<CyclicListNode>>> {\n"
+                 "    println!(\"{:?}\", head.as_ref().unwrap().borrow()); None\n}\n")
+    res = rust_results(nodes_payload(code, [case(0, [[[7], 0]], None)], "start", CYC, "CyclicListNode"))
+    assert res[0]["status"] == "passed" and "CyclicListNode { val: 7, next: Some(7) }" in res[0]["stdout"]
+
+
+def test_two_cyclic_lists_are_indexed_per_list_like_python():
+    code = RC + ("fn second(a: Option<Rc<RefCell<CyclicListNode>>>, b: Option<Rc<RefCell<CyclicListNode>>>)\n"
+                 "    -> Option<Rc<RefCell<CyclicListNode>>> { let _ = a; b }\n")
+    params = [{"name": "a", "type": "CyclicListNode"}, {"name": "b", "type": "CyclicListNode"}]
+    res = rust_results(nodes_payload(code, [case(0, [[[1, 2, 3], -1], [[4, 5], -1]], 0)], "second",
+                                     params, "CyclicListNode"))
+    assert res[0]["status"] == "passed", res[0]  # b's head is index 0 of b, not 3
+
+
+def test_a_graph_with_a_huge_value_is_refused_not_allocated():
+    code = RC + ("fn clone(node: Option<Rc<RefCell<GraphNode>>>) -> Option<Rc<RefCell<GraphNode>>> {\n"
+                 "    node.as_ref().unwrap().borrow_mut().val = i32::MAX; node\n}\n")
+    res = rust_results(nodes_payload(code, [case(0, [[[]]], [[]])], "clone", GRAPH, "GraphNode"))
+    assert res[0]["status"] == "runtime_error"
+    assert "too large to encode" in res[0]["error"]
+
+
+def test_decoded_rc_nodes_are_kept_alive_so_no_drop_cascades():
+    # Freeing a long Rc chain recurses once per node. Each decoded node holds one
+    # extra reference (prelude.rs `nodes::KEEP`), so dropping the user's handle only
+    # decrements counts and never frees a chain. (A chain long enough to overflow
+    # the 64MB stack can't be decoded within the sandbox's memory, so this checks
+    # the mechanism rather than the overflow.)
+    code = RC + ("fn count(head: Option<Rc<RefCell<RandomListNode>>>) -> Vec<usize> {\n"
+                 "    let h = head.unwrap(); let second = h.borrow().next.clone().unwrap();\n"
+                 "    vec![Rc::strong_count(&h), Rc::strong_count(&second)]\n}\n")
+    res = rust_results(nodes_payload(code, [case(0, [[[1, None], [2, None]]], [2, 3])], "count", RND))
+    assert res[0]["status"] == "passed", res[0]  # h: user + registry; second: prev.next + clone + registry
+
+
+def test_the_return_value_is_never_dropped():
+    # `ret` leaks the value (mem::forget): its drop could recurse per node too.
+    code = ("struct Loud;\n"
+            "impl Drop for Loud { fn drop(&mut self) { println!(\"dropped\"); } }\n"
+            "impl shikomi_prelude::ToJson for Loud {\n"
+            "    fn to_json(&self) -> Result<shikomi_prelude::Json, String> { Ok(shikomi_prelude::Json::Int(1)) }\n"
+            "}\n"
+            "fn f(_x: i32) -> Loud { Loud }\n")
+    res = rust_results(payload(code, [case(0, [0], 1)], params=[{"name": "x", "type": "i32"}]))
+    assert res[0]["status"] == "passed", res[0]
+    assert "dropped" not in res[0]["stdout"]

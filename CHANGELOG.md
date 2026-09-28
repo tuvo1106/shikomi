@@ -54,6 +54,9 @@ All notable changes to this project are recorded here. The format follows
 
 ### Fixed
 
+- A problem file whose cyclic-list position, random-pointer index or graph neighbour
+  doesn't point at a real node is now refused when it's loaded. The Python judge used to
+  wrap such an index silently (`-1` became the last node).
 - A returned linked list (including a random-pointer list) or tree with a cycle is now a
   runtime error ("the returned list has a cycle") in the Python judge, instead of being
   judged on its first pass. A

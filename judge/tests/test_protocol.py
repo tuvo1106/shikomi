@@ -863,3 +863,18 @@ def test_float_tolerance_accepts_matching_infinities():
     assert results(payload(nested, [case(0, [0], [1.0, float("inf")])],
                            comparison=tol))[0]["status"] == "passed"
 
+
+
+HUGE_GRAPH_VALUE = (
+    "def f(node):\n"
+    "    node.val = 10**12\n"
+    "    return node\n"
+)
+
+
+def test_graph_return_with_a_huge_value_is_refused_not_allocated():
+    pl = payload(HUGE_GRAPH_VALUE, [case(0, [[[]]], [[]])],
+                 params=[{"name": "node", "type": "GraphNode"}], return_type="GraphNode")
+    res = results(pl, timeout=10)
+    assert res[0]["status"] == "runtime_error"
+    assert "too large to encode" in res[0]["error"]
