@@ -49,6 +49,8 @@ import copy
 import io
 import json
 import math
+import os
+import select
 import signal
 import sys
 import time
@@ -787,239 +789,425 @@ def _format_user_traceback(exc):
     return "".join(parts)
 
 
-def _error_result(test_case_id, exc, stdout=""):
-    return {
-        "test_case_id": test_case_id,
-        "status": "runtime_error",
-        "runtime_ms": 0,
-        "output": None,
-        "stdout": _truncate(stdout),
-        "error": _truncate(_format_user_traceback(exc)),
-    }
+# --- execution: a trusted parent and an untrusted child ----------------------
+# The submission runs in a separate **child** process, not here. This process
+# (the parent) holds every case's `expected`, decides pass/fail, and is the only
+# one that writes the `{"results": [...]}` report to stdout. The child receives
+# only the submission and each case's *input* — never `expected` — over a pipe,
+# and returns the value the submission produced over a second, private pipe.
+#
+# Why: a submission running in the same process as the grader can read the
+# expected answers out of memory and can write a forged report to the real
+# stdout. Running it in a child closes both: pass/fail for every fixed-answer
+# comparison is computed *here* from an `expected` the child never sees (so a
+# forged return value can't match without already knowing the answer), and the
+# child's own stdout goes to /dev/null while its results ride a separate pipe
+# the parent frames — the child cannot reach the report stream at all. This
+# mirrors the Rust harness's per-case process isolation (ADR-0004); Python keeps
+# one child for the whole run and only respawns it after a timeout or a crash,
+# so the per-case cost is a pipe round trip, not a process launch.
+#
+# `custom_validator` is the one exception: an operations-mode validator makes
+# further calls into the *live* object, which exists only in the child, so the
+# (operator-authored, trusted) validator runs there and returns pass/fail. A
+# custom_validator problem therefore must not rely on `expected` being hidden
+# from the submission. No bundled problem uses custom_validator.
+
+CHILD_FLAG = "--child"
+_HANG = "__hang__"     # parent sentinel: no reply within the deadline
+_CRASH = "__crash__"   # parent sentinel: the child died without replying
+_SETUP_GRACE_S = 10.0    # generous ceiling for the one-time compile in the child
+_KILL_GRACE_S = 0.5      # extra wall time past the case limit before the parent kills
 
 
-# --- execution --------------------------------------------------------------
+def _judge_error_result(test_case_id, error):
+    return {"test_case_id": test_case_id, "status": "judge_error", "runtime_ms": 0,
+            "output": None, "stdout": "", "error": _truncate(error)}
 
-def run(payload):
-    """Compile the user's code once, then run it against each test case.
 
-    The flow: `compile`/`exec` the submission into a fresh namespace (a top-level
-    error — syntax, import — becomes a single `runtime_error`), look up the target
-    function (or, for `kind == "operations"`, the target class), and — for
-    `comparison.mode == "custom_validator"` — load the validator too (also once,
-    also fail-fast, but as `judge_error` rather than `runtime_error`: a bad
-    validator is a problem-authoring bug, never the submitter's). Then loop the
-    cases. Per case we deep-copy the input (so one case mutating its args can't
-    leak into the next), arm a `SIGALRM` for the per-case time limit, capture
-    stdout, invoke the user's code, and decide pass/fail — via the validator if
-    one was loaded, else `compare()`.
+# --- the child: runs the submission, never sees `expected` -------------------
 
-    By default every case runs (to report an honest X/N passed); a problem can opt
-    into `stop_on_first_failure` to save compute. Either way total time is bounded
-    by the per-case SIGALRM here plus the worker's outer wall-clock kill.
-    """
-    kind = payload.get("kind", "function")
-    function_name = payload.get("function_name")
-    class_name = payload.get("class_name")
-    user_code = payload["user_code"]
-    test_cases = payload.get("test_cases", [])
-    comparison = payload.get("comparison", {"mode": "exact"})
-    params = payload.get("params", [])
-    return_type = payload.get("return_type", "")
-    time_limit_ms = int(payload.get("time_limit_ms", 2000))
-    time_limit_s = max(time_limit_ms, 1) / 1000.0
-    # Default: run every case (for an X/N passed count). A problem can opt into
-    # fail-fast to save compute on obviously-wrong solutions. Total time is bounded
-    # either way by the per-case SIGALRM and the worker's wall-clock kill.
-    stop_on_first_failure = bool(payload.get("stop_on_first_failure", False))
+class _Ctx:
+    """The child's compiled, per-run state (set up once, reused per case)."""
+    __slots__ = ("kind", "func", "cls", "params", "return_type", "time_limit_s",
+                 "validate_fn", "real_stdout")
 
-    first_id = test_cases[0].get("id", 0) if test_cases else 0
-    real_stdout = sys.stdout
 
-    # Compile + exec the user module with stdout captured. ListNode/TreeNode/
-    # RandomListNode/GraphNode/Iterator are pre-bound in the namespace
-    # (by convention starter_code/solutions show them only as a comment, never
-    # live code) so a type hint like `head: ListNode` resolves
-    # at def-time, and code that constructs a new node works even if the user
-    # deleted the reference comment. Harmless for problems that never touch
-    # any of these names. CyclicListNode isn't in this dict — it's a
-    # wire-format tag, not its own class; nodes built under that codec are
-    # plain ListNode instances.
+def _child_setup(setup):
+    """Compile the submission and (if any) the validator. Returns `(ctx, err)`;
+    exactly one is None. `err` is a message dict already shaped for the result
+    pipe (a compile failure → the parent's single runtime_error; a bad validator
+    → judge_error), matching what `run()` produced before the split."""
+    ctx = _Ctx()
+    ctx.kind = setup.get("kind", "function")
+    ctx.params = setup.get("params", [])
+    ctx.return_type = setup.get("return_type", "")
+    ctx.time_limit_s = max(int(setup.get("time_limit_ms", 2000)), 1) / 1000.0
+    ctx.validate_fn = None
+    ctx.real_stdout = sys.stdout
+
     namespace = {
         "ListNode": ListNode, "TreeNode": TreeNode, "RandomListNode": RandomListNode,
         "GraphNode": GraphNode, "Iterator": Iterator,
     }
     sys.stdout = io.StringIO()
     try:
-        exec(compile(user_code, USER_FILENAME, "exec"), namespace)
+        exec(compile(setup["user_code"], USER_FILENAME, "exec"), namespace)
     except BaseException as exc:  # any top-level failure → single runtime_error
-        return [_error_result(first_id, exc)]
+        return None, {"setup": "user_error", "error": _format_user_traceback(exc)}
     finally:
-        sys.stdout = real_stdout
+        sys.stdout = ctx.real_stdout
 
-    if kind == "operations":
-        cls = namespace.get(class_name)
-        if not callable(cls):
-            return [{
-                "test_case_id": first_id,
-                "status": "runtime_error",
-                "runtime_ms": 0,
-                "output": None,
-                "stdout": "",
-                "error": "Class '%s' not found" % class_name,
-            }]
+    if ctx.kind == "operations":
+        ctx.cls = namespace.get(setup.get("class_name"))
+        ctx.func = None
+        if not callable(ctx.cls):
+            return None, {"setup": "user_error", "error": "Class '%s' not found" % setup.get("class_name")}
     else:
-        func = namespace.get(function_name)
-        if not callable(func):
-            return [{
-                "test_case_id": first_id,
-                "status": "runtime_error",
-                "runtime_ms": 0,
-                "output": None,
-                "stdout": "",
-                "error": "Function '%s' not found" % function_name,
-            }]
+        ctx.cls = None
+        ctx.func = namespace.get(setup.get("function_name"))
+        if not callable(ctx.func):
+            return None, {"setup": "user_error", "error": "Function '%s' not found" % setup.get("function_name")}
 
-    # Load the custom validator once, alongside the user's code — a bad
-    # validator (problem-authoring bug) fails fast as a single judge_error
-    # result, distinct from the submission's own runtime_error above.
-    validate_fn = None
-    if (comparison or {}).get("mode") == "custom_validator":
+    validator_code = setup.get("validator_code")
+    if validator_code is not None:
         try:
-            validate_fn = _load_validator(comparison.get("validator_code", ""))
+            ctx.validate_fn = _load_validator(validator_code)
         except ValidatorError as exc:
-            return [{
-                "test_case_id": first_id,
-                "status": "judge_error",
-                "runtime_ms": 0,
-                "output": None,
-                "stdout": "",
-                "error": _truncate("custom validator: %s" % exc),
-            }]
+            return None, {"setup": "validator_error", "error": "custom validator: %s" % exc}
+    return ctx, None
+
+
+def _execute_case(ctx, message):
+    """Run one case in the child and return its outcome (no parent-side compare).
+
+    The submission's `print()` output is captured per case (as before); its raw
+    fd-1 writes go to /dev/null (redirected in `_child_main`). `expected` is only
+    present when a validator runs here. On the `ok` path the child returns the
+    raw `actual` value for the parent to compare — it does not, and cannot,
+    decide pass/fail for a fixed-answer problem."""
+    args = message["input"]  # a fresh parse each case, so nothing leaks across cases
+    expected = message.get("expected")
+    validator_args = copy.deepcopy(args) if ctx.validate_fn is not None else None
+
+    buffer = io.StringIO()
+    sys.stdout = buffer
+    signal.setitimer(signal.ITIMER_REAL, ctx.time_limit_s)
+    start = time.perf_counter()
+    instance = None
+    try:
+        if ctx.kind == "operations":
+            ops, arg_lists = args
+            instance, actual = _run_operations(ctx.cls, ops, arg_lists, ctx.params)
+        else:
+            actual = _encode_result(ctx.func(*_decode_args(args, ctx.params)), ctx.return_type)
+        passed = None
+        if ctx.validate_fn is not None:
+            try:
+                passed = bool(ctx.validate_fn(actual=actual, expected=expected,
+                                              args=validator_args, instance=instance))
+            except TimeLimitExceeded:
+                raise
+            except BaseException as exc:  # noqa: BLE001 - validator may raise anything
+                raise ValidatorError(str(exc)) from exc
+    except TimeLimitExceeded:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        sys.stdout = ctx.real_stdout
+        return {"status": "time_limit_exceeded", "stdout": _truncate(buffer.getvalue())}
+    except ValidatorError as exc:
+        elapsed = round((time.perf_counter() - start) * 1000, 3)
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        sys.stdout = ctx.real_stdout
+        return {"status": "validator_error", "actual": actual, "runtime_ms": elapsed,
+                "stdout": _truncate(buffer.getvalue()), "error": "custom validator: %s" % exc}
+    except BaseException as exc:  # noqa: BLE001 - user code may raise anything
+        elapsed = round((time.perf_counter() - start) * 1000, 3)
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        sys.stdout = ctx.real_stdout
+        return {"status": "runtime_error", "runtime_ms": elapsed,
+                "stdout": _truncate(buffer.getvalue()), "error": _format_user_traceback(exc)}
+    elapsed = round((time.perf_counter() - start) * 1000, 3)
+    signal.setitimer(signal.ITIMER_REAL, 0)
+    sys.stdout = ctx.real_stdout
+    return {"status": "ok", "actual": actual, "passed": passed, "runtime_ms": elapsed,
+            "stdout": _truncate(buffer.getvalue())}
+
+
+def _child_main(result_fd):
+    """The child process: set up once, then answer one case per control line.
+
+    Reads the setup message and each case's input from stdin (the parent's
+    control channel); writes each outcome to `result_fd` (a private pipe). fd 1
+    and fd 2 are pointed at /dev/null first, so a submission that writes straight
+    to a raw descriptor can't reach the parent or the report — only this framed
+    pipe carries anything the parent reads, and the parent still decides
+    pass/fail itself."""
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    os.dup2(devnull, 1)
+    os.dup2(devnull, 2)
+    os.close(devnull)
+    out = os.fdopen(result_fd, "w")
+
+    def emit(message):
+        out.write(json.dumps(message) + "\n")
+        out.flush()
+
+    setup_line = sys.stdin.readline()
+    if not setup_line:
+        return
+    ctx, err = _child_setup(json.loads(setup_line))
+    if err is not None:
+        emit(err)
+        return
+    emit({"setup": "ok"})
+
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        emit(_execute_case(ctx, json.loads(line)))
+
+
+# --- the parent: orchestrates the child and writes the report ----------------
+
+class _Child:
+    """A live child process and the pipe the parent reads its results from."""
+    __slots__ = ("proc", "reader")
+
+    def __init__(self, proc, reader):
+        self.proc, self.reader = proc, reader
+
+    def send(self, message):
+        self.proc.stdin.write(json.dumps(message) + "\n")
+        self.proc.stdin.flush()
+
+    def read(self, deadline_s):
+        """Read one framed message. Returns the parsed dict, or a sentinel dict
+        `{"status": _HANG}` if the child produced nothing within `deadline_s`
+        seconds, or `{"status": _CRASH}` if it closed the pipe first (died) or
+        sent a frame that isn't valid JSON.
+
+        A submission's `exec`'d code can write raw bytes to the result fd itself,
+        so a malformed frame is treated as a dead, desynced child (_CRASH) rather
+        than being allowed to raise out of here and abort the whole run. It still
+        can't forge a pass: the parent alone holds `expected` and decides."""
+        ready, _, _ = select.select([self.reader], [], [], deadline_s)
+        if not ready:
+            return {"status": _HANG}
+        line = self.reader.readline()
+        if not line:
+            return {"status": _CRASH}
+        try:
+            return json.loads(line)
+        except ValueError:  # JSONDecodeError → treat the channel as desynced
+            return {"status": _CRASH}
+
+    def kill(self):
+        try:
+            os.killpg(self.proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        try:
+            self.proc.stdin.close()
+        except OSError:
+            pass
+        try:
+            self.reader.close()
+        except OSError:
+            pass
+        try:
+            self.proc.wait(timeout=1)
+        except Exception:  # noqa: BLE001 - best-effort reap
+            pass
+
+
+def _spawn_child(setup):
+    """Launch the child harness, hand it the setup, and return a `_Child` once it
+    acknowledges (or a message dict if setup failed, so the caller can report it).
+    The result pipe's write end is passed to the child by fd number; the parent
+    keeps only the read end, so the pipe reports EOF the moment the child dies."""
+    import subprocess
+
+    read_fd, write_fd = os.pipe()
+    proc = subprocess.Popen(
+        [sys.executable, os.path.abspath(__file__), CHILD_FLAG, str(write_fd)],
+        stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        pass_fds=(write_fd,), start_new_session=True, text=True,
+        env={k: v for k, v in os.environ.items() if not k.startswith("JUDGE_")},
+    )
+    os.close(write_fd)  # the child holds the only write end now
+    child = _Child(proc, os.fdopen(read_fd, "r"))
+    child.send(setup)
+    ack = child.read(_SETUP_GRACE_S)
+    if ack is None or ack.get("setup") != "ok":
+        child.kill()
+        return None, ack
+    return child, None
+
+
+def _finalize(tc, reply, comparison, validator_mode):
+    """Turn the child's per-case `reply` (or None for a hang/crash) into the
+    report row, computing pass/fail here for every fixed-answer problem."""
+    tc_id = tc.get("id", 0)
+    status = reply.get("status")
+    if status == _CRASH:
+        # The child died without answering — os._exit, a segfault, a killed
+        # subprocess. The submission's own doing, so a runtime_error for this case
+        # (not a judge fault), and the parent will respawn for the next.
+        return {"test_case_id": tc_id, "status": "runtime_error", "runtime_ms": 0, "output": None,
+                "stdout": "", "error": "the submission exited before returning a value"}
+    if status in (_HANG, "time_limit_exceeded"):
+        return {"test_case_id": tc_id, "status": "time_limit_exceeded", "runtime_ms": None,
+                "output": None, "stdout": _truncate(reply.get("stdout", "")), "error": None}
+    if status == "runtime_error":
+        return {"test_case_id": tc_id, "status": "runtime_error", "runtime_ms": reply.get("runtime_ms", 0),
+                "output": None, "stdout": _truncate(reply.get("stdout", "")),
+                "error": _truncate(reply.get("error", ""))}
+    if status == "validator_error":
+        return {"test_case_id": tc_id, "status": "judge_error", "runtime_ms": reply.get("runtime_ms", 0),
+                "output": _truncate(_format_output(reply.get("actual"))),
+                "stdout": _truncate(reply.get("stdout", "")), "error": _truncate(reply.get("error", ""))}
+
+    actual = reply.get("actual")
+    if validator_mode:
+        passed = bool(reply.get("passed"))
+    else:
+        passed = compare(actual, tc.get("expected"), comparison)
+    return {"test_case_id": tc_id, "status": "passed" if passed else "wrong_answer",
+            "runtime_ms": reply.get("runtime_ms", 0), "output": _truncate(_format_output(actual)),
+            "stdout": _truncate(reply.get("stdout", "")), "error": None}
+
+
+def run(payload):
+    """Judge the submission against every test case, in a child process.
+
+    The parent compiles nothing user-supplied and never runs it: it spawns the
+    child (`_spawn_child`), feeds it one case at a time, and for each reply either
+    trusts a validator's verdict or — for every fixed-answer mode — computes
+    pass/fail itself with `compare()` against an `expected` the child never
+    received. A case that hangs past the limit is killed and reported
+    `time_limit_exceeded`; a case that crashes the child is reported
+    `runtime_error`; either way the parent respawns a fresh child for the
+    remaining cases. A top-level compile error (or a bad validator) surfaces from
+    setup as a single runtime_error (or judge_error), exactly as before.
+
+    By default every case runs (for an honest X/N); `stop_on_first_failure` ends
+    at the first non-passing case.
+    """
+    kind = payload.get("kind", "function")
+    test_cases = payload.get("test_cases", [])
+    comparison = payload.get("comparison", {"mode": "exact"})
+    time_limit_ms = int(payload.get("time_limit_ms", 2000))
+    stop_on_first_failure = bool(payload.get("stop_on_first_failure", False))
+    first_id = test_cases[0].get("id", 0) if test_cases else 0
+
+    validator_mode = (comparison or {}).get("mode") == "custom_validator"
+    setup = {
+        "user_code": payload["user_code"],
+        "kind": kind,
+        "function_name": payload.get("function_name"),
+        "class_name": payload.get("class_name"),
+        "params": payload.get("params", []),
+        "return_type": payload.get("return_type", ""),
+        "time_limit_ms": time_limit_ms,
+        # The (trusted) validator runs in the child, where the live instance is;
+        # None for every other mode, so the child stays a pure input→output box.
+        "validator_code": comparison.get("validator_code", "") if validator_mode else None,
+    }
+
+    deadline_s = max(time_limit_ms, 1) / 1000.0 + _KILL_GRACE_S
+    child, err = _spawn_child(setup)
+    if child is None:
+        if err is not None and err.get("setup") == "validator_error":
+            return [_judge_error_result(first_id, err.get("error", "custom validator failed to load"))]
+        message = err.get("error") if err else "the submission could not be started"
+        return [{"test_case_id": first_id, "status": "runtime_error", "runtime_ms": 0,
+                 "output": None, "stdout": "", "error": _truncate(message)}]
 
     results = []
-    for tc in test_cases:
-        tc_id = tc.get("id", 0)
-        args = copy.deepcopy(tc.get("input", []))  # user mutation can't leak across cases
-        # A second, untouched copy for the validator: the submission can mutate
-        # `args` in place, and a validator comparing against *that* would be
-        # checking the answer against whatever the submission wrote there.
-        # Taken before the timer starts so its cost isn't billed to the user.
-        validator_args = copy.deepcopy(args) if validate_fn is not None else None
-        expected = tc.get("expected")
+    try:
+        for tc in test_cases:
+            if child is None:  # respawn after a previous kill/crash
+                child, err = _spawn_child(setup)
+                if child is None:  # a compile that worked once should work again; if not, blame the case
+                    message = (err or {}).get("error", "the submission could not be started")
+                    results.append({"test_case_id": tc.get("id", 0), "status": "runtime_error",
+                                    "runtime_ms": 0, "output": None, "stdout": "", "error": _truncate(message)})
+                    if stop_on_first_failure:
+                        break
+                    continue
 
-        buffer = io.StringIO()
-        sys.stdout = buffer
-        signal.setitimer(signal.ITIMER_REAL, time_limit_s)
-        start = time.perf_counter()
-        instance = None
-        try:
-            # Decode/encode inside the timed try so a codec bug reports as this
-            # case's runtime_error rather than crashing the whole payload. A
-            # custom validator's extra calls (e.g. a round trip via `instance`,
-            # or a many-call statistical check) run under the same SIGALRM here
-            # too, so a runaway validator reports time_limit_exceeded rather
-            # than hanging the container — but `compare()` (below, after the
-            # timer is disarmed) deliberately stays untimed: it's fixed harness
-            # logic, not problem-authored code that could hang or run away.
-            if kind == "operations":
-                ops, arg_lists = args
-                instance, actual = _run_operations(cls, ops, arg_lists, params)
-            else:
-                actual = _encode_result(func(*_decode_args(args, params)), return_type)
-            if validate_fn is not None:
-                try:
-                    passed = bool(validate_fn(actual=actual, expected=expected,
-                                               args=validator_args, instance=instance))
-                except TimeLimitExceeded:
-                    raise
-                except BaseException as exc:  # noqa: BLE001 - validator may raise anything
-                    raise ValidatorError(str(exc)) from exc
-        except TimeLimitExceeded:
-            signal.setitimer(signal.ITIMER_REAL, 0)
-            sys.stdout = real_stdout
-            results.append({
-                "test_case_id": tc_id,
-                "status": "time_limit_exceeded",
-                "runtime_ms": time_limit_ms,
-                "output": None,
-                "stdout": _truncate(buffer.getvalue()),
-                "error": None,
-            })
-            if stop_on_first_failure:
-                break
-            continue
-        except ValidatorError as exc:
-            # The problem's validator itself failed — not the submission's
-            # fault, so this is judge_error, not runtime_error (AGENTS.md).
-            # Only raised after `actual` is already computed (see above), so
-            # it's always safe to include in the result.
-            elapsed_ms = round((time.perf_counter() - start) * 1000, 3)
-            signal.setitimer(signal.ITIMER_REAL, 0)
-            sys.stdout = real_stdout
-            results.append({
-                "test_case_id": tc_id,
-                "status": "judge_error",
-                "runtime_ms": elapsed_ms,
-                "output": _truncate(_format_output(actual)),
-                "stdout": _truncate(buffer.getvalue()),
-                "error": _truncate("custom validator: %s" % exc),
-            })
-            if stop_on_first_failure:
-                break
-            continue
-        except BaseException as exc:  # noqa: BLE001 - user code may raise anything
-            elapsed_ms = round((time.perf_counter() - start) * 1000, 3)
-            signal.setitimer(signal.ITIMER_REAL, 0)
-            sys.stdout = real_stdout
-            results.append({
-                "test_case_id": tc_id,
-                "status": "runtime_error",
-                "runtime_ms": elapsed_ms,
-                "output": None,
-                "stdout": _truncate(buffer.getvalue()),
-                "error": _truncate(_format_user_traceback(exc)),
-            })
-            if stop_on_first_failure:
-                break
-            continue
+            message = {"input": tc.get("input", [])}
+            if validator_mode:
+                message["expected"] = tc.get("expected")
+            child.send(message)
+            reply = child.read(deadline_s)
+            result = _finalize(tc, reply, comparison, validator_mode)
+            results.append(result)
 
-        elapsed_ms = round((time.perf_counter() - start) * 1000, 3)
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        sys.stdout = real_stdout
-        # A validator (if loaded) already decided `passed` above, inside the
-        # timed block. Otherwise `compare()` runs here, same as always —
-        # untimed, after the SIGALRM is disarmed (unchanged by
-        # custom_validator's addition; see the comment above the try block).
-        if validate_fn is None:
-            passed = compare(actual, expected, comparison)
-        results.append({
-            "test_case_id": tc_id,
-            "status": "passed" if passed else "wrong_answer",
-            "runtime_ms": elapsed_ms,
-            "output": _truncate(_format_output(actual)),
-            "stdout": _truncate(buffer.getvalue()),
-            "error": None,
-        })
-        if not passed and stop_on_first_failure:
-            break
+            if reply.get("status") in (_HANG, _CRASH, "time_limit_exceeded"):
+                # A hang leaves the child unresponsive (or the SIGALRM path just
+                # unwound through user state we don't trust); a crash already
+                # ended it. Either way, start the next case with a clean child.
+                child.kill()
+                child = None
+            if result["status"] != "passed" and stop_on_first_failure:
+                break
+    finally:
+        if child is not None:
+            child.kill()
 
+    # `runtime_ms` is filled in for TLE rows here (the child, killed, can't report
+    # it), keeping the field a number as every other row has it.
+    for result in results:
+        if result["status"] == "time_limit_exceeded" and result["runtime_ms"] is None:
+            result["runtime_ms"] = time_limit_ms
     return results
+
+
+def _set_nondumpable():
+    """Mark this (parent) process non-dumpable on Linux, so the child — same uid —
+    can't read the parent's memory (which holds every `expected`) through
+    /proc/<pid>/mem or ptrace. Best-effort: a no-op where prctl isn't available
+    (e.g. a developer's macOS), where the container boundary isn't in play anyway."""
+    try:
+        import ctypes
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        PR_SET_DUMPABLE = 4
+        libc.prctl(PR_SET_DUMPABLE, 0, 0, 0, 0)
+    except Exception:  # noqa: BLE001 - defense in depth; never fail the run over it
+        pass
 
 
 def main():
     signal.signal(signal.SIGALRM, _alarm_handler)
+    if len(sys.argv) > 2 and sys.argv[1] == CHILD_FLAG:
+        _child_main(int(sys.argv[2]))
+        return
+
     # Payload channel: stdin by default (the `docker run -i` path). Under
     # Kubernetes there's no stdin pipe, so the runner mounts the payload as a file
-    # and points JUDGE_PAYLOAD_FILE at it. Same JSON either way.
-    import os
+    # and points JUDGE_PAYLOAD_FILE at it. Either way it's read and parsed here in
+    # the trusted parent, and the file is removed before any user code runs, so
+    # the child (which never gets the path) can't read the expected answers back
+    # out of it.
     payload_file = os.environ.get("JUDGE_PAYLOAD_FILE")
-    raw = open(payload_file, encoding="utf-8").read() if payload_file else sys.stdin.read()
+    if payload_file:
+        with open(payload_file, encoding="utf-8") as fh:
+            raw = fh.read()
+        try:
+            os.unlink(payload_file)
+        except OSError:
+            pass
+    else:
+        raw = sys.stdin.read()
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError as exc:
         sys.stderr.write("harness: invalid payload JSON: %s\n" % exc)
         sys.exit(2)
+    _set_nondumpable()
     results = run(payload)
     sys.stdout.write(json.dumps({"results": results}))
     sys.stdout.flush()

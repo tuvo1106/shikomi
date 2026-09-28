@@ -17,8 +17,10 @@ Every `docker run` lockdown flag maps to a Pod primitive:
     --user 1000             → runAsNonRoot / runAsUser 1000
     (host isolation)        → runtimeClassName: gvisor  (prod node pool; see notes)
 
-Payload in: there's no stdin pipe to a Pod, so the payload rides in as a ConfigMap
-mounted read-only and the harness reads it via `JUDGE_PAYLOAD_FILE`. Verdict out:
+Payload in: there's no stdin pipe to a Pod, so the payload rides in as a ConfigMap.
+An init container copies it into a writable in-memory emptyDir the judge container
+mounts (not the ConfigMap itself, which is read-only), so the harness can read it
+via `JUDGE_PAYLOAD_FILE` and then delete it before running the submission. Verdict out:
 the harness writes its JSON report to stdout, which we read back with the Pod log
 API (clean JSON on every real verdict — per-case errors are captured *into* that
 JSON, not onto stderr).
@@ -40,7 +42,8 @@ settings = get_settings()
 
 logger = logging.getLogger(__name__)
 NAMESPACE = settings.judge_namespace
-PAYLOAD_DIR = "/payload"
+PAYLOAD_DIR = "/payload"          # writable emptyDir the judge reads then deletes
+PAYLOAD_SRC_DIR = "/payload-src"  # read-only ConfigMap mount, on the init container only
 PAYLOAD_FILE = f"{PAYLOAD_DIR}/payload.json"
 JUDGE_LABEL = {"app": "judge"}
 POLL_INTERVAL_S = 0.4
@@ -68,10 +71,44 @@ def _load_config():
 
 def _build_pod(name, image, cm_name, memory_mb, cpus, wall_timeout_s, tmpfs_size_mb=16):
     """Construct the locked-down judge Pod object (see the module docstring for the
-    flag-by-flag mapping from `docker run`). `cm_name` is the payload ConfigMap
-    mounted read-only at /payload; `wall_timeout_s` sets the pod-level
-    `activeDeadlineSeconds` backstop above the worker's own kill."""
+    flag-by-flag mapping from `docker run`). `wall_timeout_s` sets the pod-level
+    `activeDeadlineSeconds` backstop above the worker's own kill.
+
+    The payload does **not** get mounted into the judge container. The ConfigMap
+    mount would be read-only, so the harness parent couldn't delete it before
+    running the submission, and the file — every hidden case's `expected` — would
+    stay readable at a fixed path to the submission (the harness runs it as the
+    same uid). Instead an init container copies the payload from the ConfigMap
+    into a writable in-memory `emptyDir`, and the judge container mounts *that*;
+    the parent reads it and unlinks it before any user code runs (as it already
+    does on the Docker path, where the payload arrives on stdin), so the child
+    process the submission runs in can't read the answers back out of it."""
     from kubernetes import client
+
+    def _security_context():
+        return client.V1SecurityContext(
+            run_as_non_root=True,
+            run_as_user=1000,
+            allow_privilege_escalation=False,
+            read_only_root_filesystem=True,
+            capabilities=client.V1Capabilities(drop=["ALL"]),
+            seccomp_profile=client.V1SeccompProfile(type="RuntimeDefault"),
+        )
+
+    # Copies the ConfigMap payload into the writable emptyDir the judge then reads.
+    init_container = client.V1Container(
+        name="payload-copy",
+        image=image,
+        image_pull_policy="Never",
+        command=["cp", f"{PAYLOAD_SRC_DIR}/payload.json", PAYLOAD_FILE],
+        resources=client.V1ResourceRequirements(
+            requests={"cpu": "50m", "memory": "32Mi"}, limits={"cpu": "1", "memory": "64Mi"}),
+        security_context=_security_context(),
+        volume_mounts=[
+            client.V1VolumeMount(name="payload-src", mount_path=PAYLOAD_SRC_DIR, read_only=True),
+            client.V1VolumeMount(name="payload", mount_path=PAYLOAD_DIR),
+        ],
+    )
     container = client.V1Container(
         name="judge",
         image=image,
@@ -81,16 +118,12 @@ def _build_pod(name, image, cm_name, memory_mb, cpus, wall_timeout_s, tmpfs_size
             requests={"cpu": "50m", "memory": f"{memory_mb}Mi"},
             limits={"cpu": str(cpus), "memory": f"{memory_mb}Mi"},
         ),
-        security_context=client.V1SecurityContext(
-            run_as_non_root=True,
-            run_as_user=1000,
-            allow_privilege_escalation=False,
-            read_only_root_filesystem=True,
-            capabilities=client.V1Capabilities(drop=["ALL"]),
-            seccomp_profile=client.V1SeccompProfile(type="RuntimeDefault"),
-        ),
+        security_context=_security_context(),
         volume_mounts=[
-            client.V1VolumeMount(name="payload", mount_path=PAYLOAD_DIR, read_only=True),
+            # Writable, so the harness parent can delete the payload before the
+            # submission runs. The ConfigMap itself is only mounted on the init
+            # container above, never here.
+            client.V1VolumeMount(name="payload", mount_path=PAYLOAD_DIR),
             client.V1VolumeMount(name="tmp", mount_path="/tmp"),
         ],
     )
@@ -101,9 +134,19 @@ def _build_pod(name, image, cm_name, memory_mb, cpus, wall_timeout_s, tmpfs_size
         # Backstop wall clock (the worker also kills from outside; see run_in_container).
         active_deadline_seconds=int(wall_timeout_s) + 5,
         runtime_class_name=RUNTIME_CLASS,
+        init_containers=[init_container],
         containers=[container],
         volumes=[
-            client.V1Volume(name="payload", config_map=client.V1ConfigMapVolumeSource(name=cm_name)),
+            client.V1Volume(name="payload-src", config_map=client.V1ConfigMapVolumeSource(name=cm_name)),
+            # Node-backed (default medium), deliberately NOT medium="Memory": a
+            # tmpfs emptyDir's bytes are charged to the judge container's memory
+            # cgroup, silently shrinking the effective `memory_limit_mb` the
+            # submission is graded under. The payload holds only `expected` (not a
+            # secret), lives on node ephemeral storage for the few milliseconds
+            # before the harness parent deletes it, and is never on the node once
+            # the submission's peak memory is measured. size_limit still caps it.
+            client.V1Volume(name="payload", empty_dir=client.V1EmptyDirVolumeSource(
+                size_limit="16Mi")),
             client.V1Volume(name="tmp", empty_dir=client.V1EmptyDirVolumeSource(
                 medium="Memory", size_limit=f"{tmpfs_size_mb}Mi")),
         ],

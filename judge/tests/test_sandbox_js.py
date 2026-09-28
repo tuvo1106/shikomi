@@ -100,10 +100,12 @@ def test_pids_limit_contains_fork_bomb():
     # throw on the resulting EAGAIN — it just sets `.error` and returns — so
     # the loop keeps retrying rather than surfacing a JS-level runtime_error.
     # Each retry still costs memory/process-table entries, so containment shows
-    # up as one of: the wall-clock kill (exercised via the real runner here),
-    # an OOM kill (exit 137) from the accumulating retries, or — if a retry
-    # ever does throw — a runtime_error. Any of the three proves the host is
-    # protected; which one wins is a timing race, not something to pin down.
+    # up as one of: a clean per-case time_limit_exceeded (the child hits its own
+    # limit while the pids-limit makes each spawn fail fast, and the parent reports
+    # it and exits 0), the wall-clock kill (exercised via the real runner here),
+    # an OOM kill (exit 137) from the accumulating retries, or — if a retry ever
+    # throws — a runtime_error. Any of these proves the host is protected; which
+    # one wins is a timing race, not something to pin down.
     import asyncio
 
     sys.path.insert(0, str(BACKEND))
@@ -117,4 +119,20 @@ def test_pids_limit_contains_fork_bomb():
         _payload(code, time_limit_ms=1000),
         image=IMAGE, container_name="judge-js-forkbomb",
         memory_mb=128, cpus="1", pids_limit=64, wall_timeout_s=8))
-    assert result.timed_out or result.oom_killed or "runtime_error" in result.stdout
+    assert (result.timed_out or result.oom_killed
+            or "runtime_error" in result.stdout or "time_limit_exceeded" in result.stdout)
+
+
+def test_submission_cannot_read_the_parents_memory():
+    # The submission runs in a child; the container's non-root ptrace restrictions
+    # stop it opening the parent's /proc/<pid>/mem, where the parent holds every
+    # `expected`. It returns a "blocked" string (never "OPENED").
+    code = ("var f = function(x) {\n"
+            "  const p = this.constructor.constructor('return process')();\n"
+            "  const fs = p.mainModule.require('fs');\n"
+            "  try { fs.openSync('/proc/' + p.ppid + '/mem', 'r'); return 'OPENED'; }\n"
+            "  catch (e) { return 'blocked:' + (e.code || 'err'); }\n"
+            "};")
+    out = json.loads(run_container(_payload(code)).stdout)["results"][0]["output"]
+    assert "OPENED" not in out
+    assert "blocked" in out

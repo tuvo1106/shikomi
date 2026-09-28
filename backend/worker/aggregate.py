@@ -33,14 +33,42 @@ class Verdict:
     total: int = 0
 
 
-def parse_harness_output(stdout: str):
-    """Return the results list, or None if the harness output is unusable."""
+def parse_harness_output(stdout: str, case_ids: Optional[List] = None):
+    """Return the results list, or None if the harness output is unusable.
+
+    With `case_ids` (the ids of the cases sent, in order), the report must also
+    account for them: one row per case, in the order sent, each with its case's
+    id. A run may end early, but only on a failure: a compile error is one
+    non-passing row, and `stop_on_first_failure` stops at the first failing case.
+    So a shorter report must end with a non-passing row. Anything else (a missing
+    or extra case, an unknown id, an empty report for a non-empty run) is refused
+    as unusable, which the caller reports as `judge_error`, never as a pass.
+
+    This is defence in depth: the harnesses keep user code out of the process
+    that writes this report (DESIGN.md §5.3), and this check keeps a malformed or
+    incomplete report from ever reading as "every case passed".
+    """
     try:
         doc = json.loads(stdout)
     except (json.JSONDecodeError, TypeError):
         return None
     results = doc.get("results") if isinstance(doc, dict) else None
-    return results if isinstance(results, list) else None
+    if not isinstance(results, list) or not all(isinstance(r, dict) for r in results):
+        return None
+    if case_ids is not None and not _accounts_for(results, case_ids):
+        return None
+    return results
+
+
+def _accounts_for(results: List[dict], case_ids: List) -> bool:
+    """Whether `results` is a complete report for `case_ids`, or an early stop."""
+    if not case_ids:
+        return not results
+    if not results or len(results) > len(case_ids):
+        return False
+    if [r.get("test_case_id") for r in results] != list(case_ids[:len(results)]):
+        return False
+    return len(results) == len(case_ids) or results[-1].get("status") != "passed"
 
 
 def aggregate(container_result, results: Optional[List[dict]],

@@ -1,4 +1,8 @@
 """Verdict aggregation unit tests (DESIGN.md §10.2 — worker tests)."""
+import json
+
+import pytest
+
 from worker.aggregate import aggregate, parse_harness_output
 from worker.docker_runner import ContainerResult
 
@@ -110,3 +114,36 @@ def test_parse_harness_output_invalid():
     assert parse_harness_output("garbage") is None
     assert parse_harness_output('{"no_results": 1}') is None
     assert parse_harness_output('{"results": "not a list"}') is None
+
+
+# --- the report must account for the cases sent (defence in depth) ---------------
+
+def _doc(*rows):
+    return json.dumps({"results": [{"test_case_id": i, "status": st} for i, st in rows]})
+
+
+def test_a_complete_report_is_accepted():
+    assert parse_harness_output(_doc((0, "passed"), (1, "wrong_answer")), [0, 1]) is not None
+
+
+def test_an_early_stop_on_a_failure_is_accepted():
+    """A compile error is one row; stop_on_first_failure ends at the first failure."""
+    assert parse_harness_output(_doc((0, "runtime_error")), [0, 1, 2]) is not None
+    assert parse_harness_output(_doc((0, "passed"), (1, "wrong_answer")), [0, 1, 2]) is not None
+
+
+@pytest.mark.parametrize("rows", [
+    (),                                   # nothing for a non-empty run
+    ((0, "passed"),),                     # stops early without a failure
+    ((0, "passed"), (2, "passed")),       # skips a case
+    ((1, "passed"), (0, "passed")),       # out of order
+    ((0, "passed"), (1, "passed"), (1, "passed")),  # more rows than cases
+    ((7, "passed"), (8, "passed")),       # unknown ids
+])
+def test_a_report_that_doesnt_account_for_every_case_is_unusable(rows):
+    assert parse_harness_output(_doc(*rows), [0, 1]) is None
+
+
+def test_an_unusable_report_is_a_judge_error_not_a_pass():
+    verdict = aggregate(cr(), parse_harness_output(_doc(), [0, 1]), total_cases=2)
+    assert verdict.status == "judge_error"

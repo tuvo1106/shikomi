@@ -282,3 +282,53 @@ def test_leaked_interval_does_not_contaminate_a_later_cases_stdout():
     assert res[1]["status"] == "passed"
     assert res[1]["stdout"] == "own 2"
     assert "leaked" not in res[1]["stdout"]
+
+
+# --- trust boundary: the submission runs in a child that never sees `expected`
+# and cannot write the report (DESIGN.md §5.3). --------------------------------
+
+def test_js_submission_cannot_forge_the_report():
+    # Reach the host realm through the vm, write a fabricated report to real
+    # stdout, and exit. It can't pass: the child's stdout is /dev/null and the
+    # parent builds the report itself; the abrupt exit fails this case.
+    forge = (
+        "var f = function(a, b) {\n"
+        "  const p = this.constructor.constructor('return process')();\n"
+        "  p.stdout.write('{\"results\":[{\"test_case_id\":0,\"status\":\"passed\","
+        "\"runtime_ms\":0,\"output\":\"0\",\"stdout\":\"\",\"error\":null}]}');\n"
+        "  p.exit(0);\n"
+        "};"
+    )
+    res = results(payload(forge, [case(0, [1, 2], 42)]))
+    assert len(res) == 1
+    assert res[0]["status"] != "passed"
+
+
+def test_js_case_that_crashes_the_child_does_not_stop_later_cases():
+    code = (
+        "var f = function(a, b) {\n"
+        "  if (a === 0) { this.constructor.constructor('return process')().exit(0); }\n"
+        "  return a + b;\n"
+        "};"
+    )
+    res = results(payload(code, [case(0, [0, 0], 0), case(1, [2, 3], 5)]))
+    assert [r["status"] for r in res] == ["runtime_error", "passed"]
+
+
+def test_js_garbage_frame_on_the_result_pipe_does_not_abort_the_run():
+    # The child's `require` is the real one, so a submission can write raw bytes
+    # to the result channel (fd 3). A frame the parent can't parse must not throw
+    # out of the read loop and lose every case as a judge_error: the parent treats
+    # it as a desynced child (this case fails, a fresh child runs the next). It
+    # still can't forge a pass — the parent alone holds `expected`.
+    code = (
+        "var f = function(a, b) {\n"
+        "  if (a === 0) {\n"
+        "    require('fs').writeSync(3, 'this is not json\\n');\n"
+        "    this.constructor.constructor('return process')().exit(0);\n"
+        "  }\n"
+        "  return a + b;\n"
+        "};"
+    )
+    res = results(payload(code, [case(0, [0, 0], 0), case(1, [2, 3], 5)]))
+    assert [r["status"] for r in res] == ["runtime_error", "passed"]

@@ -19,11 +19,11 @@ IMAGE = "shikomi-judge:latest"
 BACKEND = pathlib.Path(__file__).resolve().parents[2] / "backend"
 
 
-def _payload(user_code, inp=None, time_limit_ms=2000):
+def _payload(user_code, inp=None, time_limit_ms=2000, cases=None):
     return json.dumps({
         "function_name": "f",
         "user_code": user_code,
-        "test_cases": [{"id": 0, "input": inp or [0], "expected": None}],
+        "test_cases": cases or [{"id": 0, "input": inp or [0], "expected": None}],
         "comparison": {"mode": "exact"},
         "time_limit_ms": time_limit_ms,
     })
@@ -92,9 +92,12 @@ def test_pids_limit_contains_fork_bomb():
     assert result.timed_out or "runtime_error" in result.stdout
 
 
-def test_wall_clock_kill_when_alarm_defeated():
-    # User code disables SIGALRM, defeating the harness's own timeout. The worker's
-    # wall-clock kill (docker_runner) is the backstop.
+def test_case_time_limit_survives_a_defeated_alarm():
+    # User code disables SIGALRM, defeating the child's own per-case timeout. The
+    # parent (which holds no user code) kills the hung child and reports a clean
+    # per-case time_limit_exceeded — so the container still exits 0 with a full
+    # report, and the worker's outer wall-clock kill is not needed. The second
+    # case also runs, proving the parent respawned a fresh child.
     import asyncio
 
     sys.path.insert(0, str(BACKEND))
@@ -106,10 +109,14 @@ def test_wall_clock_kill_when_alarm_defeated():
             "    while True:\n"
             "        pass\n")
     result = asyncio.run(docker_runner.run_in_container(
-        _payload(code, time_limit_ms=500),
+        _payload(code, cases=[{"id": 0, "input": [1], "expected": 1},
+                              {"id": 1, "input": [2], "expected": 2}],
+                 time_limit_ms=500),
         image=IMAGE, container_name="judge-wallclock",
-        memory_mb=128, cpus="1", pids_limit=64, wall_timeout_s=3))
-    assert result.timed_out
+        memory_mb=128, cpus="1", pids_limit=64, wall_timeout_s=10))
+    assert not result.timed_out           # the parent handled it; no container kill
+    rows = json.loads(result.stdout)["results"]
+    assert [r["status"] for r in rows] == ["time_limit_exceeded", "time_limit_exceeded"]
 
 
 # The sweep tests below name their containers `sweeptest-*` and sweep by that prefix, not
@@ -202,3 +209,20 @@ def test_sweep_orphans_skips_container_this_process_started():
         assert not result.oom_killed
     finally:
         subprocess.run(["docker", "rm", "-f", "sweeptest-active"], capture_output=True)
+
+
+def test_submission_cannot_read_the_parents_memory():
+    # The submission runs in a child; the parent (which holds every `expected`)
+    # is marked non-dumpable and the container runs non-root, so the child can't
+    # open the parent's /proc/<pid>/mem. It returns a "blocked" string (never
+    # "OPENED"), which fails the case rather than leaking the answers.
+    code = ("import os\n"
+            "def f(x):\n"
+            "    try:\n"
+            "        os.open('/proc/%d/mem' % os.getppid(), os.O_RDONLY)\n"
+            "        return 'OPENED'\n"
+            "    except OSError as e:\n"
+            "        return 'blocked:' + e.strerror\n")
+    out = json.loads(run_container(_payload(code)).stdout)["results"][0]["output"]
+    assert "OPENED" not in out
+    assert "blocked" in out
