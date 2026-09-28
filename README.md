@@ -5,7 +5,7 @@
 Shikomi is the platform half of a coding-practice site. It gives you a browser
 editor, a sandboxed judge for Python, JavaScript, Rust and SQL, accounts, submission
 history, and editorial solutions. It ships **no problem catalog**. You write
-problems as JSON files and load them with one command. Five original starter
+problems as JSON files and load them with one command. Six original starter
 problems are included to show the format.
 
 *Shikomi* (仕込み) is the kitchen prep done before service: the stock, the cut
@@ -173,7 +173,7 @@ and the gotchas worth knowing before you change anything.
 backend/     FastAPI app (app/), judge worker (worker/), Alembic migrations, tests
 judge/       sandbox harnesses (Python, JS, Rust, SQL), their Dockerfiles, harness tests
 frontend/    React + Vite + Monaco workspace, Vitest + Playwright tests
-seed/        the five starter problems
+seed/        the six starter problems
 deploy/      Helm chart
 scripts/     dev/prod/k8s bring-up, local CI, problem-file formatter
 docs/        architecture diagrams, generated schema reference, ADRs

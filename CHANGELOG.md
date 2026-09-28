@@ -17,6 +17,7 @@ All notable changes to this project are recorded here. The format follows
   Existing deployments need `alembic upgrade head` (it widens the `language` check
   constraint) and a `JUDGE_IMAGE_RUST` setting if they don't use the default tag.
 - A per-case `memory_limit_exceeded` verdict (reported by the Rust judge).
+- *Merge Booking Windows*, a Rust starter problem, shows the format for Rust problems.
 - `python -m worker.judge_local --language <python|js|rust|mysql>` judges a payload in
   that language's sandbox (its image, tmpfs size and `exec` flag).
 
