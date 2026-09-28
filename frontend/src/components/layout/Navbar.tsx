@@ -9,11 +9,17 @@ import { NAV_LINKS } from './navLinks'
 /**
  * A full-height nav tab whose active state is a 2px underline at the bar's bottom edge.
  *
- * Its text has to share a baseline with the brand beside it, which takes two things.
- * The matching transparent top border: with a bottom border alone the text is centered
- * in a box 2px shorter than the bar, 1px high. And `pt-0.5`: the tab's 14px text,
- * centered, puts its baseline 1px above the 16px brand's, and 2px of top padding moves
- * the center down that 1px.
+ * From `sm` up its text has to share a baseline with the brand beside it, which
+ * takes two things. A matching transparent top border: with a bottom border alone
+ * the text is centered in a box 2px shorter than the bar, 1px high. And `sm:pt-0.5`:
+ * the tab's 14px text, centered, puts its baseline 1px above the 16px brand's, and
+ * 2px of top padding moves the center down that 1px. Below `sm` the brand text is
+ * hidden, so the tab stays centered against the icon and avatar instead.
+ *
+ * The 1px depends on the fonts' metrics and sizes, so e2e/navbar.spec.ts measures
+ * both baselines in a real browser and fails if a font or size change breaks it.
+ * Each border side's color is set once (`border-t-transparent`, `border-b-*`), so
+ * the result doesn't depend on the order Tailwind emits its rules in.
  */
 function NavItem({ to, end, children }: { to: string; end?: boolean; children: ReactNode }) {
   return (
@@ -21,10 +27,10 @@ function NavItem({ to, end, children }: { to: string; end?: boolean; children: R
       to={to}
       end={end}
       className={({ isActive }) =>
-        `flex h-full items-center border-y-2 border-t-transparent px-1.5 pt-0.5 text-sm transition-colors sm:px-3 ${
+        `flex h-full items-center border-y-2 border-t-transparent px-1.5 text-sm transition-colors sm:px-3 sm:pt-0.5 ${
           isActive
-            ? 'border-indigo-500 text-zinc-100'
-            : 'border-transparent text-zinc-400 hover:text-zinc-100'
+            ? 'border-b-indigo-500 text-zinc-100'
+            : 'border-b-transparent text-zinc-400 hover:text-zinc-100'
         }`
       }
     >
@@ -55,7 +61,7 @@ export function Navbar() {
           <span className="grid h-7 w-7 place-items-center rounded-md bg-indigo-500 text-white">
             <Braces size={16} strokeWidth={2.5} />
           </span>
-          <span className="hidden font-semibold text-zinc-100 sm:block">shikomi</span>
+          <span data-testid="brand-text" className="hidden font-semibold text-zinc-100 sm:block">shikomi</span>
         </Link>
         {user && (
           // Below 360px (small phones) there's no room for the links beside the brand,

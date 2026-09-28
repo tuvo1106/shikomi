@@ -5,6 +5,7 @@ The CLI uses app.db.SessionLocal directly, so we point it at the test engine.
 import json
 
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
 from app import cli
 from app import judge_budget as jb
@@ -198,7 +199,7 @@ async def test_seed_writes_every_language_and_its_solution_code(
         (0, "python"), (1, "js"), (2, "rust")]
     assert problem.languages[2].note_md == "Use `i64`."
     async with session_factory() as s:
-        sols = (await s.execute(select(Solution).order_by(Solution.ordinal))).scalars().all()
+        sols = (await s.execute(select(Solution).options(selectinload(Solution.codes)).order_by(Solution.ordinal))).scalars().all()
         assert [{c.language: c.code for c in sol.codes} for sol in sols] == [
             {"python": "py", "js": "js", "rust": "rs"}, {"rust": "rs2"}]
 
@@ -216,7 +217,7 @@ async def test_a_single_language_file_is_lifted_into_languages(
     assert (variant.language, variant.function_name, variant.starter_code) == (
         "python", "f", "def f(x): ...")
     async with session_factory() as s:
-        [sol] = (await s.execute(select(Solution))).scalars().all()
+        [sol] = (await s.execute(select(Solution).options(selectinload(Solution.codes)))).scalars().all()
         assert [(c.language, c.code) for c in sol.codes] == [("python", "c")]
 
 

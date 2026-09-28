@@ -98,6 +98,6 @@ def profile_for(language: str) -> SandboxProfile:
     """`language`'s profile, falling back to Python's for an unknown value.
 
     The fallback is defensive only: `ProblemIn`'s `Language` literal and the
-    `ck_problems_language` constraint already reject anything else.
+    `ck_problem_languages_language` constraint already reject anything else.
     """
     return PROFILES.get(language, PROFILES["python"])

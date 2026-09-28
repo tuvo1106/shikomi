@@ -41,7 +41,7 @@ async def poll(client, headers, sid, timeout=60):
 
 
 async def submit(client, headers, path, pid, code):
-    r = await client.post(f"{API}{path}", headers=headers, json={"problem_id": pid, "code": code})
+    r = await client.post(f"{API}{path}", headers=headers, json={"problem_id": pid, "code": code, "language": "python"})
     r.raise_for_status()
     return await poll(client, headers, r.json()["id"])
 

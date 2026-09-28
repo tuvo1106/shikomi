@@ -20,9 +20,11 @@ _MAX_CODE = get_settings().max_code_bytes
 class SubmissionCreate(BaseModel):
     """The Run/Submit request body: which problem, the code, and its language.
 
-    `language` must be one of the problem's languages. Omitting it means the
-    problem's default (its first language), which is what every client sent
-    before problems had several languages, so those requests keep working.
+    `language` must be one of the problem's languages. It may be omitted only
+    for a one-language problem, which is what every client sent before problems
+    had several languages, so those requests keep working. On a multi-language
+    problem it's required: the problem's default may not be the language an old
+    client's code was written in.
     """
 
     problem_id: uuid.UUID

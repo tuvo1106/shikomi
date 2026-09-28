@@ -36,8 +36,10 @@ was N languages per problem, not two.
    solution's title, prose and complexity stay shared, since the idea is the same. A solution
    may cover some languages only, but every language must be covered by *some* solution, so
    the seed-solution tests prove each language's signature against the shared cases.
-3. **`submissions.language`**, required. The API defaults it to the problem's first language
-   when a client omits it, and rejects a language the problem doesn't offer (400
+3. **`submissions.language`**, required. The API fills it in when a client omits it on a
+   one-language problem, and otherwise answers 400 `LANGUAGE_REQUIRED` (a review found that
+   defaulting to the first language judged an old client's Rust as Python once a problem's
+   default changed). It rejects a language the problem doesn't offer (400
    `UNSUPPORTED_LANGUAGE`). The worker judges with the matching variant, and a variant that has
    disappeared since (a re-seed) is a `judge_error`, never a silent fallback.
 4. **Stats are per language.** The runtime percentile and histogram filter on the

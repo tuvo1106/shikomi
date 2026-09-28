@@ -520,12 +520,50 @@ describe('Workspace languages', () => {
     expect(await screen.findByTestId('editor')).toHaveValue('var pairSum = function() {};')
   })
 
-  it('moves a draft saved before languages existed into the default language', async () => {
+  it('moves a draft saved before languages existed, on a one-language problem', async () => {
     localStorage.setItem('code:pair-sum', 'old draft')
-    serve(MULTI)
+    serve(PROBLEM)
     renderWorkspace()
     expect(await screen.findByTestId('editor')).toHaveValue('old draft')
     expect(localStorage.getItem('code:pair-sum:python')).toBe('old draft')
     expect(localStorage.getItem('code:pair-sum')).toBeNull()
+  })
+
+  it('leaves a pre-languages draft alone on a multi-language problem', async () => {
+    // Its default language may have changed since (merge-booking-windows went from
+    // Rust to Python), so filing the draft under the default could submit Rust as Python.
+    localStorage.setItem('code:pair-sum', 'fn old() {}')
+    serve(MULTI)
+    renderWorkspace()
+    expect(await screen.findByTestId('editor')).toHaveValue('def pair_sum(): ...')
+    expect(localStorage.getItem('code:pair-sum:python')).toBeNull()
+    expect(localStorage.getItem('code:pair-sum')).toBe('fn old() {}')
+  })
+
+  it('locks the language while a verdict is pending, the Solutions tab included', async () => {
+    const solution = { id: 'b', ordinal: 0, title: 'Compact', intuition_md: 'i', algorithm_md: '',
+      code: { rust: 'rs compact' }, time_complexity: 'O(n)', space_complexity: 'O(1)',
+      time_complexity_reason: '', space_complexity_reason: '' }
+    localStorage.setItem('sol:pair-sum', '1')
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: string, init?: RequestInit) => {
+        const url = String(input)
+        if (init?.method === 'POST') return Promise.resolve(json({ id: 'slow', status: 'pending' }, 202))
+        if (url.includes('/submissions/slow')) return new Promise<Response>(() => {}) // never settles
+        if (url.includes('/problems/pair-sum/solutions')) return Promise.resolve(json({ items: [solution] }))
+        if (url.includes('/problems/pair-sum')) return Promise.resolve(json({ ...MULTI, has_solutions: true }))
+        return Promise.resolve(json({}, 404))
+      }),
+    )
+    renderWorkspace()
+    await screen.findByText('Pair Sum')
+    await userEvent.click(screen.getByText('Submit'))
+    await userEvent.click(screen.getByText('Solutions'))
+
+    const switchButton = await screen.findByText('Switch to Rust')
+    expect(switchButton).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Rust' })).toBeDisabled() // the switcher too
+    expect(screen.getByTestId('editor')).toHaveValue('def pair_sum(): ...')
   })
 })

@@ -31,6 +31,7 @@ export function Solutions({
   languages,
   onLoadCode,
   onSwitchLanguage,
+  languageLocked = false,
 }: {
   slug: string
   solved: boolean
@@ -39,6 +40,9 @@ export function Solutions({
   languages: Language[]
   onLoadCode: (code: string, language: Language) => void
   onSwitchLanguage: (language: Language) => void
+  /** A verdict is pending, so the "Switch to" buttons are disabled (the result
+   * belongs to the language it was submitted in). */
+  languageLocked?: boolean
 }) {
   // Soft gate (§6.3): spoiler warning unless already solved or previously confirmed.
   const [revealed, setRevealed] = useState(
@@ -80,6 +84,7 @@ export function Solutions({
           languages={languages}
           onLoadCode={onLoadCode}
           onSwitchLanguage={onSwitchLanguage}
+          languageLocked={languageLocked}
         />
       ))}
     </div>
@@ -117,12 +122,14 @@ function SolutionView({
   languages,
   onLoadCode,
   onSwitchLanguage,
+  languageLocked,
 }: {
   solution: Solution
   language: Language
   languages: Language[]
   onLoadCode: (code: string, language: Language) => void
   onSwitchLanguage: (language: Language) => void
+  languageLocked: boolean
 }) {
   const code = solution.code[language]
   // In the problem's order, so "Rust only" and the switch buttons read consistently.
@@ -161,7 +168,9 @@ function SolutionView({
               <button
                 key={l}
                 onClick={() => onSwitchLanguage(l)}
-                className="rounded border border-zinc-700 px-2 py-0.5 text-xs text-zinc-300 hover:bg-zinc-800"
+                disabled={languageLocked}
+                title={languageLocked ? 'Wait for the verdict to switch languages' : undefined}
+                className="rounded border border-zinc-700 px-2 py-0.5 text-xs text-zinc-300 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 Switch to {LANGUAGE_LABEL[l]}
               </button>

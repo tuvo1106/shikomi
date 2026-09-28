@@ -47,12 +47,30 @@ All notable changes to this project are recorded here. The format follows
   submission's language, and "Beats X%" compares only against accepted submissions in
   the same language. *Merge Booking Windows* is now offered in Python, JavaScript and
   Rust. Problem files list `languages` and give solution `code` per language; the
-  single-language form still loads unchanged. `POST /submissions` and `/run` take an
-  optional `language` (default: the problem's first). Existing deployments need
-  `alembic upgrade head`, which moves each problem's language fields into the new
-  `problem_languages` table and backfills every submission's language.
+  single-language form still loads unchanged. `POST /submissions` and `/run` take a
+  `language`, which may be omitted only on a one-language problem (a multi-language
+  one answers 400 `LANGUAGE_REQUIRED`, rather than judging an old client's code in a
+  default it wasn't written for). Existing deployments need `alembic upgrade head`,
+  which moves each problem's language fields into the new `problem_languages` table
+  and backfills every submission's language. **That migration isn't compatible with
+  the previous release's code**, so stop the api and worker before upgrading (on
+  Kubernetes, scale both Deployments to 0, `helm upgrade`, then scale back up), or
+  expect errors from the old pods until the rollout finishes.
 
 ### Fixed
+
+- The Helm chart now migrates the database *before* an upgrade's new pods start
+  (a `pre-upgrade` hook). It used to run after them, so the new code briefly met the
+  old schema.
+- A draft saved before problems had several languages is no longer moved into a
+  multi-language problem's default language, which could put Rust code in the Python
+  editor (it stays where it was; one-language problems still migrate it).
+- Each language in the editor keeps its own undo history, so Ctrl+Z after switching
+  languages can't restore the other language's code into the draft.
+- The Solutions tab and the submission view can't switch the editor's language while
+  a verdict is pending (the language switcher already couldn't).
+- Loading a Rust or JavaScript solution keeps the starter's reference comment (the
+  judge-defined node struct), as Python's always did.
 
 - A problem file whose cyclic-list position, random-pointer index or graph neighbour
   doesn't point at a real node is now refused when it's loaded. The Python judge used to

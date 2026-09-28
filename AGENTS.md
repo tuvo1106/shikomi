@@ -419,6 +419,10 @@ slice ships, delete its entry here.
   squash. Config comes from environment variables (`.env`, gitignored). A
   `no-secrets` pre-commit hook backs this up but isn't a substitute for not
   doing it in the first place.
+- **Migrations must keep the previous release working** (expand, then contract in a
+  later release), because on Kubernetes the migrate hook runs `pre-upgrade`, while the
+  old pods still serve. When one can't, its CHANGELOG entry must say to stop the api
+  and worker before upgrading, as the multi-language migration's does.
 - Match surrounding code style; `ruff` is the formatter/linter of record.
 - **Keep page components split** — put a page's parts in a `pages/<page>/` folder
   (one component/concern per file), not one giant file. See `pages/workspace/`.

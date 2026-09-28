@@ -2,7 +2,7 @@
 import uuid
 
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import APIError
@@ -342,15 +342,28 @@ async def _submitted_language(session_factory, sid):
         return (await s.get(Submission, uuid.UUID(sid))).language
 
 
-async def test_submit_defaults_to_the_problems_first_language(
+async def test_submit_without_a_language_uses_a_one_language_problems_language(
         client, session_factory, make_problem, make_user):
     """A client that sends no language (every client before multi-language
-    problems) gets the problem's default: its first language."""
-    pid, _ = await make_problem(languages=("rust", "python"))
+    problems) keeps working on a problem with one language."""
+    pid, _ = await make_problem(languages=("rust",))
     _, headers = await make_user()
     r = await client.post(SUBMIT, headers=headers, json={"problem_id": pid, "code": CODE})
     assert r.status_code == 202
     assert await _submitted_language(session_factory, r.json()["id"]) == "rust"
+
+
+async def test_submit_without_a_language_is_refused_on_a_multi_language_problem(
+        client, session_factory, make_problem, make_user):
+    """The default may not be the language the code was written in (a problem's
+    default can change as it gains languages), so it's refused rather than guessed."""
+    pid, _ = await make_problem(languages=("python", "rust"))
+    _, headers = await make_user()
+    r = await client.post(SUBMIT, headers=headers, json={"problem_id": pid, "code": CODE})
+    assert r.status_code == 400
+    assert r.json()["code"] == "LANGUAGE_REQUIRED"
+    async with session_factory() as s:
+        assert (await s.scalar(select(func.count()).select_from(Submission))) == 0
 
 
 async def test_submit_records_the_chosen_language(

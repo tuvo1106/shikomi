@@ -20,10 +20,13 @@ export function Submissions({
   slug,
   multiLanguage,
   onLoadCode,
+  lockedTo = null,
 }: {
   slug: string
   multiLanguage: boolean
   onLoadCode: (code: string, language: Language) => void
+  /** While a verdict is pending, the only language code can be loaded into. */
+  lockedTo?: Language | null
 }) {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [pendingDelete, setPendingDelete] = useState<string | null>(null)
@@ -91,6 +94,7 @@ export function Submissions({
         <SubmissionDetailModal
           submissionId={selectedId}
           multiLanguage={multiLanguage}
+          lockedTo={lockedTo}
           onClose={() => setSelectedId(null)}
           onLoadCode={(code, language) => {
             onLoadCode(code, language)

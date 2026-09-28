@@ -10,7 +10,7 @@ from their submissions on the fly (see `user_statuses`). (DESIGN.md §4.2, §7.1
 """
 import re
 
-from sqlalchemy import delete, func, select, tuple_
+from sqlalchemy import delete, exists, func, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -211,18 +211,23 @@ async def list_filter_facets(session: AsyncSession) -> dict[str, list[str]]:
             "collections": await distinct(Problem.collections)}
 
 
-async def _get_published(session: AsyncSession, slug: str) -> Problem:
-    """Load a published problem by slug with its cases + solutions eager-loaded.
+async def _get_published(session: AsyncSession, slug: str, *, with_solutions: bool = False) -> Problem:
+    """Load a published problem by slug with its test cases, and (if asked) its
+    solutions with every language's code, eager-loaded.
 
     `selectinload` fetches the children in one extra query up front, avoiding the
     N+1 lazy-loads that would otherwise fire later (and which don't even work off
-    the event loop in async SQLAlchemy). An unpublished/missing slug is a 404 —
-    drafts are invisible to the public API.
+    the event loop in async SQLAlchemy). Solutions are opt-in because their code is
+    the bulk of a problem and only the Solutions tab shows it. An unpublished or
+    missing slug is a 404: drafts are invisible to the public API.
     """
+    options = [selectinload(Problem.test_cases)]
+    if with_solutions:
+        options.append(selectinload(Problem.solutions).selectinload(Solution.codes))
     problem = (await session.execute(
         select(Problem)
         .where(Problem.slug == slug, Problem.is_published.is_(True))
-        .options(selectinload(Problem.test_cases), selectinload(Problem.solutions))
+        .options(*options)
     )).scalar_one_or_none()
     if problem is None:
         raise APIError(404, "NOT_FOUND", "Problem not found.")
@@ -241,6 +246,8 @@ async def get_problem_detail(session: AsyncSession, user_id, slug: str) -> Probl
     samples = [SampleCase(ordinal=tc.ordinal, input=tc.input, expected=tc.expected)
                for tc in problem.test_cases if tc.is_sample]
     status = (await user_statuses(session, user_id, [problem.id]))[problem.id]
+    has_solutions = bool(await session.scalar(
+        select(exists().where(Solution.problem_id == problem.id))))
     return ProblemDetail(
         id=problem.id, slug=problem.slug, title=problem.title, difficulty=problem.difficulty,
         statement_md=problem.statement_md, kind=problem.kind,
@@ -252,7 +259,7 @@ async def get_problem_detail(session: AsyncSession, user_id, slug: str) -> Probl
                 note_md=v.note_md)
             for v in problem.languages],
         tags=list(problem.tags), constraints=list(problem.constraints), sample_cases=samples,
-        has_solutions=len(problem.solutions) > 0, user_status=status,
+        has_solutions=has_solutions, user_status=status,
     )
 
 
@@ -262,7 +269,7 @@ async def get_solutions(session: AsyncSession, slug: str) -> list[SolutionOut]:
     Open to every signed-in user; the client treats them as spoilers (DESIGN.md
     §6.3), but the server doesn't gate them.
     """
-    problem = await _get_published(session, slug)
+    problem = await _get_published(session, slug, with_solutions=True)
     return [
         SolutionOut(
             id=s.id, ordinal=s.ordinal, title=s.title, intuition_md=s.intuition_md,

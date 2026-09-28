@@ -1,5 +1,5 @@
 /** Small display helpers for the workspace. */
-import type { Kind, ParamSpec } from '../../api/types'
+import type { Kind, Language, ParamSpec } from '../../api/types'
 
 /**
  * An operations-kind (design/class-replay) test case's input: `[ops, args]`,
@@ -44,18 +44,24 @@ export function formatSqlSeed(seedScript: string): string {
   return seedScript.trim().replace(/;\s*(?=\S)/g, ';\n')
 }
 
+/** Each language's line-comment marker. */
+const LINE_COMMENT: Record<Language, string> = { python: '#', js: '//', rust: '//', mysql: '--' }
+
 /**
- * The leading `#`-comment block of `code` (e.g. a `ListNode`/`TreeNode`
- * definition — the convention for showing a class the judge already
- * provides; see judge/harness.py), or `''` if `code` doesn't start with one.
+ * The starter's reference comment block (e.g. the `ListNode`/`TreeNode` shape the
+ * judge already provides), or `''`. It's the first run of comment lines, after
+ * any blank lines and Rust `use` imports that precede it (a Rust tree starter
+ * opens with `use std::rc::Rc;`). The marker is the language's own, so a Rust
+ * attribute (`#[derive(...)]`) is never mistaken for a comment.
  */
-function leadingComment(code: string): string {
-  const lines = code.split('\n')
-  let end = 0
-  while (end < lines.length && lines[end].trimStart().startsWith('#')) {
-    end++
-  }
-  return lines.slice(0, end).join('\n')
+function referenceComment(starterCode: string, language: Language): string {
+  const marker = LINE_COMMENT[language]
+  const lines = starterCode.split('\n')
+  let start = 0
+  while (start < lines.length && (lines[start].trim() === '' || /^use\s/.test(lines[start].trim()))) start++
+  let end = start
+  while (end < lines.length && lines[end].trimStart().startsWith(marker)) end++
+  return lines.slice(start, end).join('\n')
 }
 
 /**
@@ -65,10 +71,9 @@ function leadingComment(code: string): string {
  * solutions/submissions are stored without it (the class comment is given
  * context, not something every snippet repeats).
  */
-export function withReferenceComment(code: string, starterCode: string): string {
-  if (code.trimStart().startsWith('#')) return code
-  const prefix = leadingComment(starterCode)
-  return prefix ? `${prefix}\n\n${code}` : code
+export function withReferenceComment(code: string, starterCode: string, language: Language): string {
+  const block = referenceComment(starterCode, language)
+  return block && !code.includes(block) ? `${block}\n\n${code}` : code
 }
 
 /** Coarse "5m ago" relative time for submission timestamps (no i18n needed). */
