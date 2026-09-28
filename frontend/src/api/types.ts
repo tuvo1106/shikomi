@@ -21,9 +21,10 @@ export type UserStatus = 'solved' | 'attempted' | 'unsolved'
  * a sequence of method calls against it. "sql": a query against a seeded
  * schema (judge/harness_sql.py) — no function/class to call. */
 export type Kind = 'function' | 'operations' | 'sql'
-/** Which harness/sandbox judges the submission (DESIGN.md §13). "js" only
- * supports `kind: "function"` — no operations mode, no ListNode/TreeNode.
- * "mysql" always pairs with `kind: "sql"`, never any other kind. */
+/** Which harness/sandbox judges the submission (DESIGN.md §13). "js" and
+ * "rust" only support `kind: "function"`: no operations mode, no
+ * ListNode/TreeNode. "mysql" always pairs with `kind: "sql"`, never any other
+ * kind. */
 export type Language = 'python' | 'js' | 'rust' | 'mysql'
 
 export type ProblemListItem = {

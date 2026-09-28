@@ -65,7 +65,7 @@ const TRUNC: usize = 4096; // per-field cap for output/stdout/error (DESIGN.md �
 const WORK: &str = "/tmp/judge";
 const PRELUDE_DIR: &str = "/opt/judge/lib";
 /// rustc's hard stop when the payload doesn't carry one. The worker sends
-/// `compile_timeout_s` from backend/app/judge_budget.py's
+/// `compile_timeout_s` from backend/app/sandbox.py's
 /// `RUST_COMPILE_TIMEOUT_S`, the same number its wall budget reserves, so the
 /// two can't drift apart. ADR-0004 measured ~150ms for a normal submission; the
 /// slowest hostile input it tried (a `const fn` loop) hit rustc's own
@@ -84,6 +84,17 @@ const CASE_ENV: [(&str, &str); 3] = [
     ("TMPDIR", "/tmp"),
 ];
 const CASE_STACK_BYTES: u64 = 64 << 20;
+/// How much of a case's stderr is kept: enough for Rust's abort messages
+/// ("memory allocation of … failed", "has overflowed its stack") that
+/// classify a crash, which the runtime prints before anything else.
+const STDERR_KEEP: usize = 8192;
+/// How long to wait for a case's output pipes to close after the case (and its
+/// process group) is gone. Only a process that escaped the group with `setsid`
+/// can still be holding them; its output is then abandoned, not waited on.
+const DRAIN_GRACE: Duration = Duration::from_millis(500);
+/// Exit code for a judge-side fault. It exits with no results, so the worker's
+/// `aggregate()` reports `judge_error` rather than blaming the submission.
+const JUDGE_FAULT_EXIT: i32 = 3;
 
 // libc's kill/setrlimit, declared by hand: std already links libc, and
 // pulling in the `libc` crate isn't an option with no network at build time.
@@ -108,6 +119,15 @@ const SIGABRT: i32 = 6;
 const RLIMIT_STACK: i32 = 3;
 const RLIMIT_AS: i32 = 9;
 
+/// Abort the run for a fault in the *judge*, not the submission: a missing
+/// toolchain, a /tmp that can't be written or executed, a bad payload. Writing
+/// a per-case `runtime_error` here would tell the user their code failed when
+/// the sandbox is broken, and would give the operator no signal at all.
+fn judge_fault(msg: String) -> ! {
+    eprintln!("harness: {}", msg);
+    std::process::exit(JUDGE_FAULT_EXIT);
+}
+
 fn truncate(s: &str) -> String {
     if s.len() <= TRUNC {
         return s.to_string();
@@ -127,32 +147,34 @@ fn float_equal(a: &Json, b: &Json, eps: f64) -> bool {
             x.len() == y.len() && x.iter().zip(y).all(|(p, q)| float_equal(p, q, eps))
         }
         _ => match (a.as_f64(), b.as_f64()) {
-            (Some(p), Some(q)) => (p.is_nan() && q.is_nan()) || (p - q).abs() <= eps,
+            // `p == q` first: inf - inf is NaN, which no tolerance accepts, but an
+            // infinite answer that matches an infinite expectation is right.
+            (Some(p), Some(q)) => p == q || (p.is_nan() && q.is_nan()) || (p - q).abs() <= eps,
             _ => a == b,
         },
     }
 }
 
 /// Multiset equality at the top level only; nested lists still compare in
-/// order, the same semantics as harness.py/harness.js. O(n²) matching is
-/// fine for the sizes an `unordered` answer has. There's no hash or total
-/// order on `Json` to sort by, since floats and `1 == 1.0` get in the way.
+/// order, the same semantics as harness.py/harness.js.
+///
+/// Sorts each side's canonical keys (`Json::canonical`, where two values are
+/// equal exactly when their keys are) and compares the sorted lists, which is
+/// O(n log n). The comparison runs untimed, bounded only by the worker's outer
+/// wall clock, and a pairwise O(n²) match took ~6s at 100k elements. That turned
+/// a correct answer into a whole-run time_limit_exceeded; harness.py's
+/// `_multiset_equal` records the same bug and fix.
 fn multiset_equal(a: &Json, b: &Json) -> bool {
     match (a, b) {
         (Json::Arr(x), Json::Arr(y)) => {
             if x.len() != y.len() {
                 return false;
             }
-            let mut used = vec![false; y.len()];
-            x.iter().all(|item| {
-                match (0..y.len()).find(|&j| !used[j] && y[j] == *item) {
-                    Some(j) => {
-                        used[j] = true;
-                        true
-                    }
-                    None => false,
-                }
-            })
+            let mut xs: Vec<String> = x.iter().map(Json::canonical).collect();
+            let mut ys: Vec<String> = y.iter().map(Json::canonical).collect();
+            xs.sort_unstable();
+            ys.sort_unstable();
+            xs == ys
         }
         _ => a == b,
     }
@@ -266,15 +288,35 @@ fn end_case(pgid: i32) {
     }
 }
 
-/// Read up to TRUNC+1 bytes of a captured output file: enough to decide
-/// whether it needs the "…(truncated)" marker, without loading a submission's
-/// multi-megabyte print loop into memory.
-fn read_capped(path: &Path) -> String {
-    let mut buf = Vec::new();
-    if let Ok(f) = fs::File::open(path) {
-        let _ = f.take(TRUNC as u64 + 1).read_to_end(&mut buf);
+/// Read a child's output pipe to EOF on a thread, keeping the first `keep`
+/// bytes and discarding the rest, and hand back the kept text.
+///
+/// It keeps reading after the cap: a reader that stopped would leave the
+/// child blocked on a full pipe (or killed by SIGPIPE), which would misreport a
+/// chatty but correct solution. The caller waits at most `DRAIN_GRACE` for the
+/// result, since only a process that escaped the group kill can hold the pipe
+/// open past the case.
+fn drain<R: Read + Send + 'static>(pipe: Option<R>, keep: usize) -> mpsc::Receiver<String> {
+    let (tx, rx) = mpsc::channel();
+    if let Some(mut pipe) = pipe {
+        std::thread::spawn(move || {
+            let mut kept = Vec::new();
+            let mut buf = [0u8; 16384];
+            loop {
+                match pipe.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        let room = keep.saturating_sub(kept.len());
+                        kept.extend_from_slice(&buf[..n.min(room)]);
+                    }
+                }
+            }
+            let _ = tx.send(String::from_utf8_lossy(&kept).into_owned());
+        });
+    } else {
+        let _ = tx.send(String::new());
     }
-    String::from_utf8_lossy(&buf).into_owned()
+    rx
 }
 
 // --- compile -------------------------------------------------------------------
@@ -285,18 +327,37 @@ fn is_identifier(s: &str) -> bool {
         && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
 }
 
-/// The generated tail of `solution.rs`: a `main` that calls the user's
+/// The generated tail of `solution.rs`: an entry point that calls the user's
 /// function with `arity` decoded arguments. It goes *after* the user's code so
 /// rustc's line numbers for the user's own mistakes match what they typed.
+///
+/// The entry point is an exported C `main` inside a module, with `#![no_main]`
+/// prepended to the user's first line (`source`, which keeps line numbers
+/// intact). A Rust `fn main` of ours would collide with the one users often keep
+/// for local testing. Every path is fully qualified
+/// (`::core::result::Result::Ok`), so a user's `use MyEnum::*` that brings in a
+/// variant named `Ok` can't capture it either. The module is a child of the
+/// crate root, so it can call the user's function even when it's private.
 fn glue(function_name: &str, arity: usize) -> String {
     let args: Vec<String> =
         (0..arity).map(|i| format!("::shikomi_prelude::arg(__args, {})?", i)).collect();
     format!(
         "\n\n// ---- generated by the shikomi judge harness (not part of your code) ----\n\
-         fn main() {{\n    ::shikomi_prelude::__run(|__args| Ok(::shikomi_prelude::ret({}({}))));\n}}\n",
+         mod __shikomi_entry {{\n\
+         \x20   #[unsafe(no_mangle)]\n\
+         \x20   pub extern \"C\" fn main(_argc: i32, _argv: *const *const u8) -> i32 {{\n\
+         \x20       ::shikomi_prelude::__entry(|__args| ::core::result::Result::Ok(::shikomi_prelude::ret(super::{}({}))))\n\
+         \x20   }}\n\
+         }}\n",
         function_name,
         args.join(", ")
     )
+}
+
+/// The whole `solution.rs`: `#![no_main]` on the user's first line (see `glue`),
+/// their code, then the glue.
+fn source(user_code: &str, function_name: &str, arity: usize) -> String {
+    format!("#![no_main] {}{}", user_code, glue(function_name, arity))
 }
 
 /// Compile `solution.rs` in WORK. `Err` carries the message for the single
@@ -325,9 +386,10 @@ fn compile(timeout: Duration) -> Result<(), String> {
         .args(["-o", "solution", "solution.rs"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(fs::File::create(&stderr_path).map_err(|e| format!("judge: {}", e))?)
+        .stderr(fs::File::create(&stderr_path)
+            .unwrap_or_else(|e| judge_fault(format!("could not create rustc.stderr: {}", e))))
         .spawn()
-        .map_err(|e| format!("judge: could not start rustc: {}", e))?;
+        .unwrap_or_else(|e| judge_fault(format!("could not start rustc: {}", e)));
     let pid = child.id() as i32;
     let exit = supervise(child, Instant::now(), timeout);
     end_case(pid);
@@ -352,8 +414,7 @@ fn compile(timeout: Duration) -> Result<(), String> {
 fn run_case(tc: &Json, time_limit: Duration, memory_bytes: Option<u64>, comparison: &Json) -> CaseResult {
     let id = tc.get("id").clone();
     let work = Path::new(WORK);
-    let (result_path, out_path, err_path) =
-        (work.join("case.result"), work.join("case.stdout"), work.join("case.stderr"));
+    let result_path = work.join("case.result");
     let _ = fs::remove_file(&result_path);
 
     let mut cmd = Command::new(work.join("solution"));
@@ -361,10 +422,12 @@ fn run_case(tc: &Json, time_limit: Duration, memory_bytes: Option<u64>, comparis
         .envs(CASE_ENV)
         .env(shikomi_prelude::RESULT_ENV, &result_path)
         .stdin(Stdio::piped())
-        // Files, not pipes: a pipe must be drained while the child runs, or a chatty
-        // submission blocks on a full pipe and reads as a false time_limit_exceeded.
-        .stdout(fs::File::create(&out_path).expect("create case.stdout"))
-        .stderr(fs::File::create(&err_path).expect("create case.stderr"));
+        // Pipes drained by threads (`drain`), keeping only the first few KB. Files in
+        // /tmp would share the 32MB tmpfs with the result file, so a chatty but correct
+        // solution could fill it and fail on ENOSPC. An undrained pipe would instead
+        // block the child and read as a false time_limit_exceeded.
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     unsafe {
         // Runs in the forked child just before exec. setrlimit is async-signal-safe.
         // cur == max, so the submission can't raise its own limit back up.
@@ -385,8 +448,16 @@ fn run_case(tc: &Json, time_limit: Duration, memory_bytes: Option<u64>, comparis
     let start = Instant::now();
     let mut child = match cmd.spawn() {
         Ok(c) => c,
-        Err(e) => return CaseResult::error_row(id, format!("judge: could not start the program: {}", e)),
+        // EAGAIN: the pids limit is exhausted, by processes this submission started
+        // that escaped the group kill. That's the submission's doing; anything else
+        // (noexec /tmp, a missing binary) is the judge's.
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+            return CaseResult::error_row(id, "could not start the program: too many processes".into());
+        }
+        Err(e) => judge_fault(format!("could not start the program: {}", e)),
     };
+    let stdout_rx = drain(child.stdout.take(), TRUNC + 1);
+    let stderr_rx = drain(child.stderr.take(), STDERR_KEEP);
     // Feed the input from a thread, so the deadline below is already running
     // while we write. A write larger than the pipe buffer (64KB) blocks until
     // the child reads, and a child that never reads (e.g. one stalled in a static
@@ -405,7 +476,7 @@ fn run_case(tc: &Json, time_limit: Duration, memory_bytes: Option<u64>, comparis
     if let Some(w) = writer {
         let _ = w.join();
     }
-    let stdout = read_capped(&out_path);
+    let stdout = stdout_rx.recv_timeout(DRAIN_GRACE).unwrap_or_default();
 
     let (status, took) = match exit {
         Exit::TimedOut => {
@@ -452,7 +523,7 @@ fn run_case(tc: &Json, time_limit: Duration, memory_bytes: Option<u64>, comparis
     }
 
     // No result: the process died without returning. Tell the user how.
-    let stderr = read_capped(&err_path);
+    let stderr = stderr_rx.recv_timeout(DRAIN_GRACE).unwrap_or_default();
     if stderr.contains("memory allocation of") {
         // RLIMIT_AS refused an allocation, and Rust's alloc-error handler aborted.
         return fail("memory_limit_exceeded", None);
@@ -464,7 +535,10 @@ fn run_case(tc: &Json, time_limit: Duration, memory_bytes: Option<u64>, comparis
         // We didn't send this SIGKILL (a timeout returns above), so it came from the
         // container's OOM killer: the cgroup filled up before RLIMIT_AS tripped.
         (_, Some(SIGKILL)) => fail("memory_limit_exceeded", None),
-        (_, Some(SIGSEGV)) => fail("runtime_error", Some("segmentation fault".into())),
+        // Safe Rust can't fault on memory any other way, so a SIGSEGV is the stack
+        // guard page: recursion ran past RLIMIT_STACK. (The entry point is a C
+        // `main`, so std's own "has overflowed its stack" handler isn't installed.)
+        (_, Some(SIGSEGV)) => fail("runtime_error", Some("stack overflow (recursion too deep?)".into())),
         (_, Some(SIGABRT)) => fail("runtime_error", Some(format!("aborted{}", stderr_suffix(&stderr)))),
         (_, Some(sig)) => fail("runtime_error", Some(format!("terminated by signal {}", sig))),
         (Some(code), _) => fail(
@@ -506,7 +580,7 @@ fn run(payload: &Json) -> Vec<CaseResult> {
         Json::Str(f) if is_identifier(f) => f.clone(),
         // The name is pasted into generated source, so anything but a plain
         // identifier is refused rather than compiled.
-        other => return vec![CaseResult::error_row(first_id, format!("judge: invalid function_name {}", other.dump()))],
+        other => judge_fault(format!("invalid function_name {}", other.dump())),
     };
     // Arity comes from the problem's declared params (the types are display-only; see
     // prelude.rs). With none declared, fall back to the first case's argument count.
@@ -520,9 +594,9 @@ fn run(payload: &Json) -> Vec<CaseResult> {
     };
 
     if let Err(e) = fs::create_dir_all(WORK)
-        .and_then(|_| fs::write(Path::new(WORK).join("solution.rs"), format!("{}{}", user_code, glue(&function_name, arity))))
+        .and_then(|_| fs::write(Path::new(WORK).join("solution.rs"), source(user_code, &function_name, arity)))
     {
-        return vec![CaseResult::error_row(first_id, format!("judge: could not write the source: {}", e))];
+        judge_fault(format!("could not write the source: {}", e));
     }
     let compile_timeout = Duration::from_secs(match payload.get("compile_timeout_s") {
         Json::Int(n) if *n > 0 => *n as u64,

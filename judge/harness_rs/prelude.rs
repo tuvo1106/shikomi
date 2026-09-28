@@ -99,6 +99,27 @@ impl Json {
         out
     }
 
+    /// A key that's equal for two values exactly when they're `==`, so an
+    /// `unordered` comparison can sort keys instead of matching pairwise.
+    /// It's `dump()` with one normalization: a whole float inside i64's range is
+    /// written as that integer, matching `PartialEq`'s `1 == 1.0`. Everything
+    /// else already dumps uniquely: object keys are sorted (`BTreeMap`), and
+    /// Rust prints each distinct f64 as a distinct shortest string.
+    pub fn canonical(&self) -> String {
+        match self {
+            Json::Num(n) if n.fract() == 0.0 && *n >= -9_223_372_036_854_775_808.0 && *n < 9_223_372_036_854_775_808.0 => {
+                Json::Int(*n as i64).dump()
+            }
+            Json::Arr(v) => format!("[{}]", v.iter().map(Json::canonical).collect::<Vec<_>>().join(",")),
+            Json::Obj(m) => {
+                let body: Vec<String> =
+                    m.iter().map(|(k, v)| format!("{}:{}", Json::Str(k.clone()).dump(), v.canonical())).collect();
+                format!("{{{}}}", body.join(","))
+            }
+            other => other.dump(),
+        }
+    }
+
     fn write_to(&self, o: &mut String) {
         match self {
             Json::Null => o.push_str("null"),
@@ -233,6 +254,14 @@ impl<'a> Parser<'a> {
             Some(b't') => self.expect_lit("true", Json::Bool(true)),
             Some(b'f') => self.expect_lit("false", Json::Bool(false)),
             Some(b'"') => self.string().map(Json::Str),
+            // Not JSON, but Python's json module reads and writes these (so an
+            // author's `expected` may contain them), and `write_float` emits them.
+            // Accepting them keeps a NaN/infinite answer a value, not a parse failure.
+            Some(b'N') => self.expect_lit("NaN", Json::Num(f64::NAN)),
+            Some(b'I') => self.expect_lit("Infinity", Json::Num(f64::INFINITY)),
+            Some(b'-') if self.b[self.i..].starts_with(b"-Infinity") => {
+                self.expect_lit("-Infinity", Json::Num(f64::NEG_INFINITY))
+            }
             Some(b'[') => {
                 self.i += 1;
                 let mut v = Vec::new();
@@ -688,4 +717,21 @@ pub fn __run<F: FnOnce(&[Json]) -> Result<Json, String>>(call: F) {
         Ok(v) => write_result("ok", v),
         Err(e) => write_result("decode", Json::Str(e)),
     }
+}
+
+/// What the generated C `main` calls (harness.rs `glue`): `__run` plus the two
+/// jobs std's runtime would normally do around a Rust `fn main`, which the
+/// judge's `#![no_main]` entry point skips. A panic is caught here, because it
+/// can't unwind out of an `extern "C"` function (that aborts); the panic hook
+/// has already recorded it by then. And stdout is flushed, since std only
+/// flushes its line buffer at a normal Rust exit, and a final `print!` with no
+/// newline would otherwise be lost.
+pub fn __entry<F: FnOnce(&[Json]) -> Result<Json, String>>(call: F) -> i32 {
+    use std::io::Write;
+    let code = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| __run(call))) {
+        Ok(()) => 0,
+        Err(_) => 101, // the same code a panicking Rust `main` exits with
+    };
+    let _ = std::io::stdout().flush();
+    code
 }

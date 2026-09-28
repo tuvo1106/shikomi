@@ -79,12 +79,14 @@ fn f(_x: i32) -> String {
 
 def test_tmp_is_noexec_without_the_rust_flag():
     # Regression guard for the reason `tmpfs_exec` exists: under Docker's default
-    # noexec tmpfs the compiled program can't start, and the harness says so
-    # instead of hanging or crashing.
-    res = _first(run_rust_container(_payload('fn f(_x: i32) -> String { "blocked".into() }'),
-                                    tmpfs_exec=False))
-    assert res["status"] == "runtime_error"
-    assert "could not start the program" in res["error"]
+    # noexec tmpfs the compiled program can't start. That's a judge fault, not the
+    # submission's, so the harness exits non-zero with no results (the worker's
+    # aggregate() turns that into judge_error) and says why on stderr.
+    proc = run_rust_container(_payload('fn f(_x: i32) -> String { "blocked".into() }'),
+                              tmpfs_exec=False)
+    assert proc.returncode == 3
+    assert proc.stdout == ""
+    assert "could not start the program" in proc.stderr
 
 
 def test_container_memory_limit_bounds_the_whole_run():

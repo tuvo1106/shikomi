@@ -12,6 +12,7 @@ the image has (rust_runner.py). Build it first:
     docker build -f judge/Dockerfile.rust -t shikomi-judge-rust:latest judge/
 """
 import json
+import time
 
 import pytest
 
@@ -215,11 +216,13 @@ def test_unsupported_kind_is_reported_not_crashed():
 
 
 def test_function_name_that_is_not_an_identifier_is_refused():
-    # function_name is pasted into generated source, so it must be a plain identifier.
-    res = rust_results(payload("fn f() {}", [case(0, [], None)],
-                               function_name="f(); std::process::exit(0); g"))
-    assert res[0]["status"] == "runtime_error"
-    assert res[0]["error"].startswith("judge: invalid function_name")
+    # function_name is pasted into generated source, so it must be a plain
+    # identifier. A bad one is a problem-authoring fault, not the submitter's, so
+    # the harness exits without results (the worker reports judge_error).
+    proc = run_rust_container(json.dumps(payload("fn f() {}", [case(0, [], None)],
+                                                 function_name="f(); std::process::exit(0); g")))
+    assert proc.returncode == 3 and proc.stdout == ""
+    assert "invalid function_name" in proc.stderr
 
 
 def test_invalid_payload_json_exits_nonzero():
@@ -383,3 +386,69 @@ fn f(_x: i32) -> u64 { X }
     res = rust_results(pl)
     assert res[0]["status"] == "runtime_error"
     assert res[0]["error"] == "Compilation timed out after 1s"
+
+
+# --- review round 2 ------------------------------------------------------------
+
+
+def test_unordered_compare_of_a_large_answer_stays_fast():
+    # The comparison runs untimed, bounded only by the worker's outer wall clock.
+    # An O(n^2) multiset match took ~6s at 100k elements and could turn a correct
+    # answer into a whole-run TLE (harness.py hit and fixed the same bug).
+    n = 100_000
+    code = f"fn f(_x: i32) -> Vec<i64> {{ (0..{n}).rev().collect() }}"
+    started = time.monotonic()
+    res = rust_results(payload(code, [case(0, [0], list(range(n)))],
+                               comparison={"mode": "unordered"}))
+    assert res[0]["status"] == "passed"
+    assert time.monotonic() - started < 4
+
+
+def test_unordered_still_treats_1_and_1_0_as_equal():
+    res = rust_results(payload("fn f(_x: i32) -> Vec<f64> { vec![2.0, 1.0] }",
+                               [case(0, [0], [1, 2])], comparison={"mode": "unordered"}))
+    assert res[0]["status"] == "passed"
+
+
+def test_output_larger_than_tmp_does_not_fail_a_correct_solution():
+    # 40MB of prints against a 32MB /tmp. Output is captured through pipes and
+    # truncated, so nothing lands in the tmpfs and the answer still counts.
+    code = """
+fn f(x: i32) -> i32 {
+    let chunk = "x".repeat(1 << 20);
+    for _ in 0..40 { print!("{}", chunk); }
+    x
+}
+"""
+    res = rust_results(payload(code, [case(0, [7], 7)], time_limit_ms=10000))
+    assert res[0]["status"] == "passed", res[0]
+    assert res[0]["stdout"].endswith("…(truncated)")
+
+
+def test_nan_and_infinity_are_values_not_crashes():
+    code = "fn f(x: i32) -> f64 { if x == 0 { f64::INFINITY } else { f64::NAN } }"
+    res = rust_results(payload(code, [case(0, [0], float("inf")), case(1, [1], 1.0)],
+                               comparison={"mode": "float_tolerance", "epsilon": 1e-9}))
+    assert [r["status"] for r in res] == ["passed", "wrong_answer"]
+    assert res[1]["output"] == "NaN"
+
+
+def test_user_code_may_define_main_and_shadow_ok():
+    # Keeping a `main` for local testing is common, and so is a `use MyEnum::*`
+    # whose variants include `Ok`. Neither may collide with the judge's glue.
+    code = """
+#[derive(Debug)]
+enum Verdict { Ok, Bad }
+use Verdict::*;
+
+fn f(x: i32) -> String {
+    let v = if x > 0 { Ok } else { Bad };
+    format!("{:?}", v)
+}
+
+fn main() {
+    println!("{}", f(1));
+}
+"""
+    res = rust_results(payload(code, [case(0, [1], "Ok"), case(1, [0], "Bad")]))
+    assert [r["status"] for r in res] == ["passed", "passed"], res
