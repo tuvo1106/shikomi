@@ -8,6 +8,10 @@ All notable changes to this project are recorded here. The format follows
 
 ### Added
 
+- An operations problem's `Iterator` constructor argument now works in Rust: the
+  starter takes an `IntIter` (an `Iterator<Item = i32>`), e.g. `fn new(nums: IntIter)`.
+  Rebuild the Rust judge image to pick it up. A new starter, *Design a Run Cursor*,
+  takes one, in Python and Rust.
 - **Rust judge.** Problems can set `"language": "rust"` (function mode). Submissions
   are compiled with `rustc` inside the sandbox. Each test case runs in its own
   process, so a panic, stack overflow, allocation failure or `process::exit` fails

@@ -525,15 +525,44 @@ def test_rust_accepts_its_node_codecs(node_type):
 
 
 @pytest.mark.parametrize("language,node_type", [
-    ("rust", "Iterator"), ("js", "ListNode"), ("js", "TreeNode"), ("js", "GraphNode"),
+    ("js", "ListNode"), ("js", "TreeNode"), ("js", "GraphNode"),
 ])
 def test_a_language_refuses_node_types_its_harness_lacks(language, node_type):
     with pytest.raises(ValidationError, match=f"language '{language}' does not support the '{node_type}'"):
         ProblemFile.model_validate(_file(1, language=language, params=[{"name": "x", "type": node_type}]))
-    if node_type == "Iterator":
-        return  # decode-only: never a valid return_type, in any language
     with pytest.raises(ValidationError, match=f"does not support the '{node_type}'"):
         ProblemFile.model_validate(_file(1, language=language, return_type=node_type))
+
+
+def test_rust_accepts_the_iterator_constructor_arg():
+    """prelude.rs `IntIter` is Rust's decode-only Iterator: valid as a param,
+    never as a return type (in any language)."""
+    ProblemFile.model_validate(_file(1, language="rust", params=[{"name": "nums", "type": "Iterator"}]))
+    with pytest.raises(ValidationError):
+        ProblemFile.model_validate(_file(1, language="rust", return_type="Iterator"))
+
+
+def test_rust_node_types_match_what_the_rust_harness_implements():
+    """`RUST_NODE_TYPES` is what a Rust variant may declare, so it must be exactly
+    the node structs harness.rs generates (and their `List[...]` forms) plus the
+    prelude's `IntIter` for "Iterator"."""
+    root = pathlib.Path(__file__).resolve().parents[2] / "judge" / "harness_rs"
+    structs = set(re.findall(r'NodeStruct \{ name: "(\w+)"', (root / "harness.rs").read_text()))
+    expected = structs | {f"List[{n}]" for n in ("ListNode", "TreeNode")}
+    if "pub struct IntIter" in (root / "prelude.rs").read_text():
+        expected.add("Iterator")
+    assert sandbox_mod.RUST_NODE_TYPES == expected
+
+
+def test_rust_refuses_a_node_type_missing_from_its_profile(monkeypatch):
+    """The gate is the profile's `node_types`: drop a codec from Rust's and a variant
+    declaring it is refused (so a codec added for Python alone can't leak into Rust)."""
+    import dataclasses
+    rust = sandbox_mod.PROFILES["rust"]
+    monkeypatch.setitem(sandbox_mod.PROFILES, "rust",
+                        dataclasses.replace(rust, node_types=rust.node_types - {"GraphNode"}))
+    with pytest.raises(ValidationError, match="language 'rust' does not support the 'GraphNode'"):
+        ProblemFile.model_validate(_file(1, language="rust", params=[{"name": "x", "type": "GraphNode"}]))
 
 
 def test_rust_memory_limit_must_leave_room_for_rustc():

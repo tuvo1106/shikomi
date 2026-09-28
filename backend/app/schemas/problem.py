@@ -60,7 +60,7 @@ Kind = Literal["function", "operations", "sql"]
 # function-mode only, no "operations" kind and no ListNode/TreeNode codecs on
 # that path at all. "rust": compiled by rustc and judged by judge/harness_rs/
 # (DESIGN.md §13, docs/adr/0004-rust-judge-compile-in-sandbox.md), function and
-# operations mode, with every node codec except "Iterator" (`SandboxProfile.node_types`);
+# operations mode, with every node codec (`SandboxProfile.node_types`);
 # its method calls decode their args by the user's signature. "mysql": judged by
 # judge/harness_sql.py against an
 # ephemeral MariaDB instance (DESIGN.md §13, docs/adr/0002-sql-judge-engine-
@@ -340,7 +340,7 @@ class ProblemIn(BaseModel):
     def _language_supports_kind_and_codecs(self) -> "ProblemIn":
         # judge/harness.js only implements function mode (DESIGN.md §13), and each
         # harness implements its own set of node codecs
-        # (JS none; Rust all but the decode-only Iterator, prelude.rs `nodes`). Reject an
+        # (JS none; Rust all, the decode-only Iterator being prelude.rs `IntIter`). Reject an
         # unsupported combination here rather than letting it surface as a
         # confusing runtime_error from the harness on every submission.
         for v in self.languages:

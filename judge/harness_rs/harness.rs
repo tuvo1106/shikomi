@@ -630,7 +630,10 @@ fn rc_node_impl(name: &str, codec: &str, none: &str) -> String {
 /// declares in `params[].type` and `return_type` (`"ListNode"`,
 /// `"List[TreeNode]"`, ...). Only those are generated: a problem that declares
 /// none leaves the names free, so a trie problem's own `struct TreeNode` can't
-/// collide with ours.
+/// collide with ours. Also re-exports the prelude's `IntIter` when a param is
+/// `"Iterator"` (decode-only, no struct to generate), so the user's
+/// `fn new(nums: IntIter)` can name it; a `use` at crate root is visible to
+/// their earlier code, since item order doesn't matter.
 fn node_structs(payload: &Json) -> Vec<String> {
     let mut declared: Vec<&str> = payload.get("params").as_arr().iter().filter_map(|p| match p.get("type") {
         Json::Str(t) => Some(t.as_str()),
@@ -640,14 +643,18 @@ fn node_structs(payload: &Json) -> Vec<String> {
         declared.push(t);
     }
     let uses = |name: &str| declared.iter().any(|t| *t == name || *t == format!("List[{}]", name));
-    NODE_STRUCTS
+    let mut out: Vec<String> = NODE_STRUCTS
         .iter()
         .filter(|n| uses(n.name))
         .map(|n| match n.rc_codec {
             Some((codec, none)) => format!("{}{}", n.source, rc_node_impl(n.name, codec, none)),
             None => n.source.to_string(),
         })
-        .collect()
+        .collect();
+    if declared.iter().any(|t| *t == "Iterator") {
+        out.push("use ::shikomi_prelude::IntIter;\n".to_string());
+    }
+    out
 }
 
 /// The whole `solution.rs`: `#![no_main]` on the user's first line (see `glue`),
@@ -733,7 +740,8 @@ fn node_hint(diag: &str) -> &'static str {
 /// Hints for the operations-mode mistakes whose rustc error points into the
 /// glue rather than at the user's code: a method named as the cases spell it
 /// (`getState`) rather than as the judge calls it (`get_state`), a missing `new`,
-/// and a signature `ops::Method`/`ops::Constructor` can't call. Each is matched
+/// a signature `ops::Method`/`ops::Constructor` can't call, and an `impl Iterator` constructor
+/// parameter where the judge's `IntIter` is needed. Each is matched
 /// on rustc's own wording, like `node_hint`.
 fn ops_hint(diag: &str, class_name: &str, ops: &[(String, String)]) -> String {
     let mut hints = Vec::new();
@@ -776,6 +784,15 @@ fn ops_hint(diag: &str, class_name: &str, ops: &[(String, String)]) -> String {
             "`{}::new` must return `Self` and take at most six owned parameters.",
             class_name
         ));
+    }
+    // `new(nums: impl Iterator<Item = i32>)` leaves the argument's type for rustc to
+    // infer from a bound, and it can't: the error names `Iterator` and `Class::new`.
+    if diag.contains("Iterator") && diag.contains(&format!("`{}::new`", class_name)) {
+        hints.push(
+            "a problem's `Iterator` argument is the judge's `IntIter` (an `Iterator<Item = i32>`): \
+             declare the parameter as `nums: IntIter`, not `impl Iterator` or `Box<dyn Iterator>`."
+                .to_string(),
+        );
     }
     hints.iter().map(|h| format!("\n\nHint: {}", h)).collect()
 }

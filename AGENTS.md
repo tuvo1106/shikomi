@@ -390,10 +390,8 @@ slice ships, delete its entry here.
   Playwright job.
 
 - **Rust judge follow-ups** (v1 shipped,
-  [ADR-0004](docs/adr/0004-rust-judge-compile-in-sandbox.md); every node codec and
-  operations mode shipped too): the decode-only `Iterator` constructor argument has no
-  Rust counterpart yet (it would need a prelude type, say one wrapping a `Vec`, that a
-  starter can take as `impl Iterator`-like input). The workspace renders an operations
+  [ADR-0004](docs/adr/0004-rust-judge-compile-in-sandbox.md); every node codec,
+  operations mode and the `Iterator` constructor argument shipped too): the workspace renders an operations
   case with the cases' op names (`insertCoin(25)`) even in the Rust editor, where the
   method is `insert_coin`; the note under the statement says so, but the rendering could
   apply the snake_case mapping for Rust instead. Also:

@@ -179,7 +179,7 @@ and the gotchas worth knowing before you change anything.
 backend/     FastAPI app (app/), judge worker (worker/), Alembic migrations, tests
 judge/       sandbox harnesses (Python, JS, Rust, SQL), their Dockerfiles, harness tests
 frontend/    React + Vite + Monaco workspace, Vitest + Playwright tests
-seed/        the twenty-three starter problems
+seed/        the twenty-four starter problems
 deploy/      Helm chart
 scripts/     dev/prod/k8s bring-up, local CI, problem-file formatter
 docs/        architecture diagrams, generated schema reference, ADRs
