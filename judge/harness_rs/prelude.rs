@@ -633,6 +633,35 @@ impl ::core::iter::Iterator for IntIter {
     }
 }
 
+// --- `Json` itself as a parameter or return type ------------------------------
+
+/// A value with no single Rust type takes or returns `Json` itself: a nested
+/// list that mixes integers and lists (`[1,[4,[6]]]`), an object tree
+/// (`{"val": 1, "children": [...]}`), or a method that returns a list in one
+/// case and a string in another. The glue glob-imports `learner::*`, so a
+/// submission names it as plain `Json` and matches on its variants. Both
+/// directions are the identity: the argument arrives as parsed, and a returned
+/// `Json` is compared against `expected` as is.
+impl FromJson for Json {
+    fn from_json(j: &Json) -> Result<Self, String> {
+        Ok(j.clone())
+    }
+}
+
+impl ToJson for Json {
+    fn to_json(&self) -> Result<Json, String> {
+        Ok(self.clone())
+    }
+}
+
+/// The names every submission sees without a `use`: the glue (harness.rs
+/// `node_structs`) ends in `use ::shikomi_prelude::learner::*;`. A glob import,
+/// so a submission's own `Json` item or explicit `use` shadows it instead of
+/// colliding.
+pub mod learner {
+    pub use super::Json;
+}
+
 // --- encoding return values (Rust -> JSON) --------------------------------
 
 /// Encode a function's return value for comparison against `expected`.
