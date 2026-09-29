@@ -85,6 +85,16 @@ All notable changes to this project are recorded here. The format follows
   — Python, JavaScript and Rust — reads and then deletes before running the submission, so it
   can't be read back off disk at the fixed path. See
   [ADR-0006](docs/adr/0006-harness-process-isolation.md).
+- **Function-mode `custom_validator` problems no longer leak the expected answer or accept a
+  forged verdict.** Every custom validator ran inside the submission's child process, which
+  was sent each case's `expected`, and a submission could write its own "passed" message to
+  the channel the verdict came back on. A function-mode validator now runs in the harness
+  parent, like every other comparison mode, and the child receives only the inputs. It gets
+  what's left of the case's time limit, so a runaway validator is still
+  `time_limit_exceeded`. Its time no longer counts toward the case's `runtime_ms`, and it
+  sees the returned value after JSON encoding (a tuple arrives as a list), as the other modes
+  do. Operations-mode validators still run in the child for now. See
+  [ADR-0007](docs/adr/0007-custom-validators-in-every-language.md).
 
 ### Fixed
 

@@ -314,10 +314,10 @@ def test_custom_validator_syntax_error_fails_fast():
 
 
 def test_custom_validator_hang_is_time_limit_exceeded():
-    """A validator's own compute (e.g. a many-call statistical check) runs
-    under the same per-case SIGALRM as the submission's call, so a runaway
-    validator reports time_limit_exceeded rather than hanging the container —
-    unlike `compare()` for the other four modes, which stays untimed."""
+    """A validator's own compute gets what's left of the case's time limit
+    (in the parent, under its own SIGALRM), so a runaway validator reports
+    time_limit_exceeded rather than hanging the container — unlike `compare()`
+    for the other four modes, which stays untimed."""
     code = "def f(s):\n    return s"
     hanging_validator = (
         "def validate(actual, expected, args, instance=None):\n"
@@ -329,6 +329,62 @@ def test_custom_validator_hang_is_time_limit_exceeded():
                  time_limit_ms=200)
     res = results(pl)
     assert res[0]["status"] == "time_limit_exceeded"
+
+
+def test_custom_validator_verdict_cannot_be_forged_through_the_result_pipe():
+    """A function-mode validator runs in the parent, so the child never sends a
+    verdict the parent trusts. The child's result pipe is reachable from the
+    submission (its fd is on the child's argv): this one writes a frame claiming
+    `passed: true` for a wrong answer and exits. The parent must judge the
+    `actual` in that frame itself, and find it wrong."""
+    forge = (
+        "import json, os, sys\n"
+        "def f(s):\n"
+        "    frame = {'status': 'ok', 'actual': ['z'], 'passed': True,\n"
+        "             'runtime_ms': 0, 'stdout': ''}\n"
+        "    os.write(int(sys.argv[2]), (json.dumps(frame) + '\\n').encode())\n"
+        "    os._exit(0)\n"
+    )
+    pl = payload(forge, [case(0, ["cab"], None)],
+                 comparison={"mode": "custom_validator", "validator_code": SAME_MULTISET})
+    assert results(pl)[0]["status"] == "wrong_answer"
+
+
+def test_custom_validator_expected_is_not_sent_to_the_child():
+    """With a function-mode validator the child receives only the input, as for
+    every fixed-answer mode. The submission walks its caller frames for the
+    harness's `message` and reports whether `expected` was in it."""
+    peek = (
+        "import sys\n"
+        "def f(s):\n"
+        "    frame = sys._getframe()\n"
+        "    while frame:\n"
+        "        m = frame.f_locals.get('message')\n"
+        "        if isinstance(m, dict) and 'input' in m:\n"
+        "            return 'leaked' if 'expected' in m else 'hidden'\n"
+        "        frame = frame.f_back\n"
+        "    return 'no message found'\n"
+    )
+    accept_any = "def validate(actual, expected, args, instance=None):\n    return True\n"
+    pl = payload(peek, [case(0, ["x"], "the secret answer")],
+                 comparison={"mode": "custom_validator", "validator_code": accept_any})
+    assert results(pl)[0]["output"] == '"hidden"'
+
+
+def test_custom_validator_shares_the_case_time_limit_with_the_submission():
+    """Submission + validator together stay within `time_limit_ms` — the budget
+    app/judge_budget.py plans for — rather than each getting a full limit."""
+    code = "import time\ndef f(s):\n    time.sleep(0.15)\n    return s"
+    slow_validator = (
+        "import time\n"
+        "def validate(actual, expected, args, instance=None):\n"
+        "    time.sleep(0.15)\n"
+        "    return True\n"
+    )
+    pl = payload(code, [case(0, ["x"], None)],
+                 comparison={"mode": "custom_validator", "validator_code": slow_validator},
+                 time_limit_ms=250)
+    assert results(pl)[0]["status"] == "time_limit_exceeded"
 
 
 # --- ListNode/TreeNode codec -----------------------------------------------

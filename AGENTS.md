@@ -349,9 +349,12 @@ and `playwright`.
   Each child is its own process-group leader (`start_new_session`/`detached`) and the
   parent kills the group, so grandchildren the submission spawned are reaped too.
   `worker/aggregate.py` also refuses a report that doesn't have one row per
-  case sent (defence in depth). An operations `custom_validator` is the one thing
-  that still runs in the child (it calls into the live object), so such a problem
-  must not rely on `expected` being hidden from the submission.
+  case sent (defence in depth). A verdict is only as trustworthy as the process
+  that computes it: a function-mode `custom_validator` runs in the parent, like
+  `compare()`. An operations `custom_validator` is the one thing that still runs in
+  the child (it calls into the live object), so such a problem must not rely on
+  `expected` being hidden, and its verdict can be forged through the result pipe
+  (ADR-0007's probes close this).
 
 - **Rust calls each op by its snake_case name.** The shared cases spell an op once for
   every language (`getState`), and the Rust glue calls `get_state`. The mapping exists
@@ -406,6 +409,22 @@ slice ships, delete its entry here.
   slowest language's reference solution); a language filter and language chips in the
   problem list (`ProblemListItem.languages` is already returned); and offering more of
   the bundled starters in several languages (`calm-stretch` is still Python-only).
+
+- **Custom validators in every language**
+  ([ADR-0007](docs/adr/0007-custom-validators-in-every-language.md); step 1, function-mode
+  validators in the parent, shipped). Remaining, in order:
+  (2) `comparison.validator_code` as a per-language map (a bare string lifts to
+  `{"python": s}`), with one resolver shared by the worker and `test_seed_solutions.py`,
+  and a `ProblemIn` rule that every language has an entry (still refusing js/mysql);
+  (3) probes as test-case data, in `harness.py` and the Rust harness: extra ops the
+  harness appends, with references to earlier results in their own field, results split
+  into `actual` + `probe_results`, and the legacy `instance` path kept for any validator
+  that doesn't take `probe_results`; after that no validator runs in the child and the
+  child never gets `expected`; (4) Rust: a separate validator binary run by the parent
+  (non-dumpable, one compile deadline shared with the submission, a compile failure is
+  `judge_error` with its diagnostics hidden), plus a seedable RNG in the prelude;
+  (5) port the 19 problems in the external problem set, each with a known-wrong solution
+  that its validator rejects; (6) remove `instance`.
 
 - **Auth roadmap:** revisit session strategy (currently JWT-in-memory access +
   httpOnly refresh cookie — consider server-side sessions / cookie-based access
