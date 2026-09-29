@@ -991,6 +991,56 @@ def test_operations_iterator_constructor_arg_rejects_non_integers():
     assert res[0]["status"] == "runtime_error", res
 
 
+NESTED = """struct Flat { vals: Vec<i64>, i: usize }
+
+fn walk(j: &Json, out: &mut Vec<i64>) {
+    match j {
+        Json::Int(n) => out.push(*n),
+        Json::Arr(items) => items.iter().for_each(|x| walk(x, out)),
+        _ => {}
+    }
+}
+
+impl Flat {
+    fn new(nested: Vec<Json>) -> Self {
+        let mut vals = Vec::new();
+        nested.iter().for_each(|x| walk(x, &mut vals));
+        Flat { vals, i: 0 }
+    }
+    fn next(&mut self) -> i64 { self.i += 1; self.vals[self.i - 1] }
+    fn has_next(&self) -> bool { self.i < self.vals.len() }
+    fn tag(&self, member: bool) -> Json {
+        if member { Json::Arr(vec![Json::Str("a".to_string())]) } else { Json::Str("NO".to_string()) }
+    }
+}
+"""
+
+
+def test_json_is_an_argument_and_return_type_without_a_use():
+    """A value with no single Rust type (ints mixed with lists, list-or-string) is
+    the prelude's `Json`, which every submission can name: no param declares it."""
+    res = rust_results(ops_payload(NESTED, [
+        ops_case(0, [[[1, [4, [6]]]], ("next", []), ("next", []), ("next", []), ("hasNext", []),
+                     ("tag", [True]), ("tag", [False])],
+                 [1, 4, 6, False, ["a"], "NO"], class_name="Flat"),
+        ops_case(1, [[[[], [[], []]]], ("hasNext", [])], [False], class_name="Flat"),
+    ], class_name="Flat"))
+    assert [r["status"] for r in res] == ["passed", "passed"], res
+
+
+def test_json_round_trips_an_object_in_function_mode():
+    res = rust_results(payload("fn f(root: Json) -> Json { root }",
+                               [case(0, [{"val": 1, "children": [{"val": 2, "children": []}]}],
+                                     {"val": 1, "children": [{"val": 2, "children": []}]})]))
+    assert res[0]["status"] == "passed", res[0]
+
+
+def test_a_users_own_json_type_shadows_the_prelude_one():
+    code = "struct Json(i32);\nfn f(n: i32) -> i32 { Json(n).0 + 1 }\n"
+    res = rust_results(payload(code, [case(0, [1], 2)]))
+    assert res[0]["status"] == "passed", res[0]
+
+
 def test_operations_constructor_args_and_node_structs():
     """`params` describe the constructor, as in Python: its arguments are the first
     list, typed by `new`'s signature, and a declared node type gets its struct."""

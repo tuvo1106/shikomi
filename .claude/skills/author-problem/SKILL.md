@@ -63,7 +63,10 @@ table: parameters can be integers (`i32`/`i64`/`u8`…`usize`), `f64`, `bool`,
 `None`), `HashMap`/`BTreeMap<String, V>` (JSON objects), or tuples of 2–4
 elements (fixed-length arrays), all nested freely. Parameters must be **owned**
 (`Vec<i32>`, `String`), never borrowed (`&[i32]`, `&str`). Returns take the same
-types plus `()` (→ `null`). Lists and trees take the conventional shapes,
+types plus `()` (→ `null`). A value with no single Rust type (a list mixing ints and
+lists, an object tree, a list-or-string return) is the judge's own `Json` enum
+(`Null`, `Bool`, `Int(i64)`, `Num(f64)`, `Str`, `Arr(Vec<Json>)`, `Obj(BTreeMap<String,
+Json>)`), in or out, nameable without a `use`. Prefer a real type when one fits. Lists and trees take the conventional shapes,
 `Option<Box<ListNode>>` and `Option<Rc<RefCell<TreeNode>>>` (`val: i32`), which the
 **judge defines** in the submission's crate, for the node types the Rust variant
 declares: the starter describes the struct in a comment and never defines it (a

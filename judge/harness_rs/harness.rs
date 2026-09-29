@@ -681,8 +681,9 @@ fn rc_node_impl(name: &str, codec: &str, none: &str) -> String {
 /// none leaves the names free, so a trie problem's own `struct TreeNode` can't
 /// collide with ours. Also re-exports the prelude's `IntIter` when a param is
 /// `"Iterator"` (decode-only, no struct to generate), so the user's
-/// `fn new(nums: IntIter)` can name it; a `use` at crate root is visible to
-/// their earlier code, since item order doesn't matter.
+/// `fn new(nums: IntIter)` can name it, and always glob-imports the prelude's
+/// `learner` names (`Json`); a `use` at crate root is visible to their earlier
+/// code, since item order doesn't matter.
 fn node_structs(payload: &Json) -> Vec<String> {
     let mut declared: Vec<&str> = payload.get("params").as_arr().iter().filter_map(|p| match p.get("type") {
         Json::Str(t) => Some(t.as_str()),
@@ -703,6 +704,9 @@ fn node_structs(payload: &Json) -> Vec<String> {
     if declared.iter().any(|t| *t == "Iterator") {
         out.push("use ::shikomi_prelude::IntIter;\n".to_string());
     }
+    // Always, whatever is declared: an operations method's `Json` argument or return
+    // has no declared type to key off. A glob, so a user's own `Json` shadows it.
+    out.push("use ::shikomi_prelude::learner::*;\n".to_string());
     out
 }
 

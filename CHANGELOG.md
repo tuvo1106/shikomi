@@ -8,6 +8,12 @@ All notable changes to this project are recorded here. The format follows
 
 ### Added
 
+- **`Json` in Rust.** A Rust submission can take or return the judge's own `Json` value
+  (`Json::Int`, `Json::Arr`, `Json::Str`, `Json::Obj`, ...) wherever no single Rust type
+  fits: a nested list that mixes integers and lists, an object tree, or a method that
+  returns a list in one case and a string in another. Every submission can name `Json`
+  without a `use`, and a submission's own `Json` type still takes precedence. Rebuild the
+  Rust judge image to pick this up.
 - **Rust custom validators.** A `custom_validator` problem can be offered in Rust, with a
   Rust validator, `fn validate(actual: &Json, expected: &Json, args: &Json, probe_results:
   &[Json]) -> bool`, next to the Python one in `validator_code`. The judge compiles it
