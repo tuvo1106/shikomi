@@ -1,7 +1,8 @@
 # ADR-0007: Custom validators in every language, judged in the trusted parent
 
 - **Status:** Accepted: step 1 (function-mode validators in the parent) implemented in
-  `judge/harness.py`; steps 2–6 are open work (AGENTS.md TODO)
+  `judge/harness.py`, step 2 (the per-language `validator_code` map) in `app/comparison.py`
+  and `ProblemIn`; steps 3–6 are open work (AGENTS.md TODO)
 - **Date:** 2026-09-28
 
 ## Context
@@ -61,8 +62,10 @@ Because the submission can write its own frame to the child's result pipe, it co
    crates, and 8+ of these problems need randomness. The RNG is seeded from `/dev/urandom`, and
    seed tests can pin the seed.
 
-Order of work: (1) function-mode validators in the parent (done); (2) the `validator_code` map,
-resolver and `ProblemIn` rule; (3) probes in both harnesses, keeping the legacy `instance` path
+Order of work (progress is on the Status line): (1) function-mode validators in the parent;
+(2) the `validator_code` map, resolver and `ProblemIn` rule, with a data migration so stored
+rows are always the map and a rollback converts them back to the string the previous release
+can run; (3) probes in both harnesses, keeping the legacy `instance` path
 for any validator that doesn't take `probe_results`, since the problem set lives in a separate
 repo and migrates on its own schedule; (4) the Rust validator binary and prelude RNG; (5) port
 the problems; (6) remove `instance`.

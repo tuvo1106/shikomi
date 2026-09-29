@@ -19,6 +19,7 @@ import uuid
 from sqlalchemy import select, update
 from sqlalchemy.orm import selectinload
 
+from app import comparison as problem_comparison
 from app.db import SessionLocal
 from app.models import Problem, Submission
 from app.queue import Queue
@@ -98,12 +99,16 @@ async def judge_submission(ctx, submission_id: str, mode: str) -> None:
                 raise RuntimeError(
                     f"problem {problem_id} no longer offers language {sub.language!r}")
 
+            # A custom validator is per language; the harness gets this language's one.
+            # None for it raises (→ judge_error), like a missing variant above.
+            comparison = problem_comparison.for_language(problem.comparison, variant.language)
+
             cases = sorted(
                 (tc for tc in problem.test_cases if mode == "submit" or tc.is_sample),
                 key=lambda t: t.ordinal)
             verdict = await run_judgement(
                 code=sub.code, function_name=variant.function_name,
-                comparison=problem.comparison, time_limit_ms=problem.time_limit_ms,
+                comparison=comparison, time_limit_ms=problem.time_limit_ms,
                 memory_limit_mb=problem.memory_limit_mb,
                 params=variant.params, return_type=variant.return_type,
                 kind=problem.kind, class_name=variant.class_name, language=variant.language,

@@ -206,8 +206,8 @@ everything below is per language.
 The rules tying a language to `kind` and `comparison` span both tables, so no `CHECK` can
 hold them; `ProblemIn` (§7.1) checks them for every variant, and the seed loader is the only
 writer: `"js"`/`"rust"` only support `kind="function"` with no node-typed params or return;
-`"mysql"` always pairs with `kind="sql"`; a `custom_validator` comparison needs Python to be
-the only language; exactly one of `function_name`/`class_name` matches `kind` (neither for
+`"mysql"` always pairs with `kind="sql"`; a `custom_validator` comparison needs a validator
+for every language, each in a language whose harness runs them (Python only, so far; §5.4); exactly one of `function_name`/`class_name` matches `kind` (neither for
 `"sql"`); `memory_limit_mb` clears every language's floor (§13).
 
 ### 3.3 `test_cases`
@@ -558,14 +558,23 @@ The judge image bakes in a harness script (`harness.py`) as its entrypoint. Cont
 | `unordered`         | `{"mode": "unordered"}`                          | Compare as multisets (list order ignored, top level only; elements within a nested list still compare in order) |
 | `float_tolerance`   | `{"mode": "float_tolerance", "epsilon": 1e-6}`   | `a == b or abs(a - b) <= epsilon` (the equality case lets matching infinities pass, since `inf - inf` is NaN), recursively over nested lists |
 | `any_of`            | `{"mode": "any_of"}`                             | `expected` is a list of acceptable answers; pass if actual equals any |
-| `custom_validator`  | `{"mode": "custom_validator", "validator_code": "def validate(actual, expected, args, instance=None):\n    ..."}` | Problem-authored Python decides pass/fail directly, instead of comparing against a fixed `expected` |
+| `custom_validator`  | `{"mode": "custom_validator", "validator_code": {"python": "def validate(actual, expected, args, instance=None):\n    ..."}}` | Problem-authored code decides pass/fail directly, instead of comparing against a fixed `expected` |
 
 Five modes ship. `custom_validator` covers "any output satisfying property
 P," which none of the fixed-answer modes above can express — a round trip
 (`decode(encode(x)) == x`), a structural check (an array in alternating
 low/high order, a string with no adjacent repeats), or a statistical property
 over many extra calls (a weighted-random-pick distribution check).
-`validator_code` must define `def validate(actual, expected, args,
+`validator_code` maps each language the problem is offered in to that
+language's validator, since each harness can run only its own language's code
+(a file may give one Python string instead, which `ProblemIn` stores as
+`{"python": s}`; migration `e5a8c2f41d93` converted rows seeded earlier, so a
+stored row is always the map, and its downgrade converts back to the string the
+previous release runs). `app/comparison.py`'s `for_language` — the one resolver
+the worker and the seed-solution tests share — hands each harness the plain
+source string it has always taken. A missing validator for the
+submission's language is a `judge_error`, never a fallback to another
+language's. Python's validator must define `def validate(actual, expected, args,
 instance=None) -> bool`: `actual`/`expected` are the same values the other
 modes compare, `args` is the test case's input list exactly as it was
 **before** the submission ran, and `instance` is the live `kind: "operations"` object (`None` for
@@ -596,11 +605,11 @@ The alternative, requiring each author to stash the original in `expected`
 instead, was rejected: it's a per-problem discipline that's easy to miss,
 whereas a separate copy closes it for every problem. A broken validator (bad script, or one that raises
 mid-case) reports `judge_error`, never `runtime_error` — it's a
-problem-authoring fault, not the submitter's. Python-only
-(`harness.js`/`harness_sql.py` don't implement it; `ProblemIn` rejects the
-combination with any other `language` at seed time; the rule spans `problems` and
-`problem_languages`, so no database `CHECK` backs it up, §3.2) for now; ADR-0007
-plans per-language validators, starting with Rust.
+problem-authoring fault, not the submitter's. Only `harness.py` runs
+validators so far (`SandboxProfile.custom_validator`; `ProblemIn` refuses a
+validator problem offered in any other language at seed time, and the rule spans
+`problems` and `problem_languages`, so no database `CHECK` backs it up, §3.2);
+ADR-0007 brings Rust next.
 
 ### 5.5 Sandbox container
 
