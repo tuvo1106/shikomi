@@ -350,11 +350,12 @@ and `playwright`.
   parent kills the group, so grandchildren the submission spawned are reaped too.
   `worker/aggregate.py` also refuses a report that doesn't have one row per
   case sent (defence in depth). A verdict is only as trustworthy as the process
-  that computes it: a function-mode `custom_validator` runs in the parent, like
-  `compare()`. An operations `custom_validator` is the one thing that still runs in
-  the child (it calls into the live object), so such a problem must not rely on
-  `expected` being hidden, and its verdict can be forged through the result pipe
-  (ADR-0007's probes close this).
+  that computes it: a `custom_validator` runs in the parent, like `compare()`, and
+  gets extra calls' results as `probe_results` rather than calling into the live
+  object. The older `instance` form of an operations validator is the one thing
+  that still runs in the child, so such a problem must not rely on `expected` being
+  hidden, and its verdict can be forged through the result pipe. The harness tells
+  the forms apart by the `probe_results` parameter; author the probe form.
 
 - **Rust calls each op by its snake_case name.** The shared cases spell an op once for
   every language (`getState`), and the Rust glue calls `get_state`. The mapping exists
@@ -412,16 +413,17 @@ slice ships, delete its entry here.
 
 - **Custom validators in every language**
   ([ADR-0007](docs/adr/0007-custom-validators-in-every-language.md)), in order:
-  (3) probes as test-case data, in `harness.py` and the Rust harness: extra ops the
-  harness appends, with references to earlier results in their own field, results split
-  into `actual` + `probe_results`, and the legacy `instance` path kept for any validator
-  that doesn't take `probe_results`; after that no validator runs in the child and the
-  child never gets `expected`; (4) Rust: a separate validator binary run by the parent
-  (non-dumpable, one compile deadline shared with the submission, a compile failure is
-  `judge_error` with its diagnostics hidden), plus a seedable RNG in the prelude, then flip
-  `custom_validator=True` on Rust's `SandboxProfile`;
-  (5) port the 19 problems in the external problem set, each with a known-wrong solution
-  that its validator rejects; (6) remove `instance`.
+  (4) Rust: a separate validator binary run by the parent (non-dumpable, one compile
+  deadline shared with the submission, a compile failure is `judge_error` with its
+  diagnostics hidden); probes in the Rust harness (each probe op needs a dispatch arm in
+  `operations_glue`, since `case_ops` only scans the cases' ops; `refs` resolved in the
+  prelude's `ops::replay`; results split into `actual` + `probe_results`); a seedable RNG
+  in the prelude; then flip `custom_validator=True` on Rust's `SandboxProfile`;
+  (5) port the 19 problems in the external problem set: the 13 operations validators to
+  the probe form (a converter that does this mechanically, and passes all their reference
+  solutions, was proven on a copy), each with a known-wrong solution its validator
+  rejects; (6) remove the `instance` form from `harness.py`, after which no validator
+  runs in the child and the child never gets `expected`.
 
 - **Auth roadmap:** revisit session strategy (currently JWT-in-memory access +
   httpOnly refresh cookie — consider server-side sessions / cookie-based access

@@ -12,10 +12,11 @@ Two tiers, deliberately different shapes:
 set, so an invalid value is rejected at the boundary and shows up as an enum in
 the OpenAPI docs.
 """
+import ast
 import uuid
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.comparison import validator_codes
 from app.judge_budget import fits_job_timeout, max_cases_within_job_timeout
@@ -174,6 +175,27 @@ def _operations_case(case_input: Any) -> tuple[list, list]:
         ops, args = case_input
         return (ops if isinstance(ops, list) else [], args if isinstance(args, list) else [])
     return [], []
+
+
+def _validate_params(validator_code: str) -> set[str] | None:
+    """The names a Python validator's top-level `validate` can be passed by keyword,
+    or None when that can't be told without running it (it doesn't parse, or
+    `validate` is defined some other way). Parsed, never executed: seed validation
+    runs no problem code, and the harness reports a script that doesn't load anyway.
+
+    Mirrors how judge/harness.py sees it (`_takes_probe_results`): the *last*
+    `def validate` wins, as it does when the script runs, and a positional-only
+    parameter doesn't count, since the harness passes every argument by keyword.
+    """
+    try:
+        tree = ast.parse(validator_code)
+    except SyntaxError:
+        return None
+    defs = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "validate"]
+    if not defs:
+        return None
+    a = defs[-1].args
+    return {p.arg for p in a.args + a.kwonlyargs}
 
 
 def _operations_ctor_args(case_input: Any) -> list:
@@ -443,11 +465,57 @@ class ProblemIn(BaseModel):
         return self
 
 
+# The most probe calls one case may make. A probe runs the submission's code inside
+# the case's `time_limit_ms` (so the judge budget is unaffected), and results travel
+# back on the result pipe, so the cap bounds that payload. The largest real use, a
+# per-index distribution check, makes 8000.
+MAX_PROBE_CALLS = 20_000
+
+
+class ProbeIn(BaseModel):
+    """One judge-added call, made on an operations case's instance after the replay
+    (judge/harness.py "probes"; docs/adr/0007-custom-validators-in-every-language.md).
+
+    Its results go to a probe-form custom validator as `probe_results`, so a property
+    that needs more calls than the case makes (a round trip, a distribution) can be
+    checked in the trusted parent, without the live instance.
+
+    `refs` fills argument `i` with the result of the case's own op `j` (`{i: j}`),
+    for a round trip: `{"op": "decode", "args": [null], "refs": {"0": 1}}`. `repeat`
+    makes the same call n times.
+    """
+
+    # Unlike a problem file's top level (unknown keys only warn there), a probe's are
+    # refused: a typo like `"repeats"` or `"ref"` would otherwise be dropped, and the
+    # probe would quietly make one call, or pass a literal, instead of what was meant.
+    model_config = ConfigDict(extra="forbid")
+
+    op: str = Field(min_length=1)
+    args: list[Any] = Field(default_factory=list)
+    refs: dict[int, int] = Field(default_factory=dict)
+    repeat: int = Field(default=1, ge=1, le=MAX_PROBE_CALLS)
+
+    @model_validator(mode="after")
+    def _refs_fill_real_args(self) -> "ProbeIn":
+        for i in self.refs:
+            if not 0 <= i < len(self.args):
+                raise ValueError(
+                    f"probe {self.op!r}: refs names argument {i}, but it has {len(self.args)}")
+        # A ref is for a round trip (one call on one result), `repeat` for a
+        # distribution (many calls on literals). Keeping them apart means a repeated
+        # call's arguments are always the small literals written here, so the
+        # harness's per-call copy of them costs nothing inside the time limit.
+        if self.refs and self.repeat > 1:
+            raise ValueError(f"probe {self.op!r}: refs and repeat can't be combined")
+        return self
+
+
 class TestCaseIn(BaseModel):
     ordinal: int
     input: list[Any]
     expected: Any = None
     is_sample: bool = False
+    probes: list[ProbeIn] | None = None
 
 
 class ProblemFile(ProblemIn):
@@ -544,6 +612,60 @@ class ProblemFile(ProblemIn):
                             f"in [{lo}, {hi}]")
         return self
 
+    def authoring_warnings(self) -> list[str]:
+        """What loads but deserves the author's attention; `app.cli` prints these.
+
+        An operations validator in the older `instance` form (no `probe_results`)
+        runs in the judge's child process, next to the submission, which can then
+        read `expected` and forge that case's verdict (ADR-0007). It's a warning,
+        not an error, until the problem sets written that way are converted: the
+        harness still runs them, and refusing them would stop those sets loading.
+        """
+        if self.kind != "operations" or self.comparison.get("mode") != "custom_validator":
+            return []
+        params = _validate_params(validator_codes(self.comparison).get("python", ""))
+        if params is None or "probe_results" in params:
+            return []
+        return ["its operations validator uses the older `instance` form, which runs next to "
+                "the submission: it can read `expected`, and its verdict can be forged. Use "
+                "`validate(actual, expected, args, probe_results)`, with probes for any extra "
+                "calls (docs/adr/0007-custom-validators-in-every-language.md)"]
+
+    @model_validator(mode="after")
+    def _probes_feed_a_probe_validator(self) -> "ProblemFile":
+        # Probes (`ProbeIn`) exist only to give a custom validator more results to
+        # check, so each misuse would otherwise be silent: judge/harness.py sends a
+        # case's probes only to a probe-form validator (one taking `probe_results`)
+        # on an operations instance, and drops them anywhere else. A ref must name
+        # one of the case's own ops (1..len-1; 0 is the constructor, which returns
+        # nothing), or the harness reports a judge_error on every submission.
+        cases = [tc for tc in self.test_cases if tc.probes]
+        if not cases:
+            return self
+        if self.kind != "operations":
+            raise ValueError("test case probes need kind 'operations' (they call the instance)")
+        if self.comparison.get("mode") != "custom_validator":
+            raise ValueError("test case probes need comparison mode 'custom_validator' to check them")
+        params = _validate_params(validator_codes(self.comparison).get("python", ""))
+        if params is not None and "probe_results" not in params:
+            raise ValueError(
+                "test case probes need the Python validator to take 'probe_results': "
+                "`def validate(actual, expected, args, probe_results)`")
+        for tc in cases:
+            ops, _ = _operations_case(tc.input)
+            for probe in tc.probes:
+                for source in probe.refs.values():
+                    if not 1 <= source < len(ops):
+                        raise ValueError(
+                            f"test case {tc.ordinal}: probe {probe.op!r} refs op {source}, but "
+                            f"the case's ops are 1..{len(ops) - 1}")
+            calls = sum(p.repeat for p in tc.probes)
+            if calls > MAX_PROBE_CALLS:
+                raise ValueError(
+                    f"test case {tc.ordinal}: its probes make {calls} calls, over the "
+                    f"{MAX_PROBE_CALLS} limit")
+        return self
+
     @model_validator(mode="after")
     def _ops_are_rust_methods(self) -> "ProblemFile":
         # The Rust harness dispatches each op name to a method by generating source
@@ -556,7 +678,8 @@ class ProblemFile(ProblemIn):
         methods: dict[str, str] = {}
         for tc in self.test_cases:
             ops, _ = _operations_case(tc.input)
-            for op in ops[1:]:
+            # A probe's op is dispatched the same way, so it needs the same mapping.
+            for op in ops[1:] + [p.op for p in tc.probes or []]:
                 method = rust_method_name(op) if isinstance(op, str) else None
                 if method is None:
                     raise ValueError(f"test case {tc.ordinal}: op {op!r} can't be a Rust method name")

@@ -20,6 +20,13 @@ class TestCase(Base, PKMixin, TimestampMixin):
     * `is_sample` — sample cases are shown to users and used by "Run"; hidden
       cases are only used on "Submit", so a solution can't be reverse-engineered
       from the examples.
+    * `probes` (JSONB, nullable) — extra calls the harness makes on an operations
+      case's instance after the replay, for a custom validator to check (a round
+      trip, a distribution over thousands of calls). A list of `ProbeIn`
+      (app/schemas/problem.py); NULL for every other case. Not shown in the UI,
+      but not secret either: the harness sends them to the submission's process
+      with the case's input, where a determined submission can read them, so they
+      must hold nothing the submission shouldn't know.
 
     Storing input/expected as JSONB keeps arbitrary shapes (nested arrays, objects)
     without a bespoke serialization format.
@@ -34,5 +41,7 @@ class TestCase(Base, PKMixin, TimestampMixin):
     input: Mapped[list] = mapped_column(JSONB, nullable=False)
     expected: Mapped[object] = mapped_column(JSONB, nullable=True)
     is_sample: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    # none_as_null: a case without probes stores SQL NULL, not the JSON value `null`.
+    probes: Mapped[list | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
 
     problem: Mapped["Problem"] = relationship(back_populates="test_cases")  # noqa: F821

@@ -8,6 +8,17 @@ All notable changes to this project are recorded here. The format follows
 
 ### Added
 
+- **Probes** for operations problems with a `custom_validator`: a test case can list
+  extra calls the judge makes on the instance after the replay, such as
+  `{"op": "pickIndex", "repeat": 4000}` or a round trip, `{"op": "decode", "args": [null],
+  "refs": {"0": 1}}`. Their results reach the validator as `probe_results`, in
+  `def validate(actual, expected, args, probe_results)`. A validator in that form runs in
+  the judge's trusted parent process, so an operations problem no longer has to expose
+  `expected` to the submission or trust a verdict the submission could forge, which the
+  older `instance` form still does (ADR-0007). A probe call that raises is the
+  submission's `runtime_error`, labelled as a call the judge added. Existing deployments
+  need `alembic upgrade head` (it adds `test_cases.probes`) and a rebuilt Python judge
+  image; the old image reports every probe-form problem as a `judge_error`.
 - A `custom_validator` problem's `validator_code` can be a map of language to validator,
   `{"python": "..."}`, so each language a problem is offered in can have its own
   (ADR-0007). A single string still works and means Python's; it's stored as the map

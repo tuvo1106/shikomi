@@ -219,6 +219,7 @@ for every language, each in a language whose harness runs them (Python only, so 
 | input       | jsonb   | Ordered list of args: `[[4,9,1,6], 7]`                         |
 | expected    | jsonb   | Expected return value: `[2, 3]`                                |
 | is_sample   | boolean | Sample cases are shown to users and run on "Run"; hidden cases only on "Submit" |
+| probes      | jsonb   | Nullable. Extra calls the harness makes on an operations case's instance after the replay, for a `custom_validator` to check (§5.4). Not shown in the UI, but sent to the submission's process with the input, so never secret |
 
 ### 3.4 `solutions`
 
@@ -502,7 +503,9 @@ sequenceDiagram
    (design/class-replay — a cache, a state machine), the payload instead carries
    `"kind": "operations"` and `"class_name"` in place of `function_name`, and each
    test case's `input` is `[ops, args]` rather than a flat positional-args list —
-   see the "operations mode" section of `judge/harness.py` for the exact shape.
+   see the "operations mode" section of `judge/harness.py` for the exact shape. An
+   operations case with probes (§5.4) also carries `"probes"`; every other case's
+   payload leaves the key out.
 4. `docker run` the judge image (see §5.5), piping payload JSON to the container's stdin. Wall-clock kill timeout: `sum(per-case limits) + 10s` enforced by the worker via `asyncio.wait_for` + `docker kill`.
 5. Parse result JSON from container stdout (cap stdout read at 1 MB → `output_limit_exceeded` beyond that).
 6. Aggregate: first non-passing case determines the verdict; `accepted` only if all pass. Compute `passed`/`total`, where `total` is the number of test cases judged (not the number of result rows) — so a short-circuited run (compile error, fail-fast) still reports `X/N`. Write `status`, `verdict_detail` (incl. `passed`/`total`), `runtime_ms`.
@@ -516,7 +519,7 @@ sequenceDiagram
 
 The judge image bakes in a harness script (`harness.py`) as its entrypoint. Contract:
 
-**Trust boundary — the submission runs in a child process, not in the harness.** Every harness (`harness.py`, `harness.js`, `harness_rs/`) splits into a *trusted parent* and an *untrusted child*. The parent reads the payload, holds every case's `expected`, spawns the child, feeds it one case's **input** at a time, computes pass/fail itself for every fixed-answer comparison mode, and is the only process that writes the `{"results": ...}` report to stdout. The child receives only the submission and the inputs — never `expected` — runs the submission, and returns the value it produced over a *separate private pipe*; its own stdout is pointed at `/dev/null`. This is why a submission cannot cheat by (a) reading the expected answers out of the grader's memory — they aren't in the child's process, and the parent, which has them, is unreadable to the child (marked non-dumpable on Python; blocked by the container's non-root ptrace rules for all), so a fabricated return value can't match without already knowing the answer the parent compares against — or (b) writing a forged report to stdout, since the child's stdout is discarded and the report stream belongs to the parent. A hung case is killed by the parent (a per-case `time_limit_exceeded`, even if the submission defeated the harness's own alarm) and a crash is a per-case `runtime_error`; either way the parent respawns a fresh child for the remaining cases. `worker/aggregate.py` additionally refuses any report that doesn't carry exactly one row per case sent (defence in depth). Rust has always worked this way (ADR-0004); Python and JS were brought to it in [ADR-0006](docs/adr/0006-harness-process-isolation.md). A function-mode `custom_validator` (§5.4) runs in the parent too. The one exception is an `operations` `custom_validator`, which runs in the child since it calls into the live object: such a problem must not rely on `expected` being hidden from the submission, and a submission that writes its own frame to the result pipe can forge that case's verdict (no bundled problem uses it; [ADR-0007](docs/adr/0007-custom-validators-in-every-language.md) closes it).
+**Trust boundary — the submission runs in a child process, not in the harness.** Every harness (`harness.py`, `harness.js`, `harness_rs/`) splits into a *trusted parent* and an *untrusted child*. The parent reads the payload, holds every case's `expected`, spawns the child, feeds it one case's **input** at a time, computes pass/fail itself for every fixed-answer comparison mode, and is the only process that writes the `{"results": ...}` report to stdout. The child receives only the submission and the inputs — never `expected` — runs the submission, and returns the value it produced over a *separate private pipe*; its own stdout is pointed at `/dev/null`. This is why a submission cannot cheat by (a) reading the expected answers out of the grader's memory — they aren't in the child's process, and the parent, which has them, is unreadable to the child (marked non-dumpable on Python; blocked by the container's non-root ptrace rules for all), so a fabricated return value can't match without already knowing the answer the parent compares against — or (b) writing a forged report to stdout, since the child's stdout is discarded and the report stream belongs to the parent. A hung case is killed by the parent (a per-case `time_limit_exceeded`, even if the submission defeated the harness's own alarm) and a crash is a per-case `runtime_error`; either way the parent respawns a fresh child for the remaining cases. `worker/aggregate.py` additionally refuses any report that doesn't carry exactly one row per case sent (defence in depth). Rust has always worked this way (ADR-0004); Python and JS were brought to it in [ADR-0006](docs/adr/0006-harness-process-isolation.md). A `custom_validator` (§5.4) runs in the parent too. The one exception is the older `instance` form of an `operations` validator, which runs in the child since it calls into the live object: such a problem must not rely on `expected` being hidden from the submission, and a submission that writes its own frame to the result pipe can forge that case's verdict. No bundled problem uses it, and probes replace it ([ADR-0007](docs/adr/0007-custom-validators-in-every-language.md)); the path is removed once nothing uses it.
 
 - **stdin:** payload JSON (§5.2).
 - **stdout:** exactly one result JSON document (the child captures user `print()` into a per-case buffer returned to the parent, and its raw stdout goes to `/dev/null`, so nothing the submission writes can reach this stream):
@@ -558,7 +561,7 @@ The judge image bakes in a harness script (`harness.py`) as its entrypoint. Cont
 | `unordered`         | `{"mode": "unordered"}`                          | Compare as multisets (list order ignored, top level only; elements within a nested list still compare in order) |
 | `float_tolerance`   | `{"mode": "float_tolerance", "epsilon": 1e-6}`   | `a == b or abs(a - b) <= epsilon` (the equality case lets matching infinities pass, since `inf - inf` is NaN), recursively over nested lists |
 | `any_of`            | `{"mode": "any_of"}`                             | `expected` is a list of acceptable answers; pass if actual equals any |
-| `custom_validator`  | `{"mode": "custom_validator", "validator_code": {"python": "def validate(actual, expected, args, instance=None):\n    ..."}}` | Problem-authored code decides pass/fail directly, instead of comparing against a fixed `expected` |
+| `custom_validator`  | `{"mode": "custom_validator", "validator_code": {"python": "def validate(actual, expected, args, probe_results):\n    ..."}}` | Problem-authored code decides pass/fail directly, instead of comparing against a fixed `expected` |
 
 Five modes ship. `custom_validator` covers "any output satisfying property
 P," which none of the fixed-answer modes above can express — a round trip
@@ -574,31 +577,56 @@ previous release runs). `app/comparison.py`'s `for_language` — the one resolve
 the worker and the seed-solution tests share — hands each harness the plain
 source string it has always taken. A missing validator for the
 submission's language is a `judge_error`, never a fallback to another
-language's. Python's validator must define `def validate(actual, expected, args,
-instance=None) -> bool`: `actual`/`expected` are the same values the other
+language's. Python's validator defines `def validate(actual, expected, args,
+probe_results) -> bool`: `actual`/`expected` are the same values the other
 modes compare, `args` is the test case's input list exactly as it was
-**before** the submission ran, and `instance` is the live `kind: "operations"` object (`None` for
-`kind: "function"`) so the validator can make further calls beyond the
-harness's own replay — e.g. the round-trip check above. Loaded once per
+**before** the submission ran, and `probe_results` is the flat list of the
+case's **probe** results (`[]` when it has none). Loaded once per
 submission, inside the judge sandbox — problem authors are the operator
 (problems load only through the operator-run `app.cli seed`, §4.4 — trusted),
 so the script itself needs no sandbox of its own. *Which process* runs it is
 what matters, because a verdict is only as trustworthy as the process that
-computes it (§5.3's trust boundary): a `kind: "function"` validator runs in the
-**trusted parent**, on the `actual` the child returned, exactly where
-`compare()` runs for the fixed-answer modes — the child never sees `expected`
-and never reports a verdict. It gets whatever is left of the case's
-`time_limit_ms` after the submission's run (a runaway validator is
-`time_limit_exceeded`, and a case's total stays inside the budget §5.2 plans
-for), and it sees `actual` after its JSON round trip, as `compare()` does (a
-returned tuple arrives as a list). A `kind: "operations"` validator still runs
-in the **child**, because `instance` exists only there — so such a problem's
-`expected` is readable and its verdict forgeable by a determined submission.
-Closing that is [ADR-0007](docs/adr/0007-custom-validators-in-every-language.md)'s
-"probes", which replace `instance` with extra ops the harness itself runs.
-`args` is the parent's own copy of the input in function mode (it never
-crossed into the child) and a second deep copy in operations mode, separate
-from the one handed to the submission: validators routinely check "same
+computes it (§5.3's trust boundary): it runs in the **trusted parent**, on the
+`actual` and `probe_results` the child returned, exactly where `compare()` runs
+for the fixed-answer modes — the child never sees `expected` and never reports
+a verdict. It gets whatever is left of the case's `time_limit_ms` after the
+submission's run (a runaway validator is `time_limit_exceeded`, and a case's
+total stays inside the budget §5.2 plans for), and it sees `actual` after its
+JSON round trip, as `compare()` does (a returned tuple arrives as a list).
+
+**Probes** (`test_cases.probes`, §3.3; [ADR-0007](docs/adr/0007-custom-validators-in-every-language.md))
+give an operations validator results the case's own replay doesn't produce: after
+the replay, the child makes each probe's call on the same instance, inside the
+case's time limit, and returns the results separately from `actual`. A probe is
+`{"op": name, "args": [...], "refs": {"<arg>": <op>}, "repeat": n}`: `refs`
+fills an argument with one of the case's own op results, for a round trip
+(`{"op": "decode", "args": [null], "refs": {"0": 1}}` decodes what op 1
+returned), and `repeat` makes the same call n times, for a distribution
+(`{"op": "pickIndex", "repeat": 4000}`). Probes are *data*, not code, so every
+language's harness reads the same list and seed validation can check them: an
+operations problem, a probe-form validator, refs that name real ops, no unknown
+keys (a typo like `"repeats"` would otherwise be dropped), `refs` never combined
+with `repeat`, at most 20,000 calls per case. `refs` read the case's results as
+the JSON snapshot the parent receives, taken before any probe runs, so a probe
+can't change `actual` through an op that returned the instance's own state.
+Probes are not secret: they reach the submission's process with the input. A probe call that raises is the submission's
+`runtime_error`, labelled as a call the judge added (it's the submission's method
+that failed), and the parent refuses a reply whose `probe_results` doesn't match
+the probes it sent, so a forged frame can't reach the validator in a shape that
+would blame the author. Forged probe *results* are harmless: anything a forged
+frame claims, the submission's own methods could have returned.
+
+The older validator form, `def validate(actual, expected, args, instance=None)`
+(no `probe_results`), still works while problems migrate: in function mode it
+runs in the parent with `instance=None`, but in operations mode it runs in the
+**child**, because `instance` — the live object, for the validator's own extra
+calls — exists only there. Such a problem's `expected` is readable and its
+verdict forgeable by a determined submission, which is why probes replace it; the
+harness tells the forms apart by the `probe_results` parameter (passable by
+keyword), and seeding warns about an operations validator in the older form.
+`args` is the parent's own copy of the input for a parent-side validator (it
+never crossed into the child) and a second deep copy for a child-side one,
+separate from the one handed to the submission: validators routinely check "same
 multiset as the input", and if they read the submission's copy, a submission
 could overwrite its input with any pattern-valid values, return them, and pass.
 The alternative, requiring each author to stash the original in `expected`
@@ -1062,7 +1090,7 @@ Testing is a first-class requirement, not a follow-up: tests land with the code 
 
 pytest suite in `judge/tests/`, two layers:
 
-- **Protocol tests (fast, no Docker):** run `harness.py` as a subprocess, feed fixture payloads on stdin, assert exact result JSON. Cover: correct solution; wrong answer; runtime exception; per-case TLE (busy loop and `time.sleep`); print-heavy code (stdout capture + 4 KB truncation); missing function; syntax error; top-level import error; input mutation between cases; every comparison mode (§5.4) including nested floats, `any_of`, and `custom_validator` (correct/wrong/a validator that raises/a validator that fails to load/a runaway validator sharing the case's time limit/a submission forging a verdict frame or peeking for `expected`, plus — in the `kind: "operations"` protocol tests — one proving the validator receives the live `instance`); malformed payload → nonzero exit; result truncation limits.
+- **Protocol tests (fast, no Docker):** run `harness.py` as a subprocess, feed fixture payloads on stdin, assert exact result JSON. Cover: correct solution; wrong answer; runtime exception; per-case TLE (busy loop and `time.sleep`); print-heavy code (stdout capture + 4 KB truncation); missing function; syntax error; top-level import error; input mutation between cases; every comparison mode (§5.4) including nested floats, `any_of`, and `custom_validator` (correct/wrong/a validator that raises/a validator that fails to load/a runaway validator sharing the case's time limit/a submission forging a verdict frame or peeking for `expected`, plus — in the `kind: "operations"` protocol tests — the older form receiving the live `instance`, and probes: a ref round trip, `repeat`, a probe that raises (a labelled `runtime_error`), probes inside the time limit, a forged or short `probe_results`, and a malformed probe as `judge_error`); malformed payload → nonzero exit; result truncation limits.
 - **Seed-solution validation (fast, no Docker):** `test_seed_solutions.py` runs every solution in `seed/problems/` (or `$SEED_DIR`) through `harness.py` against *every* one of that problem's own test cases (sample and hidden, not just the first) and asserts every case reports `passed` — the "does this code actually satisfy this problem's cases" check an operator runs before loading a problem (§7.1). It includes the large near-constraint-max cases, so an intentionally-slow "brute force" reference solution can legitimately take seconds — CI (§10.4) only runs it when a push/PR actually touches `seed/problems/` or `judge/`, not on every PR.
 - **Sandbox tests (real container, marked `@pytest.mark.docker`):** memory hog → exit 137 mapping; fork bomb contained by `--pids-limit`; network access attempt fails (`--network=none`); filesystem write outside `/tmp` fails (`--read-only`); wall-clock kill on a hung container; orphan sweep on worker startup.
 

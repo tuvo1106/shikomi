@@ -59,6 +59,8 @@ def _load_problem_files(seed_dir: pathlib.Path) -> tuple[list[ProblemFile], list
         unknown = sorted(set(raw) - set(ProblemFile.model_fields) - set(LEGACY_LANGUAGE_FIELDS))
         if unknown:
             print(f"  warning: {path.name}: ignoring unknown keys {unknown}", file=sys.stderr)
+        for warning in problem.authoring_warnings():
+            print(f"  warning: {path.name}: {warning}", file=sys.stderr)
         slug = problem.slug or problem_service.slugify(problem.title)
         if slug in slugs:  # two files would silently overwrite each other
             errors.append(f"{path.name}: slug {slug!r} already used by {slugs[slug]}")

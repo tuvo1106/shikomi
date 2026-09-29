@@ -44,6 +44,16 @@ async def _fail_submission(sub_uuid: uuid.UUID) -> None:
         await session.commit()
 
 
+def _case_payload(tc) -> dict:
+    """One test case as the harness protocol takes it (DESIGN.md §5.3). `probes`
+    rides along only when the case has them (ADR-0007), so every other case's
+    payload is exactly what it always was."""
+    case = {"id": tc.ordinal, "input": tc.input, "expected": tc.expected}
+    if tc.probes:
+        case["probes"] = tc.probes
+    return case
+
+
 async def judge_submission(ctx, submission_id: str, mode: str) -> None:
     """Load the submission, judge it in a sandbox, persist the verdict (§5.2).
 
@@ -112,8 +122,7 @@ async def judge_submission(ctx, submission_id: str, mode: str) -> None:
                 memory_limit_mb=problem.memory_limit_mb,
                 params=variant.params, return_type=variant.return_type,
                 kind=problem.kind, class_name=variant.class_name, language=variant.language,
-                test_cases=[{"id": tc.ordinal, "input": tc.input, "expected": tc.expected}
-                            for tc in cases],
+                test_cases=[_case_payload(tc) for tc in cases],
                 container_name=f"judge-{submission_id}")
 
             sub.status = verdict.status
