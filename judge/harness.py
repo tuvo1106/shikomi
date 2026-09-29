@@ -726,11 +726,21 @@ def compare(actual, expected, comparison):
 # problem author supplies `validator_code`, a Python script defining
 # `def validate(actual, expected, args, instance=None) -> bool`. Loaded once
 # (like `user_code`) before the test-case loop, then called per case instead
-# of `compare()`. Runs in the same sandboxed container as the submission
-# itself — DESIGN.md §5.8's containment is per-container, not per-script, and
-# problem authors are the operator (trusted: problems load only through the
-# operator-run `app.cli seed`, DESIGN.md §7.1), so this needs no
-# separate trust boundary from the rest of the harness.
+# of `compare()`. Problem authors are the operator (trusted: problems load
+# only through the operator-run `app.cli seed`, DESIGN.md §7.1), so the
+# validator itself needs no sandbox of its own — but *where* it runs matters,
+# because its verdict is only as trustworthy as the process that computes it:
+#
+# * `kind: "function"` — the validator runs in the trusted **parent**
+#   (`_run_validator`), on the `actual` the child sent back, exactly like
+#   `compare()` does for the fixed-answer modes. The child never sees
+#   `expected` and never computes a verdict, so a submission can neither read
+#   the answer nor forge a pass by writing its own frame to the result pipe.
+# * `kind: "operations"` — the validator still runs in the **child**, next to
+#   the submission, because `instance` exists only there. That leaves such a
+#   problem's `expected` readable and its verdict forgeable by a determined
+#   submission (DESIGN.md §5.3); closing it is the "probes" follow-up in
+#   docs/adr/0007-custom-validators-in-every-language.md.
 #
 # `instance` is the live `kind: "operations"` object (None for `kind:
 # "function"`), letting a validator make *further* calls beyond the harness's
@@ -742,7 +752,12 @@ def compare(actual, expected, comparison):
 # original input (e.g. "same multiset as the input" without a fixed
 # `expected`). It has to be a separate copy: a submission that overwrites its
 # own input and returns it would otherwise make any such check compare the
-# answer with itself.
+# answer with itself. (In the parent that copy is free: the parent's `input`
+# never crossed into the child, so nothing the submission does can touch it.)
+#
+# A parent-side validator sees `actual` after its JSON round trip through the
+# result pipe — a tuple arrives as a list — the same value `compare()` judges
+# for every other mode, so all modes agree on what the submission returned.
 #
 # Any exception raised while `validate()` runs is reported as `judge_error`
 # (see `except ValidatorError` in `run()`) — including one that surfaces from
@@ -768,6 +783,32 @@ def _load_validator(validator_code):
     if not callable(validate_fn):
         raise ValidatorError("custom validator must define a 'validate' function")
     return validate_fn
+
+
+def _run_validator(validate_fn, actual, expected, args, budget_s):
+    """Call a function-mode validator in the parent and return its verdict.
+
+    The validator gets whatever is left of the case's time limit after the
+    submission's own run (`budget_s`), under the same SIGALRM the child uses —
+    so a slow or hanging validator still ends as `time_limit_exceeded` exactly
+    as it did when it ran in the child, and a case's total time (submission +
+    validator) stays within the `time_limit_ms` that app/judge_budget.py
+    budgets for. Without an alarm, a hung validator here would hold the whole
+    run until the worker's outer wall-clock kill.
+
+    Raises:
+        TimeLimitExceeded: the validator outran `budget_s`.
+        ValidatorError: it raised — an authoring bug, reported as judge_error.
+    """
+    signal.setitimer(signal.ITIMER_REAL, budget_s)
+    try:
+        return bool(validate_fn(actual=actual, expected=expected, args=args, instance=None))
+    except TimeLimitExceeded:
+        raise
+    except BaseException as exc:  # noqa: BLE001 - validator may raise anything
+        raise ValidatorError(str(exc)) from exc
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
 
 
 # --- traceback filtering ----------------------------------------------------
@@ -807,11 +848,13 @@ def _format_user_traceback(exc):
 # one child for the whole run and only respawns it after a timeout or a crash,
 # so the per-case cost is a pipe round trip, not a process launch.
 #
-# `custom_validator` is the one exception: an operations-mode validator makes
-# further calls into the *live* object, which exists only in the child, so the
-# (operator-authored, trusted) validator runs there and returns pass/fail. A
-# custom_validator problem therefore must not rely on `expected` being hidden
-# from the submission. No bundled problem uses custom_validator.
+# A function-mode `custom_validator` runs here in the parent too. The one
+# exception is an *operations*-mode validator: it makes further calls into the
+# *live* object, which exists only in the child, so the (operator-authored,
+# trusted) validator runs there and returns pass/fail. Such a problem must not
+# rely on `expected` being hidden from the submission, and a submission that
+# writes its own frame to the result pipe can forge its verdict. No bundled
+# problem uses custom_validator; closing this is ADR-0007's "probes".
 
 CHILD_FLAG = "--child"
 _HANG = "__hang__"     # parent sentinel: no reply within the deadline
@@ -883,7 +926,8 @@ def _execute_case(ctx, message):
 
     The submission's `print()` output is captured per case (as before); its raw
     fd-1 writes go to /dev/null (redirected in `_child_main`). `expected` is only
-    present when a validator runs here. On the `ok` path the child returns the
+    present when a validator runs here (operations mode only; a function-mode
+    validator runs in the parent). On the `ok` path the child returns the
     raw `actual` value for the parent to compare — it does not, and cannot,
     decide pass/fail for a fixed-answer problem."""
     args = message["input"]  # a fresh parse each case, so nothing leaks across cases
@@ -989,8 +1033,10 @@ class _Child:
 
         A submission's `exec`'d code can write raw bytes to the result fd itself,
         so a malformed frame is treated as a dead, desynced child (_CRASH) rather
-        than being allowed to raise out of here and abort the whole run. It still
-        can't forge a pass: the parent alone holds `expected` and decides."""
+        than being allowed to raise out of here and abort the whole run. A
+        well-formed forged frame still can't pass a case: the parent alone holds
+        `expected` and decides — except for an operations-mode custom_validator,
+        whose verdict the child computes (see the section comment above)."""
         ready, _, _ = select.select([self.reader], [], [], deadline_s)
         if not ready:
             return {"status": _HANG}
@@ -1045,9 +1091,11 @@ def _spawn_child(setup):
     return child, None
 
 
-def _finalize(tc, reply, comparison, validator_mode):
+def _finalize(tc, reply, comparison, validator_mode, validate_fn=None, time_limit_s=None):
     """Turn the child's per-case `reply` (or None for a hang/crash) into the
-    report row, computing pass/fail here for every fixed-answer problem."""
+    report row, computing pass/fail here for every fixed-answer problem and for
+    a function-mode custom validator (`validate_fn`, loaded in the parent). Only
+    an operations-mode validator's verdict comes from the child's `passed`."""
     tc_id = tc.get("id", 0)
     status = reply.get("status")
     if status == _CRASH:
@@ -1069,7 +1117,26 @@ def _finalize(tc, reply, comparison, validator_mode):
                 "stdout": _truncate(reply.get("stdout", "")), "error": _truncate(reply.get("error", ""))}
 
     actual = reply.get("actual")
-    if validator_mode:
+    if validate_fn is not None:
+        # The remaining share of the case's limit. `runtime_ms` is the child's own
+        # report, so clamp it: a lying child can't buy its validator extra time
+        # (or none at all, which setitimer would read as "disarm"), and a
+        # non-number (a forged frame) mustn't crash the parent.
+        runtime_ms = reply.get("runtime_ms")
+        runtime_s = runtime_ms / 1000.0 if _is_number(runtime_ms) and math.isfinite(runtime_ms) else 0.0
+        budget_s = min(max(time_limit_s - runtime_s, 0.001), time_limit_s)
+        try:
+            passed = _run_validator(validate_fn, actual, tc.get("expected"),
+                                    tc.get("input", []), budget_s)
+        except TimeLimitExceeded:
+            return {"test_case_id": tc_id, "status": "time_limit_exceeded", "runtime_ms": None,
+                    "output": None, "stdout": _truncate(reply.get("stdout", "")), "error": None}
+        except ValidatorError as exc:
+            return {"test_case_id": tc_id, "status": "judge_error", "runtime_ms": reply.get("runtime_ms", 0),
+                    "output": _truncate(_format_output(actual)),
+                    "stdout": _truncate(reply.get("stdout", "")),
+                    "error": _truncate("custom validator: %s" % exc)}
+    elif validator_mode:  # operations mode: the child ran the validator
         passed = bool(reply.get("passed"))
     else:
         passed = compare(actual, tc.get("expected"), comparison)
@@ -1082,10 +1149,11 @@ def run(payload):
     """Judge the submission against every test case, in a child process.
 
     The parent compiles nothing user-supplied and never runs it: it spawns the
-    child (`_spawn_child`), feeds it one case at a time, and for each reply either
-    trusts a validator's verdict or — for every fixed-answer mode — computes
-    pass/fail itself with `compare()` against an `expected` the child never
-    received. A case that hangs past the limit is killed and reported
+    child (`_spawn_child`), feeds it one case at a time, and for each reply
+    computes pass/fail itself — with `compare()` against an `expected` the child
+    never received, or with a function-mode custom validator it loaded here —
+    except for an operations-mode validator, whose verdict it takes from the
+    child. A case that hangs past the limit is killed and reported
     `time_limit_exceeded`; a case that crashes the child is reported
     `runtime_error`; either way the parent respawns a fresh child for the
     remaining cases. A top-level compile error (or a bad validator) surfaces from
@@ -1102,6 +1170,15 @@ def run(payload):
     first_id = test_cases[0].get("id", 0) if test_cases else 0
 
     validator_mode = (comparison or {}).get("mode") == "custom_validator"
+    # Where the validator runs (see "custom validator mode" above): here, unless
+    # it needs the live operations `instance`, which only the child has.
+    validator_in_child = validator_mode and kind == "operations"
+    validate_fn = None
+    if validator_mode and not validator_in_child:
+        try:
+            validate_fn = _load_validator(comparison.get("validator_code", ""))
+        except ValidatorError as exc:
+            return [_judge_error_result(first_id, "custom validator: %s" % exc)]
     setup = {
         "user_code": payload["user_code"],
         "kind": kind,
@@ -1110,10 +1187,11 @@ def run(payload):
         "params": payload.get("params", []),
         "return_type": payload.get("return_type", ""),
         "time_limit_ms": time_limit_ms,
-        # The (trusted) validator runs in the child, where the live instance is;
-        # None for every other mode, so the child stays a pure input→output box.
-        "validator_code": comparison.get("validator_code", "") if validator_mode else None,
+        # Only an operations validator runs in the child, where the live instance
+        # is; None otherwise, so the child stays a pure input→output box.
+        "validator_code": comparison.get("validator_code", "") if validator_in_child else None,
     }
+    time_limit_s = max(time_limit_ms, 1) / 1000.0
 
     deadline_s = max(time_limit_ms, 1) / 1000.0 + _KILL_GRACE_S
     child, err = _spawn_child(setup)
@@ -1138,11 +1216,11 @@ def run(payload):
                     continue
 
             message = {"input": tc.get("input", [])}
-            if validator_mode:
+            if validator_in_child:
                 message["expected"] = tc.get("expected")
             child.send(message)
             reply = child.read(deadline_s)
-            result = _finalize(tc, reply, comparison, validator_mode)
+            result = _finalize(tc, reply, comparison, validator_mode, validate_fn, time_limit_s)
             results.append(result)
 
             if reply.get("status") in (_HANG, _CRASH, "time_limit_exceeded"):
