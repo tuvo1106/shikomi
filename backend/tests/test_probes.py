@@ -86,16 +86,24 @@ def test_repeat_is_bounded_per_probe_and_per_case():
     assert "over the" in _error(_file([{"op": "encode", "repeat": half}] * 2))
 
 
-def test_probes_are_refused_for_rust_until_its_harness_makes_them():
-    """harness.rs runs validators but not probe calls yet (ADR-0007 step 4b), and
-    refuses such a case, so seeding one would make every Rust submission a
-    judge_error."""
-    languages = [{"language": "python", "class_name": "Codec", "starter_code": "c", "params": []},
-                 {"language": "rust", "class_name": "Codec", "starter_code": "c", "params": []}]
-    comparison = {"mode": "custom_validator",
-                  "validator_code": {"python": PROBE_VALIDATOR, "rust": "fn validate() {}"}}
-    assert "probes aren't supported for language 'rust' yet" in _error(
-        _file([DECODE], comparison=comparison, languages=languages))
+RUST_TOO = [{"language": "python", "class_name": "Codec", "starter_code": "c", "params": []},
+            {"language": "rust", "class_name": "Codec", "starter_code": "c", "params": []}]
+RUST_COMPARISON = {"mode": "custom_validator",
+                   "validator_code": {"python": PROBE_VALIDATOR, "rust": "fn validate() {}"}}
+
+
+def test_probes_load_for_a_problem_offered_in_rust():
+    """harness.rs makes probe calls too (prelude.rs `ops::replay`)."""
+    ProblemFile.model_validate(_file([DECODE], comparison=RUST_COMPARISON, languages=RUST_TOO))
+
+
+def test_a_probe_op_must_map_to_a_rust_method():
+    """A probe's op is dispatched like a case's (harness.rs `case_ops`), so the
+    same op-name rules apply to it, although no case calls it."""
+    assert "op 'has-dash' can't be a Rust method name" in _error(
+        _file([{"op": "has-dash"}], comparison=RUST_COMPARISON, languages=RUST_TOO))
+    assert "ops 'encode' and 'Encode' both map to the Rust method `encode`" in _error(
+        _file([{"op": "Encode"}], comparison=RUST_COMPARISON, languages=RUST_TOO))
 
 
 class _Case:

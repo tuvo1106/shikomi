@@ -21,8 +21,15 @@ All notable changes to this project are recorded here. The format follows
   finished. The submission can't replace it, because it runs from a sealed in-memory
   copy rather than a file, and it can't read the validator's source. A validator that
   doesn't compile or panics is a `judge_error`, and neither its compiler output nor its
-  panic message (which could quote the expected answer) is shown to the user. Probes aren't
-  supported in Rust yet. Rebuild the Rust judge image to pick this up.
+  panic message (which could quote the expected answer) is shown to the user. Rebuild the
+  Rust judge image to pick this up.
+- **Probes in Rust**, so an operations problem with probes (a round trip, a distribution)
+  can be offered in Rust too. A panic in a probe call is labelled as a call the judge
+  added. Rebuild the Rust judge image to pick this up.
+- **Random numbers for Rust solutions:** `use shikomi_prelude::Rng;` gives `Rng::new()`,
+  `Rng::seeded(seed)`, `gen_range(0..n)` (exactly uniform, over any integer type up to 64
+  bits, or `f64`), `gen_f64`, `gen_bool`, `shuffle` and `choose`, since the sandbox has no `rand`
+  crate.
 - **Probes** for operations problems with a `custom_validator`: a test case can list
   extra calls the judge makes on the instance after the replay, such as
   `{"op": "pickIndex", "repeat": 4000}` or a round trip, `{"op": "decode", "args": [null],

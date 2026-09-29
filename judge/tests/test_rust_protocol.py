@@ -1381,8 +1381,243 @@ fn validate(actual: &Json, _expected: &Json, args: &Json, probe_results: &[Json]
     assert rust_results(pl)[0]["status"] == "wrong_answer"
 
 
-def test_probes_are_refused_until_the_rust_judge_supports_them():
+# --- probes (docs/adr/0007; prelude.rs `ops::replay`) -------------------------------
+# Extra calls the judge makes on the instance after the replay, whose results reach
+# the validator as `probe_results`.
+
+CODEC = """struct Codec;
+impl Codec {
+    fn new() -> Self { Codec }
+    fn encode(&self, words: Vec<String>) -> String {
+        words.iter().map(|w| format!("{}#{}", w.len(), w)).collect()
+    }
+    fn decode(&self, s: String) -> Vec<String> {
+        let (mut out, mut i, b) = (Vec::new(), 0, s.as_bytes());
+        while i < b.len() {
+            let j = i + b[i..].iter().position(|&c| c == b'#').unwrap();
+            let n: usize = s[i..j].parse().unwrap();
+            out.push(s[j + 1..j + 1 + n].to_string());
+            i = j + 1 + n;
+        }
+        out
+    }
+}
+"""
+# decode(encode(words)) == words, whatever `encode` produced.
+ROUND_TRIP = """use shikomi_prelude::Json;
+
+fn validate(_actual: &Json, _expected: &Json, args: &Json, probe_results: &[Json]) -> bool {
+    probe_results.len() == 1 && probe_results[0] == args[1][1][0]
+}
+"""
+
+
+def codec_payload(code, probes=None, validator=ROUND_TRIP):
+    probes = probes if probes is not None else [{"op": "decode", "args": [None], "refs": {"0": 1}}]
+    cases = [{**ops_case(0, [[], ("encode", [["a#b", "", "long word"]])], [None], class_name="Codec"),
+              "probes": probes}]
+    return ops_payload(code, cases, class_name="Codec",
+                       comparison={"mode": "custom_validator", "validator_code": validator})
+
+
+def test_a_probe_round_trips_an_ops_result_into_a_method_no_case_calls():
+    """`decode` appears only in a probe, so it needs its own dispatch arm, and its
+    argument is filled from op 1's result (`refs`)."""
+    res = rust_results(codec_payload(CODEC))
+    assert res[0]["status"] == "passed", res[0]
+    # The output is the case's own ops only; the probe's result isn't shown.
+    assert res[0]["output"] == '[null,"3#a#b0#9#long word"]'
+    broken = CODEC.replace("out.push(s[j + 1..j + 1 + n].to_string());",
+                           "out.push(s[j + 1..j + 1 + n].to_uppercase());")
+    assert rust_results(codec_payload(broken))[0]["status"] == "wrong_answer"
+
+
+def test_a_repeated_probe_gives_one_result_per_call():
+    counter = """struct Counter { n: i64 }
+impl Counter {
+    fn new() -> Self { Counter { n: 0 } }
+    fn bump(&mut self, by: i64) -> i64 { self.n += by; self.n }
+}
+"""
+    counts_up = """use shikomi_prelude::Json;
+
+fn validate(_actual: &Json, _expected: &Json, _args: &Json, probe_results: &[Json]) -> bool {
+    let got: Vec<i64> = probe_results.iter().filter_map(Json::as_i64).collect();
+    got == (1..=500).map(|i| 5 + 2 * i).collect::<Vec<_>>()
+}
+"""
+    cases = [{**ops_case(0, [[], ("bump", [5])], [None], class_name="Counter"),
+              "probes": [{"op": "bump", "args": [2], "repeat": 500}]}]
+    pl = ops_payload(counter, cases, class_name="Counter",
+                     comparison={"mode": "custom_validator", "validator_code": counts_up})
+    assert rust_results(pl)[0]["status"] == "passed"
+
+
+def test_a_panic_in_a_probe_says_the_judge_made_that_call():
+    res = rust_results(codec_payload(CODEC.replace("let (mut out", 'panic!("no"); let (mut out')))
+    assert res[0]["status"] == "runtime_error"
+    assert res[0]["error"].startswith(
+        "In a call the judge added after your operations to check the result (decode(), call 1 of 1):\n"
+        "panicked: no"), res[0]["error"]
+
+
+def test_a_probe_argument_that_does_not_fit_names_the_probe_not_the_test_data():
+    """Usually a ref: a value the submission's own op returned, so the error
+    mustn't read as "could not decode the test case"."""
+    bytes_codec = CODEC.replace("fn encode(&self, words: Vec<String>) -> String {",
+                                "fn encode(&self, words: Vec<String>) -> Vec<u8> { let _ = || -> String {") \
+                       .replace('.collect()\n    }\n    fn decode', '.collect() }; vec![1]\n    }\n    fn decode')
+    res = rust_results(codec_payload(bytes_codec))
+    assert res[0]["status"] == "runtime_error", res[0]
+    assert res[0]["error"].startswith(
+        "In a call the judge added after your operations to check the result (decode(), call 1 of 1):\n"
+        "`decode`: argument 1"), res[0]["error"]
+
+
+def test_a_method_only_a_probe_calls_gets_a_hint_when_missing():
+    """No visible test case calls `decode`, so rustc's error alone would puzzle."""
+    no_decode = CODEC[:CODEC.index("    fn decode")] + "}\n"
+    res = rust_results(codec_payload(no_decode))
+    assert res[0]["status"] == "runtime_error"
+    assert "the judge also calls `decode` to check the result" in res[0]["error"]
+
+
+def test_a_fixed_answer_problem_ignores_probes_and_needs_no_probe_method():
+    """Probes are made only for a custom validator, so they add no dispatch arm."""
+    no_decode = CODEC[:CODEC.index("    fn decode")] + "}\n"
+    pl = codec_payload(no_decode)
+    pl["comparison"] = {"mode": "exact"}
+    pl["test_cases"][0]["expected"] = [None, "3#a#b0#9#long word"]
+    pl["test_cases"][0]["probes"] = [{"op": 5}]  # not even well formed: never read
+    assert rust_results(pl)[0]["status"] == "passed"
+
+
+def test_forged_probe_results_of_the_wrong_length_are_the_submissions_fault():
+    """The result file is the submission's to write. One that skips the probes
+    and claims none were made is refused against the harness's own copy of them,
+    not handed to the validator (whose failure would read as the author's bug)."""
+    forger = CODEC.replace("fn new() -> Self { Codec }", """fn new() -> Self {
+        let path = std::env::var("SHIKOMI_RESULT").unwrap();
+        std::fs::write(path, r#"{"ok":[null,"x"],"probe_results":[]}"#).unwrap();
+        std::process::exit(0);
+    }""")
+    res = rust_results(codec_payload(forger))
+    assert res[0]["status"] == "runtime_error"
+    assert "didn't account for every check" in res[0]["error"]
+
+
+@pytest.mark.parametrize("probes,why", [
+    ([{"op": "decode", "args": [None], "refs": {"0": 9}}], "a ref names a missing argument or op"),
+    ([{"op": 5}], "no op name"),
+    ([{"op": "decode", "args": [None], "refs": {"0": 1}, "repeat": 2}], "refs and repeat can't be combined"),
+    ([{"op": "decode", "args": ["x"], "repeat": 10**12}], "repeat is not an integer in 1..=20000"),
+    ([{"op": "decode", "args": ["x"], "repeat": 15000}] * 2, "over 20000 calls"),
+])
+def test_a_malformed_probe_is_one_judge_error_before_any_case_runs(probes, why):
+    """The same rules as ProbeIn, so a bad stored row is the author's judge_error,
+    never the submission's crash (a huge `repeat` would be its allocation)."""
+    proc = run_rust_container(json.dumps(codec_payload(CODEC, probes=probes)))
+    assert proc.returncode == 0, proc.stderr
+    res = json.loads(proc.stdout)["results"]
+    assert len(res) == 1 and res[0]["status"] == "judge_error"
+    assert "probes are malformed" in res[0]["error"] and "refs" not in res[0]["error"]
+    assert why in proc.stderr
+
+
+def test_probes_outside_operations_mode_are_refused():
     cases = [{**case(0, [[3, 1, 2]], None), "probes": [{"op": "x"}]}]
     res = rust_results(validator_payload(SORTS, cases=cases))
     assert len(res) == 1 and res[0]["status"] == "judge_error"
-    assert "probes" in res[0]["error"]
+    assert "kind 'operations'" in res[0]["error"]
+
+
+def test_probe_calls_count_against_the_case_time_limit():
+    slow = CODEC.replace("fn decode(&self, s: String) -> Vec<String> {",
+                         "fn decode(&self, s: String) -> Vec<String> { loop {}")
+    res = rust_results({**codec_payload(slow), "time_limit_ms": 300})
+    assert res[0]["status"] == "time_limit_exceeded"
+
+
+# --- the prelude's Rng -------------------------------------------------------------
+
+def rng_results(body, ret="Vec<i64>"):
+    code = f"use shikomi_prelude::Rng;\nfn f(_x: i32) -> {ret} {{\n{body}\n}}\n"
+    res = rust_results(payload(code, [case(0, [0], None)], params=[{"name": "x", "type": "i32"}]))
+    assert res[0]["output"] is not None, res[0]
+    return json.loads(res[0]["output"])
+
+
+def test_a_seeded_rng_repeats_its_sequence_and_new_ones_differ():
+    out = rng_results("""
+        let (mut a, mut b) = (Rng::seeded(42), Rng::seeded(42));
+        let same = (0..100).all(|_| a.next_u64() == b.next_u64());
+        let (mut c, mut d) = (Rng::new(), Rng::new());
+        let differ = (0..4).any(|_| c.next_u64() != d.next_u64());
+        vec![same as i64, differ as i64, (Rng::seeded(0).next_u64() != 0) as i64]""")
+    assert out == [1, 1, 1]
+
+
+def test_gen_range_stays_in_bounds_including_the_extremes():
+    out = rng_results("""
+        let mut r = Rng::seeded(7);
+        let mut ok = true;
+        for _ in 0..10000 {
+            let x = r.gen_range(-3..4); ok &= (-3..4).contains(&x);
+            let y = r.gen_range(10u8..=255); ok &= y >= 10;
+            let z: f64 = r.gen_range(-1.0..1.0); ok &= (-1.0..1.0).contains(&z);
+            let u = r.gen_f64(); ok &= (0.0..1.0).contains(&u);
+        }
+        // Whole-type ranges, where the span doesn't fit the type itself.
+        let _ = r.gen_range(i64::MIN..=i64::MAX);
+        let _ = r.gen_range(u64::MIN..=u64::MAX);
+        let _ = r.gen_range(i64::MIN..i64::MAX);
+        vec![ok as i64, r.gen_range(5..=5), r.gen_range(9..10)]""")
+    assert out == [1, 5, 9]
+
+
+def test_gen_range_is_uniform():
+    """60000 draws over 3 buckets: each within ~5 standard deviations of 20000.
+    (Plain `% 3` of a u64 would pass this too; the bias it carries is ~1e-19. The
+    point is that the rejection loop doesn't skew or stall anything.)"""
+    counts = rng_results("""
+        let mut r = Rng::new();
+        let mut c = vec![0i64; 3];
+        for _ in 0..60000 { c[r.gen_range(0..3usize)] += 1; }
+        c""")
+    assert all(abs(n - 20000) < 600 for n in counts), counts
+
+
+def test_shuffle_permutes_and_choose_picks_an_element():
+    out = rng_results("""
+        let mut r = Rng::new();
+        let mut v: Vec<i64> = (0..50).collect();
+        r.shuffle(&mut v);
+        let moved = v.iter().enumerate().any(|(i, &x)| i as i64 != x);
+        let mut sorted = v.clone(); sorted.sort();
+        let empty: [i64; 0] = [];
+        vec![(sorted == (0..50).collect::<Vec<_>>()) as i64, moved as i64,
+             *r.choose(&[4, 4, 4]).unwrap(), r.choose(&empty).is_none() as i64]""")
+    assert out == [1, 1, 4, 1]
+
+
+def test_a_float_range_wider_than_f64_max_is_still_uniform():
+    out = rng_results("""
+        let mut r = Rng::new();
+        let xs: Vec<f64> = (0..200).map(|_| r.gen_range(-1e308..1e308)).collect();
+        let finite = xs.iter().all(|x| x.is_finite() && (-1e308..1e308).contains(x));
+        let spread = xs.iter().any(|&x| x < 0.0) && xs.iter().any(|&x| x > 0.0);
+        vec![finite as i64, spread as i64]""")
+    assert out == [1, 1]
+
+
+def test_an_infinite_float_bound_panics():
+    code = ("use shikomi_prelude::Rng;\n"
+            "fn f(_x: i32) -> f64 { Rng::new().gen_range(f64::NEG_INFINITY..0.0) }\n")
+    res = rust_results(payload(code, [case(0, [0], None)], params=[{"name": "x", "type": "i32"}]))
+    assert res[0]["status"] == "runtime_error" and "infinite bound" in res[0]["error"]
+
+
+def test_an_empty_range_panics():
+    code = "use shikomi_prelude::Rng;\nfn f(_x: i32) -> i32 { Rng::new().gen_range(3..3) }\n"
+    res = rust_results(payload(code, [case(0, [0], None)], params=[{"name": "x", "type": "i32"}]))
+    assert res[0]["status"] == "runtime_error" and "empty range 3..3" in res[0]["error"]

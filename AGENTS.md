@@ -423,18 +423,12 @@ slice ships, delete its entry here.
 
 - **Custom validators in every language**
   ([ADR-0007](docs/adr/0007-custom-validators-in-every-language.md)), in order:
-  (4b) probes in the Rust harness: each probe op needs a dispatch arm in `operations_glue`
-  (`case_ops` only scans the cases' ops, and `decode` never appears there), `refs` resolved
-  in the prelude's `ops::replay` from a JSON snapshot of the results, `probe_results` in
-  the result file with its length checked by the harness; then drop the Rust refusals
-  (harness.rs `run`, `ProblemFile._probes_feed_a_probe_validator`) and re-add a test for
-  `_ops_are_rust_methods` covering probe ops (unreachable while Rust refuses probes); plus
-  a seedable RNG in the prelude (`Rng::new()` from /dev/urandom, `Rng::seeded`,
-  `gen_range` without modulo bias), which the random problems' Rust starters need;
   (5) port the 19 problems in the external problem set: the 13 operations validators to
   the probe form (a converter that does this mechanically, and passes all their reference
   solutions, was proven on a copy), each with a known-wrong solution its validator
-  rejects; (6) remove the `instance` form from `harness.py`, after which no validator
+  rejects, and add Rust variants (their random starters `use shikomi_prelude::Rng;`;
+  encode-and-decode-strings and random-pick-with-weight were ported on a copy and pass,
+  with wrong solutions rejected); (6) remove the `instance` form from `harness.py`, after which no validator
   runs in the child and the child never gets `expected`. Follow-ups found in review:
   the Rust harness recompiles a problem's validator for every submission (~150ms+ of the
   compile deadline each time); cache the binary by a hash of its source, or build it at
