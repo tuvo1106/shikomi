@@ -187,6 +187,64 @@ impl Json {
             _ => None,
         }
     }
+
+    // The accessors below exist for custom validators (the `validator` module),
+    // which read results and test inputs as `Json`: an operations result list mixes
+    // `null`, bools and numbers, so it has no single Rust type to decode into.
+    // Each returns `None` for any other variant rather than panicking, so a
+    // validator can treat a submission's wrong-typed answer as a wrong answer.
+
+    /// An integer, or a float that's exactly one (JSON doesn't tell `2` from `2.0`).
+    pub fn as_i64(&self) -> Option<i64> {
+        match self {
+            Json::Int(n) => Some(*n),
+            Json::Num(n) if int_equals_float(*n as i64, *n) => Some(*n as i64),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            Json::Str(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            Json::Bool(b) => Some(*b),
+            _ => None,
+        }
+    }
+
+    pub fn is_null(&self) -> bool {
+        matches!(self, Json::Null)
+    }
+
+    /// Decode into any `FromJson` type: `j.decode::<Vec<i32>>()`. For a validator
+    /// that wants a typed view of a test input it knows the shape of.
+    pub fn decode<T: FromJson>(&self) -> Result<T, String> {
+        T::from_json(self)
+    }
+}
+
+/// `j[i]`: element `i` of an array, or `Null` when `j` isn't one or `i` is out of
+/// range, the same forgiving shape as `get`, so `args[1][0]` reads a nested test
+/// input without a chain of `match`es and never panics on a malformed answer.
+impl std::ops::Index<usize> for Json {
+    type Output = Json;
+    fn index(&self, i: usize) -> &Json {
+        static NULL: Json = Json::Null;
+        self.as_arr().get(i).unwrap_or(&NULL)
+    }
+}
+
+/// `j["key"]`: `get` as an operator.
+impl std::ops::Index<&str> for Json {
+    type Output = Json;
+    fn index(&self, key: &str) -> &Json {
+        self.get(key)
+    }
 }
 
 // Whole floats keep a ".0" so an f64 answer reads as a float (Python prints
@@ -1418,5 +1476,80 @@ pub mod ops {
             }
         }
         Ok(Json::Arr(out))
+    }
+}
+
+// --- custom validators -------------------------------------------------------------
+
+/// A problem's Rust custom validator (DESIGN.md §5.4; docs/adr/0007): the author's
+/// `validate` plus a generated `main` that calls `validator::__entry(validate)`.
+///
+/// It's its own program, compiled from `validator.rs` and never linked with the
+/// submission, because only the trusted harness may decide a verdict. harness.rs
+/// runs it once per case, *after* the case's own process has ended, and talks to
+/// it over pipes:
+///
+/// * stdin: one JSON object, `{"actual", "expected", "args", "probe_results"}`
+///   (the same four values Python's `validate(actual, expected, args,
+///   probe_results)` receives).
+/// * stdout: the verdict, `true` or `false`, on the last line. It's the last
+///   line rather than all of stdout so a `println!` the author left in while
+///   debugging doesn't corrupt it. No verdict, or a panic (its message on
+///   stderr), is the author's bug: harness.rs reports a judge_error, never the
+///   submission's fault.
+///
+/// The author writes an ordinary function with this exact signature, bringing
+/// their own `use shikomi_prelude::Json;`:
+///
+/// ```ignore
+/// fn validate(actual: &Json, expected: &Json, args: &Json, probe_results: &[Json]) -> bool
+/// ```
+///
+/// A different signature is a compile error, which harness.rs also reports as a
+/// judge_error (the seed-solution tests catch it first).
+pub mod validator {
+    use super::Json;
+    use std::io::{Read, Write};
+
+    unsafe extern "C" {
+        fn prctl(option: i32, arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> i32;
+    }
+    const PR_SET_DUMPABLE: i32 = 4;
+
+    /// The validator program's whole `main`. Returns its exit code: 0 with a
+    /// verdict on stdout, 2 for a request it couldn't read, 101 for a panic.
+    pub fn __entry(validate: fn(&Json, &Json, &Json, &[Json]) -> bool) -> i32 {
+        // Non-dumpable, like harness.rs itself: this process holds `expected`, and
+        // a process the submission left running (same uid) mustn't read it back.
+        // harness.rs already runs this program from an execute-only file, which
+        // makes it non-dumpable from exec (there's no window before this line);
+        // this makes it hold however the program is started.
+        unsafe { prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) };
+        let mut input = String::new();
+        if std::io::stdin().read_to_string(&mut input).is_err() {
+            return 2;
+        }
+        let request = match Json::parse(&input) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("validator request is not valid JSON: {}", e);
+                return 2;
+            }
+        };
+        let probe_results = request.get("probe_results").as_arr();
+        // A panic's message goes to stderr through the default hook; it can't
+        // unwind out of the `extern "C"` main, so it's caught here.
+        let verdict = std::panic::catch_unwind(|| {
+            validate(request.get("actual"), request.get("expected"), request.get("args"), probe_results)
+        });
+        match verdict {
+            Ok(v) => {
+                let mut out = std::io::stdout();
+                let _ = out.write_all(if v { b"\ntrue\n" } else { b"\nfalse\n" });
+                let _ = out.flush();
+                0
+            }
+            Err(_) => 101,
+        }
     }
 }

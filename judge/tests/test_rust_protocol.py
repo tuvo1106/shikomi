@@ -1154,3 +1154,185 @@ def test_operations_case_shape_errors_are_decode_errors():
     res = rust_results(ops_payload(EDITOR, [case(0, [["Editor", "undo"], [[]]], [None, ""])]))
     assert res[0]["status"] == "runtime_error"
     assert "one argument list per op" in res[0]["error"]
+
+
+# --- custom validators (DESIGN.md §5.4; docs/adr/0007) -----------------------
+# A problem's Rust validator is compiled into its own program, sealed in memory,
+# and run by the harness once per case after the case's process has ended.
+
+SAME_MULTISET = """use shikomi_prelude::Json;
+
+fn validate(actual: &Json, _expected: &Json, args: &Json, _probe_results: &[Json]) -> bool {
+    let mut a: Vec<i64> = match actual.decode() {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    let mut b: Vec<i64> = args[0].decode().unwrap();
+    a.sort();
+    b.sort();
+    a == b
+}
+"""
+SORTS = "fn f(mut v: Vec<i64>) -> Vec<i64> { v.sort(); v }"
+
+
+def validator_payload(code, validator=SAME_MULTISET, cases=None, **kw):
+    return payload(code, cases or [case(0, [[3, 1, 2]], None), case(1, [[5, 5, 4]], None)],
+                   comparison={"mode": "custom_validator", "validator_code": validator}, **kw)
+
+
+def test_custom_validator_passes_and_fails():
+    assert [r["status"] for r in rust_results(validator_payload(SORTS))] == ["passed", "passed"]
+    wrong = "fn f(v: Vec<i64>) -> Vec<i64> { vec![0; v.len()] }"
+    res = rust_results(validator_payload(wrong))
+    assert [r["status"] for r in res] == ["wrong_answer", "wrong_answer"]
+    assert res[0]["output"] == "[0,0,0]"
+
+
+def test_a_validator_that_panics_is_judge_error_without_its_message():
+    """A panic's message can quote `expected` (`assert_eq!(actual, expected)`), so
+    the user gets a fixed line and the message goes only to the harness's stderr."""
+    boom = SAME_MULTISET.replace("a == b", 'panic!("secret {:?}", _expected)')
+    proc = run_rust_container(json.dumps(validator_payload(SORTS, boom)))
+    res = json.loads(proc.stdout)["results"]
+    assert {r["status"] for r in res} == {"judge_error"}
+    assert "custom validator failed" in res[0]["error"] and "secret" not in res[0]["error"]
+    assert "panicked" in proc.stderr and "secret" in proc.stderr
+
+
+def test_a_validator_that_doesnt_compile_is_one_judge_error_without_its_diagnostics():
+    """The author's code: the user is told it's a problem bug, and rustc's output
+    (which would show the validator's source) goes only to the judge's log."""
+    proc = run_rust_container(json.dumps(validator_payload(SORTS, "fn validate() -> bool { nope }")))
+    res = json.loads(proc.stdout)["results"]
+    assert len(res) == 1 and res[0]["status"] == "judge_error"
+    assert "failed to compile" in res[0]["error"] and "nope" not in res[0]["error"]
+    assert "nope" in proc.stderr
+
+
+def test_a_submission_that_doesnt_compile_is_reported_before_the_validator():
+    res = rust_results(validator_payload("fn f(v: Vec<i64>) -> Vec<i64> { oops }"))
+    assert len(res) == 1 and res[0]["status"] == "runtime_error"
+    assert "Compile error" in res[0]["error"]
+
+
+def test_a_validator_that_hangs_uses_up_the_case_time_limit():
+    hangs = SAME_MULTISET.replace("a == b", "loop {}")
+    res = rust_results(validator_payload(SORTS, hangs, time_limit_ms=300))
+    assert {r["status"] for r in res} == {"time_limit_exceeded"}
+
+
+def test_a_validator_can_print_and_still_give_its_verdict():
+    """The verdict is stdout's last line, so a debugging println! doesn't break it."""
+    chatty = SAME_MULTISET.replace("    a == b", '    println!("true");\n    println!("{:?}", a);\n    a == b')
+    wrong = "fn f(v: Vec<i64>) -> Vec<i64> { vec![0; v.len()] }"
+    assert rust_results(validator_payload(wrong, chatty))[0]["status"] == "wrong_answer"
+    # Far more than the harness keeps: the tail is kept, so the verdict survives.
+    flood = SAME_MULTISET.replace("    a == b", '    for _ in 0..20000 { println!("debug line"); }\n    a == b')
+    assert [r["status"] for r in rust_results(validator_payload(SORTS, flood))] == ["passed", "passed"]
+
+
+def test_a_submission_cannot_read_the_validators_source():
+    """validator.rs (and rustc's output, which quotes it) is deleted before any case
+    runs, so a submission can't print the author's code back out of /tmp."""
+    peek = r'''
+fn f(v: Vec<i64>) -> Vec<i64> {
+    let mut seen = String::new();
+    for p in ["/tmp/judge/validator.rs", "/tmp/judge/validator.rustc.stderr", "/tmp/judge/validator"] {
+        if std::fs::metadata(p).is_ok() { seen.push_str(p); }
+    }
+    print!("{}", seen);
+    v
+}
+'''
+    res = rust_results(validator_payload(peek))
+    assert [r["stdout"] for r in res] == ["", ""]
+
+
+def test_the_validator_runs_from_an_execute_only_file():
+    """The memfd is mode 0111, which makes the kernel mark the validator
+    non-dumpable from exec, before its own prctl: it can't read its own program."""
+    self_read = SAME_MULTISET.replace("    a == b", '    std::fs::read("/proc/self/exe").is_err() && a == b')
+    assert [r["status"] for r in rust_results(validator_payload(SORTS, self_read))] == ["passed", "passed"]
+
+
+def test_a_validator_gets_time_to_start_even_when_the_submission_used_the_limit():
+    """A submission that finishes just inside its limit isn't timed out by the
+    validator's own startup: the validator is topped up to a minimum budget."""
+    slow = """fn f(mut v: Vec<i64>) -> Vec<i64> {
+    let t = std::time::Instant::now();
+    while t.elapsed() < std::time::Duration::from_millis(289) {}
+    v.sort();
+    v
+}"""
+    # 5ms of validator work: more than the ~1ms the submission leaves, less than the top-up.
+    working = SAME_MULTISET.replace("    a == b", "    std::thread::sleep(std::time::Duration::from_millis(5));\n    a == b")
+    res = rust_results(validator_payload(slow, working, time_limit_ms=290))
+    assert [r["status"] for r in res] == ["passed", "passed"]
+
+
+def test_a_submission_cannot_replace_the_validator():
+    """The validator binary lives in a sealed memfd, not in the writable /tmp. A
+    submission that plants an always-`true` program at /tmp/judge/validator, and
+    tries to write through the harness's fds, still gets its wrong answer judged."""
+    attack = r'''
+fn f(v: Vec<i64>) -> Vec<i64> {
+    use std::os::unix::fs::PermissionsExt;
+    let fake = "/tmp/judge/validator";
+    let _ = std::fs::write(fake, "#!/bin/sh\necho true\n");
+    let _ = std::fs::set_permissions(fake, std::fs::Permissions::from_mode(0o755));
+    for fd in 0..64 {
+        let _ = std::fs::write(format!("/proc/1/fd/{}", fd), "#!/bin/sh\necho true\n");
+    }
+    vec![0; v.len()]
+}
+'''
+    res = rust_results(validator_payload(attack))
+    assert [r["status"] for r in res] == ["wrong_answer", "wrong_answer"]
+
+
+def test_an_operations_validator_checks_the_replay():
+    """The group-B shape: replay the ops against a model. Here, every `get` must
+    return the value last `put` for its key."""
+    store = """use std::collections::HashMap;
+struct Store { m: HashMap<i64, i64> }
+impl Store {
+    fn new() -> Self { Store { m: HashMap::new() } }
+    fn put(&mut self, k: i64, v: i64) { self.m.insert(k, v); }
+    fn get(&self, k: i64) -> i64 { *self.m.get(&k).unwrap_or(&-1) }
+}
+"""
+    model = """use shikomi_prelude::Json;
+use std::collections::HashMap;
+
+fn validate(actual: &Json, _expected: &Json, args: &Json, probe_results: &[Json]) -> bool {
+    if !probe_results.is_empty() { return false; }
+    let mut m = HashMap::new();
+    for (i, op) in args[0].as_arr().iter().enumerate().skip(1) {
+        let a = &args[1][i];
+        match op.as_str() {
+            Some("put") => { m.insert(a[0].as_i64(), a[1].as_i64()); }
+            Some("get") => {
+                let want = m.get(&a[0].as_i64()).copied().flatten().unwrap_or(-1);
+                if actual[i].as_i64() != Some(want) { return false; }
+            }
+            _ => return false,
+        }
+    }
+    true
+}
+"""
+    cases = [ops_case(0, [[], ("put", [1, 7]), ("get", [1]), ("get", [2])], [None, None, None], class_name="Store")]
+    pl = ops_payload(store, cases, class_name="Store",
+                     comparison={"mode": "custom_validator", "validator_code": model})
+    assert rust_results(pl)[0]["status"] == "passed"
+    broken = store.replace("*self.m.get(&k).unwrap_or(&-1)", "0")
+    pl["user_code"] = broken
+    assert rust_results(pl)[0]["status"] == "wrong_answer"
+
+
+def test_probes_are_refused_until_the_rust_judge_supports_them():
+    cases = [{**case(0, [[3, 1, 2]], None), "probes": [{"op": "x"}]}]
+    res = rust_results(validator_payload(SORTS, cases=cases))
+    assert len(res) == 1 and res[0]["status"] == "judge_error"
+    assert "probes" in res[0]["error"]

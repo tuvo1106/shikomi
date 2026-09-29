@@ -646,6 +646,11 @@ class ProblemFile(ProblemIn):
             raise ValueError("test case probes need kind 'operations' (they call the instance)")
         if self.comparison.get("mode") != "custom_validator":
             raise ValueError("test case probes need comparison mode 'custom_validator' to check them")
+        # The Rust harness runs validators but doesn't make probe calls yet (ADR-0007
+        # step 4b); it refuses such a case, so every Rust submission would be a
+        # judge_error.
+        if any(v.language == "rust" for v in self.languages):
+            raise ValueError("test case probes aren't supported for language 'rust' yet")
         params = _validate_params(validator_codes(self.comparison).get("python", ""))
         if params is not None and "probe_results" not in params:
             raise ValueError(

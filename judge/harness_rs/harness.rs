@@ -40,6 +40,11 @@
 //!    runs — otherwise a submission could hardcode that path and read `expected`
 //!    even though the path never appears in a case's env.
 //!
+//! A `custom_validator` problem adds a second program: the problem's own Rust
+//! validator, compiled after the submission and run once per case to decide its
+//! verdict. It's sealed in memory before any case runs, because the submission
+//! could otherwise overwrite it on disk (the "custom validators" section).
+//!
 //! Limits applied to each case's process: wall time `time_limit_ms` (enforced
 //! here, with SIGKILL), address space `memory_limit_mb` (`RLIMIT_AS`, so an
 //! allocation bomb fails that case's allocation instead of drawing the
@@ -55,6 +60,7 @@
 //! like.
 
 use shikomi_prelude::Json;
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
@@ -113,8 +119,21 @@ unsafe extern "C" {
     fn setpgid(pid: i32, pgid: i32) -> i32;
     fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
     fn prctl(option: i32, arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> i32;
+    fn memfd_create(name: *const u8, flags: u32) -> i32;
+    fn fcntl(fd: i32, cmd: i32, ...) -> i32;
 }
 const PR_SET_DUMPABLE: i32 = 4;
+// memfd_create flags and file seals (`sealed_copy`).
+const MFD_CLOEXEC: u32 = 0x1;
+const MFD_ALLOW_SEALING: u32 = 0x2;
+const MFD_EXEC: u32 = 0x10;
+const F_ADD_SEALS: i32 = 1033;
+const F_SEAL_SEAL: i32 = 0x1;
+const F_SEAL_SHRINK: i32 = 0x2;
+const F_SEAL_GROW: i32 = 0x4;
+const F_SEAL_WRITE: i32 = 0x8;
+const EACCES: i32 = 13;
+const EINVAL: i32 = 22;
 const WNOHANG: i32 = 1;
 const SIGKILL: i32 = 9;
 const SIGSEGV: i32 = 11;
@@ -184,8 +203,8 @@ fn multiset_equal(a: &Json, b: &Json) -> bool {
 }
 
 /// Unknown modes fall back to exact equality, as harness.py and harness.js do.
-/// `custom_validator` never reaches here: ProblemIn rejects it for any
-/// language but Python.
+/// `custom_validator` never reaches here: it's judged by the problem's own
+/// validator program (`Judge::Validate`).
 fn compare(actual: &Json, expected: &Json, comparison: &Json) -> bool {
     match comparison.get("mode") {
         Json::Str(m) if m == "unordered" => multiset_equal(actual, expected),
@@ -214,6 +233,12 @@ struct CaseResult {
 impl CaseResult {
     fn error_row(id: Json, error: String) -> CaseResult {
         CaseResult { id, status: "runtime_error", runtime_ms: 0.0, output: None, stdout: String::new(), error: Some(error) }
+    }
+
+    /// A fault in the problem, not the submission (a custom validator that won't
+    /// compile). One row, like a compile error, but `judge_error`.
+    fn judge_error_row(id: Json, error: String) -> CaseResult {
+        CaseResult { id, status: "judge_error", runtime_ms: 0.0, output: None, stdout: String::new(), error: Some(error) }
     }
 
     fn to_json(&self) -> Json {
@@ -291,15 +316,25 @@ fn end_case(pgid: i32) {
     }
 }
 
-/// Read a child's output pipe to EOF on a thread, keeping the first `keep`
-/// bytes and discarding the rest, and hand back the kept text.
+/// Which part of a pipe's output `drain` keeps.
+#[derive(Clone, Copy)]
+enum Keep {
+    /// The first n bytes: what a user wants to see of their program's output.
+    Head(usize),
+    /// The last n bytes: a validator's verdict is its last line, which a
+    /// chatty validator's debug output mustn't push out of what's kept.
+    Tail(usize),
+}
+
+/// Read a child's output pipe to EOF on a thread, keeping the part `keep`
+/// names and discarding the rest, and hand back the kept text.
 ///
 /// It keeps reading after the cap: a reader that stopped would leave the
 /// child blocked on a full pipe (or killed by SIGPIPE), which would misreport a
 /// chatty but correct solution. The caller waits at most `DRAIN_GRACE` for the
 /// result, since only a process that escaped the group kill can hold the pipe
 /// open past the case.
-fn drain<R: Read + Send + 'static>(pipe: Option<R>, keep: usize) -> mpsc::Receiver<String> {
+fn drain<R: Read + Send + 'static>(pipe: Option<R>, keep: Keep) -> mpsc::Receiver<String> {
     let (tx, rx) = mpsc::channel();
     if let Some(mut pipe) = pipe {
         std::thread::spawn(move || {
@@ -308,10 +343,24 @@ fn drain<R: Read + Send + 'static>(pipe: Option<R>, keep: usize) -> mpsc::Receiv
             loop {
                 match pipe.read(&mut buf) {
                     Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        let room = keep.saturating_sub(kept.len());
-                        kept.extend_from_slice(&buf[..n.min(room)]);
-                    }
+                    Ok(n) => match keep {
+                        Keep::Head(cap) => {
+                            let room = cap.saturating_sub(kept.len());
+                            kept.extend_from_slice(&buf[..n.min(room)]);
+                        }
+                        Keep::Tail(cap) => {
+                            kept.extend_from_slice(&buf[..n]);
+                            // Trim only once it's twice the cap, so the copy is amortized.
+                            if kept.len() > 2 * cap {
+                                kept.drain(..kept.len() - cap);
+                            }
+                        }
+                    },
+                }
+            }
+            if let Keep::Tail(cap) = keep {
+                if kept.len() > cap {
+                    kept.drain(..kept.len() - cap);
                 }
             }
             let _ = tx.send(String::from_utf8_lossy(&kept).into_owned());
@@ -663,11 +712,30 @@ fn source(user_code: &str, glue: &str) -> String {
     format!("#![no_main] {}{}", user_code, glue)
 }
 
-/// Compile `solution.rs` in WORK. `Err` carries the message for the single
-/// runtime_error row; `hint` adds a kind-specific hint to a compile error's
-/// diagnostics (`ops_hint` in operations mode).
-fn compile(timeout: Duration, hint: impl Fn(&str) -> String) -> Result<(), String> {
-    let stderr_path = Path::new(WORK).join("rustc.stderr");
+/// Why `compile` failed. Each carries the message for the single error row.
+///
+/// A timeout is told apart because the validator's compile shares the
+/// submission's deadline: when the submission's own compile used most of it,
+/// the validator's timeout is the submission's doing, not the problem's.
+enum CompileFailure {
+    TimedOut(String),
+    Failed(String),
+}
+
+impl CompileFailure {
+    fn message(self) -> String {
+        match self {
+            CompileFailure::TimedOut(m) | CompileFailure::Failed(m) => m,
+        }
+    }
+}
+
+/// Compile `<name>.rs` in WORK into the binary `<name>`: `solution` (the
+/// submission) or `validator` (a problem's custom validator). `hint` adds a
+/// kind-specific hint to a compile error's diagnostics (`ops_hint` in
+/// operations mode).
+fn compile(name: &str, timeout: Duration, hint: impl Fn(&str) -> String) -> Result<(), CompileFailure> {
+    let stderr_path = Path::new(WORK).join(format!("{}.rustc.stderr", name));
     let mut cmd = Command::new(RUSTC);
     // Own process group, so a timeout kills the linker rustc spawned along with
     // rustc itself (`end_case` below), not just rustc's pid.
@@ -679,7 +747,7 @@ fn compile(timeout: Duration, hint: impl Fn(&str) -> String) -> Result<(), Strin
     }
     let child = cmd
         .current_dir(WORK) // relative path, so diagnostics read "solution.rs:3:5"
-        .args(["--edition", "2024", "--crate-type", "bin", "--crate-name", "solution"])
+        .args(["--edition", "2024", "--crate-type", "bin", "--crate-name", name])
         // opt-level=1: nearly all of O2's runtime on algorithmic code, ~140ms cheaper to
         // compile (ADR-0004). overflow-checks stay on, so `i32` overflow panics with
         // "attempt to add with overflow" instead of silently wrapping into a wrong answer.
@@ -687,11 +755,13 @@ fn compile(timeout: Duration, hint: impl Fn(&str) -> String) -> Result<(), Strin
         .args(["-A", "warnings", "--color", "never"])
         .args(["-L", PRELUDE_DIR, "--extern"])
         .arg(format!("shikomi_prelude={}/libshikomi_prelude.rlib", PRELUDE_DIR))
-        .args(["-o", "solution", "solution.rs"])
+        .arg("-o")
+        .arg(name)
+        .arg(format!("{}.rs", name))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(fs::File::create(&stderr_path)
-            .unwrap_or_else(|e| judge_fault(format!("could not create rustc.stderr: {}", e))))
+            .unwrap_or_else(|e| judge_fault(format!("could not create {}.rustc.stderr: {}", name, e))))
         .spawn()
         .unwrap_or_else(|e| judge_fault(format!("could not start rustc: {}", e)));
     let pid = child.id() as i32;
@@ -699,7 +769,7 @@ fn compile(timeout: Duration, hint: impl Fn(&str) -> String) -> Result<(), Strin
     end_case(pid);
     let diag = fs::read_to_string(&stderr_path).unwrap_or_default();
     match exit {
-        Exit::TimedOut => Err(format!("Compilation timed out after {}s", timeout.as_secs())),
+        Exit::TimedOut => Err(CompileFailure::TimedOut(format!("Compilation timed out after {}s", timeout.as_secs()))),
         Exit::Finished(status, _) if status.success() => Ok(()),
         // The memory cgroup's OOM killer picks the biggest process, which is often
         // the linker rustc spawned rather than rustc. rustc then exits normally,
@@ -707,9 +777,14 @@ fn compile(timeout: Duration, hint: impl Fn(&str) -> String) -> Result<(), Strin
         Exit::Finished(status, _)
             if status.signal() == Some(SIGKILL) || diag.contains("signal: 9 (SIGKILL)") =>
         {
-            Err("Compilation ran out of memory".into())
+            Err(CompileFailure::Failed("Compilation ran out of memory".into()))
         }
-        Exit::Finished(_, _) => Err(format!("Compile error:\n{}{}{}", diag.trim_end(), node_hint(&diag), hint(&diag))),
+        Exit::Finished(_, _) => Err(CompileFailure::Failed(format!(
+            "Compile error:\n{}{}{}",
+            diag.trim_end(),
+            node_hint(&diag),
+            hint(&diag)
+        ))),
     }
 }
 
@@ -797,31 +872,205 @@ fn ops_hint(diag: &str, class_name: &str, ops: &[(String, String)]) -> String {
     hints.iter().map(|h| format!("\n\nHint: {}", h)).collect()
 }
 
+// --- custom validators (DESIGN.md §5.4; docs/adr/0007) ---------------------------
+//
+// A `custom_validator` problem's Rust validator is the author's `validate` (the
+// prelude's `validator` module documents the contract), compiled into a program
+// of its own, `validator`, and never linked with the submission: the verdict is
+// computed here in the trusted harness's process tree, by author code, after the
+// case's own process has ended. It runs once per case, under the same limits as a
+// case, with whatever's left of the case's `time_limit_ms` (like harness.py's
+// parent-side validator), so a case's total stays within what the worker budgets.
+//
+// **Why the binary is sealed in memory.** A case's process runs as the same uid as
+// this harness, and WORK (/tmp/judge) is writable by that uid. A validator binary
+// left there could be overwritten by the submission with one that always prints
+// `true`, and every later case would pass. So right after compiling, before any
+// submission code has run, `sealed_copy` loads it into an anonymous memfd, seals it
+// against every write, and deletes the file. The memfd is close-on-exec (no case
+// process inherits it) and lives only in this non-dumpable process's fd table, so
+// nothing the submission runs can reach it; `run_validator` executes it by
+// `/proc/self/fd/N`. Its source and rustc's output are deleted too, so a
+// submission can't print the author's code back out of WORK.
+//
+// **Why the memfd is execute-only (0111).** The validator process holds
+// `expected` (on its stdin) and writes the verdict (on its stdout). It makes
+// itself non-dumpable first thing, but between exec and that `prctl` it's
+// briefly dumpable, and a process the submission left running (`setsid`
+// escapes the group kill; same uid) could open `/proc/<pid>/fd/0` or `/fd/1`
+// in that window. The kernel marks a process non-dumpable *at exec* when its
+// program file isn't readable by it, so an unreadable memfd closes the window.
+
+/// How the harness decides a case's pass/fail.
+enum Judge<'a> {
+    /// A fixed-answer mode: `compare` against the case's `expected`.
+    Compare(&'a Json),
+    /// A custom validator, sealed in memory, and what's left of the run's
+    /// VALIDATOR_TOP_UP_POOL.
+    Validate { binary: &'a fs::File, top_up_pool: Cell<Duration> },
+}
+
+/// The whole `validator.rs`: the author's code, then a `main` that hands their
+/// `validate` to the prelude. The author brings their own `use` lines.
+fn validator_source(code: &str) -> String {
+    format!(
+        "#![no_main] {}\n\n\
+         // ---- generated by the shikomi judge harness ----\n\
+         mod __shikomi_validator {{\n\
+         \x20   #[unsafe(no_mangle)]\n\
+         \x20   pub extern \"C\" fn main(_argc: i32, _argv: *const *const u8) -> i32 {{\n\
+         \x20       ::shikomi_prelude::validator::__entry(super::validate)\n\
+         \x20   }}\n\
+         }}\n",
+        code
+    )
+}
+
+/// Compile the problem's validator and seal it (see the section comment).
+/// `Err` is the problem's fault, which the caller reports without showing the
+/// user the author's code, or a timeout, which the caller attributes.
+fn prepare_validator(code: &str, timeout: Duration) -> Result<fs::File, CompileFailure> {
+    let work = Path::new(WORK);
+    if let Err(e) = fs::write(work.join("validator.rs"), validator_source(code)) {
+        judge_fault(format!("could not write the validator source: {}", e));
+    }
+    let compiled = compile("validator", timeout, |_| String::new());
+    // Before any submission code runs: the author's source and rustc's
+    // diagnostics (which quote it) mustn't be left for a case to read and print.
+    // Fail closed, like the binary below.
+    for leftover in ["validator.rs", "validator.rustc.stderr"] {
+        match fs::remove_file(work.join(leftover)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => judge_fault(format!("could not remove {}: {}", leftover, e)),
+        }
+    }
+    compiled?;
+    Ok(sealed_copy(&work.join("validator")))
+}
+
+/// Move the file at `path` into a sealed, close-on-exec, execute-only memfd
+/// and delete it.
+fn sealed_copy(path: &Path) -> fs::File {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::fs::PermissionsExt;
+    let mut binary = fs::File::open(path).unwrap_or_else(|e| judge_fault(format!("could not open {:?}: {}", path, e)));
+    let name = b"shikomi-validator\0";
+    let base = MFD_CLOEXEC | MFD_ALLOW_SEALING;
+    // MFD_EXEC states the intent to execute it; kernels before 6.3 don't know the
+    // flag (EINVAL), and on those every memfd is executable anyway.
+    let mut fd = unsafe { memfd_create(name.as_ptr(), base | MFD_EXEC) };
+    if fd < 0 && std::io::Error::last_os_error().raw_os_error() == Some(EINVAL) {
+        fd = unsafe { memfd_create(name.as_ptr(), base) };
+    }
+    if fd < 0 {
+        let err = std::io::Error::last_os_error();
+        // `vm.memfd_noexec = 2` refuses MFD_EXEC with EACCES, and then no memfd
+        // can be executed at all, so there's nothing to fall back to: say why.
+        let why = if err.raw_os_error() == Some(EACCES) {
+            " (vm.memfd_noexec forbids executable memfds; the Rust judge needs it at 0 or 1)"
+        } else {
+            ""
+        };
+        judge_fault(format!("memfd_create failed: {}{}", err, why));
+    }
+    let mut file = fs::File::from(unsafe { OwnedFd::from_raw_fd(fd) });
+    // Kernel to kernel (copy_file_range where it can), rather than the whole
+    // binary through a heap buffer.
+    if let Err(e) = std::io::copy(&mut binary, &mut file) {
+        judge_fault(format!("could not fill the validator memfd: {}", e));
+    }
+    let seals = F_SEAL_SEAL | F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE;
+    if unsafe { fcntl(file.as_raw_fd(), F_ADD_SEALS, seals) } != 0 {
+        judge_fault(format!("could not seal the validator: {}", std::io::Error::last_os_error()));
+    }
+    // Execute-only, so the validator is non-dumpable from exec on (section comment).
+    if let Err(e) = file.set_permissions(fs::Permissions::from_mode(0o111)) {
+        judge_fault(format!("could not make the validator execute-only: {}", e));
+    }
+    // Fail closed, like the payload file in `main`: a copy left on disk is one the
+    // submission could swap, so a failed delete stops the run.
+    if let Err(e) = fs::remove_file(path) {
+        judge_fault(format!("could not remove the validator binary: {}", e));
+    }
+    file
+}
+
+/// What running the validator on one case came to.
+enum Verdict {
+    Checked(bool),
+    /// It outran what was left of the case's time limit.
+    TimedOut,
+    /// It panicked, printed no verdict, or died: the author's bug.
+    Fault(String),
+}
+
+/// Run the sealed validator on one case's `request` (`{actual, expected, args,
+/// probe_results}`), within `budget`, under the case's memory limit.
+fn run_validator(validator: &fs::File, request: &Json, budget: Duration, memory_bytes: Option<u64>) -> Verdict {
+    use std::os::fd::AsRawFd;
+    let mut cmd = limited_command(format!("/proc/self/fd/{}", validator.as_raw_fd()), memory_bytes);
+    let start = Instant::now();
+    let mut child = cmd.spawn().unwrap_or_else(|e| judge_fault(format!("could not start the validator: {}", e)));
+    // The tail: the verdict is the last line, however much the author printed first.
+    let stdout_rx = drain(child.stdout.take(), Keep::Tail(STDERR_KEEP));
+    let stderr_rx = drain(child.stderr.take(), Keep::Head(STDERR_KEEP));
+    let input = request.dump();
+    let writer = child.stdin.take().map(|mut stdin| {
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(input.as_bytes());
+        })
+    });
+    let pid = child.id() as i32;
+    let exit = supervise(child, start, budget);
+    end_case(pid);
+    if let Some(w) = writer {
+        let _ = w.join();
+    }
+    let status = match exit {
+        Exit::TimedOut => return Verdict::TimedOut,
+        Exit::Finished(status, _) => status,
+    };
+    let stdout = stdout_rx.recv_timeout(DRAIN_GRACE).unwrap_or_default();
+    let stderr = stderr_rx.recv_timeout(DRAIN_GRACE).unwrap_or_default();
+    if status.success() {
+        return match stdout.lines().rev().map(str::trim).find(|l| !l.is_empty()) {
+            Some("true") => Verdict::Checked(true),
+            Some("false") => Verdict::Checked(false),
+            _ => Verdict::Fault("custom validator printed no verdict".into()),
+        };
+    }
+    // What it printed can quote `expected` (an `assert_eq!(actual, expected)`
+    // panic does), so the detail goes only to the harness's stderr (shown by
+    // `judge_local` and the seed-solution tests), and the user gets a fixed line.
+    let detail = match status.code() {
+        Some(101) => format!("panicked{}", stderr_suffix(&stderr)),
+        Some(code) => format!("exited (code {}){}", code, stderr_suffix(&stderr)),
+        None => format!("was killed (signal {})", status.signal().unwrap_or(0)),
+    };
+    eprintln!("harness: custom validator {}", detail);
+    Verdict::Fault("the problem's custom validator failed (a problem bug, not your code)".into())
+}
+
 // --- run one case ---------------------------------------------------------------
 
-fn run_case(tc: &Json, time_limit: Duration, memory_bytes: Option<u64>, comparison: &Json) -> CaseResult {
-    let id = tc.get("id").clone();
-    let work = Path::new(WORK);
-    let result_path = work.join("case.result");
-    let _ = fs::remove_file(&result_path);
-
-    let mut cmd = Command::new(work.join("solution"));
-    cmd.env_clear()
-        .envs(CASE_ENV)
-        .env(shikomi_prelude::RESULT_ENV, &result_path)
-        .stdin(Stdio::piped())
-        // Pipes drained by threads (`drain`), keeping only the first few KB. Files in
-        // /tmp would share the 32MB tmpfs with the result file, so a chatty but correct
-        // solution could fill it and fail on ENOSPC. An undrained pipe would instead
-        // block the child and read as a false time_limit_exceeded.
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+/// A `Command` for `program` under a case's limits, used for both the
+/// submission's case process and a custom validator: a clean environment,
+/// piped stdio, its own process group, and the case's stack and memory rlimits.
+///
+/// The pipes are drained by threads (`drain`), keeping only a few KB. Files in
+/// /tmp would share the 32MB tmpfs with the result file, so a chatty but correct
+/// solution could fill it and fail on ENOSPC. An undrained pipe would instead
+/// block the child and read as a false time_limit_exceeded.
+fn limited_command(program: impl AsRef<std::ffi::OsStr>, memory_bytes: Option<u64>) -> Command {
+    let mut cmd = Command::new(program);
+    cmd.env_clear().envs(CASE_ENV).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     unsafe {
         // Runs in the forked child just before exec. setrlimit is async-signal-safe.
-        // cur == max, so the submission can't raise its own limit back up.
+        // cur == max, so the child can't raise its own limit back up.
         cmd.pre_exec(move || {
-            // Own process group (pgid = the case's pid), so `end_case` can kill
-            // everything the case started with one signal.
+            // Own process group (pgid = the child's pid), so `end_case` can kill
+            // everything it started with one signal.
             setpgid(0, 0);
             let stack = RLimit { cur: CASE_STACK_BYTES, max: CASE_STACK_BYTES };
             setrlimit(RLIMIT_STACK, &stack);
@@ -832,6 +1081,40 @@ fn run_case(tc: &Json, time_limit: Duration, memory_bytes: Option<u64>, comparis
             Ok(())
         });
     }
+    cmd
+}
+
+/// The least a custom validator is given, however little of the case's limit
+/// the submission left: enough to start a process and read its request. Without
+/// it, a submission that finished just inside its limit would be timed out by
+/// the validator's startup alone.
+const VALIDATOR_MIN_BUDGET: Duration = Duration::from_millis(20);
+
+/// How much time past `cases x time limit` a whole run may spend topping
+/// validators up to VALIDATOR_MIN_BUDGET. Pooled rather than per case, because a
+/// problem may have thousands of tiny-limit cases; this keeps the overrun a
+/// fixed amount well inside the worker's WALL_CLOCK_SLACK_S (10s,
+/// app/judge_budget.py). Once it's spent, a validator gets only what's left.
+const VALIDATOR_TOP_UP_POOL: Duration = Duration::from_secs(2);
+
+/// A custom validator's time for one case: what's left of the case's limit,
+/// topped up toward VALIDATOR_MIN_BUDGET from the run's `pool`.
+fn validator_budget(time_limit: Duration, took: Duration, pool: &Cell<Duration>) -> Duration {
+    let left = time_limit.saturating_sub(took);
+    let top_up = VALIDATOR_MIN_BUDGET.saturating_sub(left).min(pool.get());
+    pool.set(pool.get() - top_up);
+    // At least 1ms, which `supervise` needs to mean anything.
+    (left + top_up).max(Duration::from_millis(1))
+}
+
+fn run_case(tc: &Json, time_limit: Duration, memory_bytes: Option<u64>, judge: &Judge) -> CaseResult {
+    let id = tc.get("id").clone();
+    let work = Path::new(WORK);
+    let result_path = work.join("case.result");
+    let _ = fs::remove_file(&result_path);
+
+    let mut cmd = limited_command(work.join("solution"), memory_bytes);
+    cmd.env(shikomi_prelude::RESULT_ENV, &result_path);
 
     let start = Instant::now();
     let mut child = match cmd.spawn() {
@@ -844,8 +1127,8 @@ fn run_case(tc: &Json, time_limit: Duration, memory_bytes: Option<u64>, comparis
         }
         Err(e) => judge_fault(format!("could not start the program: {}", e)),
     };
-    let stdout_rx = drain(child.stdout.take(), TRUNC + 1);
-    let stderr_rx = drain(child.stderr.take(), STDERR_KEEP);
+    let stdout_rx = drain(child.stdout.take(), Keep::Head(TRUNC + 1));
+    let stderr_rx = drain(child.stderr.take(), Keep::Head(STDERR_KEEP));
     // Feed the input from a thread, so the deadline below is already running
     // while we write. A write larger than the pipe buffer (64KB) blocks until
     // the child reads, and a child that never reads (e.g. one stalled in a static
@@ -890,7 +1173,42 @@ fn run_case(tc: &Json, time_limit: Duration, memory_bytes: Option<u64>, comparis
     match result.as_ref() {
         Some(r) if has_key(r, "ok") => {
             let actual = r.get("ok");
-            let passed = compare(actual, tc.get("expected"), comparison);
+            let passed = match judge {
+                Judge::Compare(comparison) => compare(actual, tc.get("expected"), comparison),
+                Judge::Validate { binary: validator, top_up_pool } => {
+                    // What's left of the case's limit, so submission + validator stay
+                    // within it (plus at most the run's fixed top-up pool).
+                    let budget = validator_budget(time_limit, took, top_up_pool);
+                    let mut request = BTreeMap::new();
+                    request.insert("actual".to_string(), actual.clone());
+                    request.insert("expected".to_string(), tc.get("expected").clone());
+                    request.insert("args".to_string(), tc.get("input").clone());
+                    request.insert("probe_results".to_string(), Json::Arr(Vec::new()));
+                    match run_validator(validator, &Json::Obj(request), budget, memory_bytes) {
+                        Verdict::Checked(passed) => passed,
+                        Verdict::TimedOut => {
+                            return CaseResult {
+                                id,
+                                status: "time_limit_exceeded",
+                                runtime_ms: time_limit.as_secs_f64() * 1000.0,
+                                output: None,
+                                stdout,
+                                error: None,
+                            };
+                        }
+                        Verdict::Fault(error) => {
+                            return CaseResult {
+                                id,
+                                status: "judge_error",
+                                runtime_ms,
+                                output: Some(actual.dump()),
+                                stdout,
+                                error: Some(error),
+                            };
+                        }
+                    }
+                }
+            };
             return CaseResult {
                 id,
                 status: if passed { "passed" } else { "wrong_answer" },
@@ -1015,11 +1333,61 @@ fn run(payload: &Json) -> Vec<CaseResult> {
         Some((class_name, ops)) => ops_hint(diag, class_name, ops),
         None => String::new(),
     };
-    if let Err(e) = compile(compile_timeout, hint) {
+    let compile_start = Instant::now();
+    if let Err(e) = compile("solution", compile_timeout, hint) {
         // One row, reported against the real case count by the aggregator
         // (0/N), the same as a Python SyntaxError.
-        return vec![CaseResult::error_row(first_id, e)];
+        return vec![CaseResult::error_row(first_id, e.message())];
     }
+
+    // A custom validator compiles after the submission (a submission that doesn't
+    // compile never pays for it), inside the same deadline: the worker's wall budget
+    // reserves one `compile_timeout_s` for both (app/sandbox.py).
+    let comparison = payload.get("comparison");
+    let validator = match comparison.get("mode") {
+        Json::Str(m) if m == "custom_validator" => {
+            // Probes (ADR-0007) aren't implemented here yet; ProblemIn refuses a Rust
+            // variant of a problem that uses them. Judging without them would hand
+            // the validator empty `probe_results`, so refuse rather than misjudge.
+            if cases.iter().any(|c| !c.get("probes").as_arr().is_empty()) {
+                return vec![CaseResult::judge_error_row(
+                    first_id,
+                    "test case probes aren't supported by the Rust judge yet".into(),
+                )];
+            }
+            let code = match comparison.get("validator_code") {
+                Json::Str(code) => code.as_str(),
+                _ => return vec![CaseResult::judge_error_row(first_id, "custom validator: no Rust validator_code".into())],
+            };
+            let remaining = compile_timeout.saturating_sub(compile_start.elapsed());
+            match prepare_validator(code, remaining) {
+                Ok(file) => Some(file),
+                // The deadline is shared, so who ran it out? A normal submission
+                // compiles in ~150ms, so a submission that took over half of it is
+                // the reason, and its timeout is reported as the submission's own.
+                Err(CompileFailure::TimedOut(_)) if remaining < compile_timeout / 2 => {
+                    return vec![CaseResult::error_row(
+                        first_id,
+                        format!("Compilation timed out after {}s", compile_timeout.as_secs()),
+                    )];
+                }
+                Err(e) => {
+                    // The author's code, not the user's: its diagnostics go only to
+                    // the harness's stderr, and the user sees only that it failed.
+                    eprintln!("harness: custom validator failed to compile: {}", e.message());
+                    return vec![CaseResult::judge_error_row(
+                        first_id,
+                        "the problem's custom validator failed to compile (a problem bug, not your code)".into(),
+                    )];
+                }
+            }
+        }
+        _ => None,
+    };
+    let judge = match &validator {
+        Some(file) => Judge::Validate { binary: file, top_up_pool: Cell::new(VALIDATOR_TOP_UP_POOL) },
+        None => Judge::Compare(comparison),
+    };
 
     let time_limit = Duration::from_millis(match payload.get("time_limit_ms") {
         Json::Int(n) => (*n).max(1) as u64,
@@ -1029,12 +1397,11 @@ fn run(payload: &Json) -> Vec<CaseResult> {
         Json::Int(n) if *n > 0 => Some((*n as u64) << 20),
         _ => None,
     };
-    let comparison = payload.get("comparison");
     let stop_on_first_failure = payload.get("stop_on_first_failure") == &Json::Bool(true);
 
     let mut results = Vec::new();
     for tc in cases {
-        let r = run_case(tc, time_limit, memory_bytes, comparison);
+        let r = run_case(tc, time_limit, memory_bytes, &judge);
         let failed = r.status != "passed";
         results.push(r);
         if failed && stop_on_first_failure {
