@@ -21,8 +21,8 @@ All notable changes to this project are recorded here. The format follows
   can be offered in Rust too. A panic in a probe call is labelled as a call the judge
   added. Rebuild the Rust judge image to pick this up.
 - **Random numbers for Rust solutions:** `use shikomi_prelude::Rng;` gives `Rng::new()`,
-  `Rng::seeded(seed)`, `gen_range(0..n)` (exactly uniform, over any integer type or
-  `f64`), `gen_f64`, `gen_bool`, `shuffle` and `choose`, since the sandbox has no `rand`
+  `Rng::seeded(seed)`, `gen_range(0..n)` (exactly uniform, over any integer type up to 64
+  bits, or `f64`), `gen_f64`, `gen_bool`, `shuffle` and `choose`, since the sandbox has no `rand`
   crate.
 - **Probes** for operations problems with a `custom_validator`: a test case can list
   extra calls the judge makes on the instance after the replay, such as

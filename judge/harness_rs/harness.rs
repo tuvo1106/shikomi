@@ -505,16 +505,19 @@ fn operations_glue(class_name: &str, ops: &[(String, String)], nodes: &[String])
 }
 
 /// The distinct op names the cases call (everything after each case's
-/// constructor, then each probe's op), in first-use order, each paired with its
-/// Rust method. Only these get a dispatch arm, so a Run that judges only the
-/// samples compiles only the methods the samples use; an op no case calls needs
-/// no method. A probe's op (`decode`) often appears in no case's ops at all, so
-/// it has to be collected here or its call would find no arm.
-fn case_ops(cases: &[Json]) -> Result<Vec<(String, String)>, String> {
+/// constructor, then, when `with_probes`, each probe's op), in first-use order,
+/// each paired with its Rust method. Only these get a dispatch arm, so a Run that
+/// judges only the samples compiles only the methods the samples use; an op no
+/// case calls needs no method. A probe's op (`decode`) often appears in no case's
+/// ops at all, so it has to be collected here or its call would find no arm. But
+/// probes are made only for a custom validator (`run_case`), so for any other
+/// problem they add no arm: that would demand a method nothing calls.
+fn case_ops(cases: &[Json], with_probes: bool) -> Result<Vec<(String, String)>, String> {
     let mut seen: Vec<(String, String)> = Vec::new();
     for tc in cases {
         let ops = tc.get("input").as_arr().first().map_or(&[][..], |o| o.as_arr()).iter().skip(1);
-        for op in ops.chain(tc.get("probes").as_arr().iter().map(|p| p.get("op"))) {
+        let probes = if with_probes { tc.get("probes").as_arr() } else { &[][..] };
+        for op in ops.chain(probes.iter().map(|p| p.get("op"))) {
             let Json::Str(op) = op else { return Err(format!("op {} is not a string", op.dump())) };
             if seen.iter().any(|(o, _)| o == op) {
                 continue;
@@ -821,10 +824,11 @@ fn node_hint(diag: &str) -> &'static str {
 /// Hints for the operations-mode mistakes whose rustc error points into the
 /// glue rather than at the user's code: a method named as the cases spell it
 /// (`getState`) rather than as the judge calls it (`get_state`), a missing `new`,
+/// a missing method that only the judge's probes call (`probe_only`),
 /// a signature `ops::Method`/`ops::Constructor` can't call, and an `impl Iterator` constructor
 /// parameter where the judge's `IntIter` is needed. Each is matched
 /// on rustc's own wording, like `node_hint`.
-fn ops_hint(diag: &str, class_name: &str, ops: &[(String, String)]) -> String {
+fn ops_hint(diag: &str, class_name: &str, ops: &[(String, String)], probe_only: &[String]) -> String {
     let mut hints = Vec::new();
     // rustc names the item as declared (`r#type` for a keyword) and says "struct" or
     // "enum" depending on how the class is declared, so try each spelling.
@@ -843,6 +847,18 @@ fn ops_hint(diag: &str, class_name: &str, ops: &[(String, String)]) -> String {
     }
     for (op, method) in ops {
         let shown = method.trim_start_matches("r#");
+        // A method only the judge's probes call: no test case the user can see
+        // mentions it, so rustc's "no function named `decode`" needs explaining.
+        if probe_only.contains(op) {
+            if missing(method) {
+                hints.push(format!(
+                    "after your operations, the judge also calls `{}` to check the result (a call \
+                     no test case shows). Give `impl {}` a `fn {}(...)`.",
+                    shown, class_name, shown
+                ));
+            }
+            continue;
+        }
         if op != shown && missing(method) {
             hints.push(format!(
                 "the test cases call `{}`, which the judge calls as the Rust method `{}` (op \
@@ -1065,6 +1081,10 @@ fn run_validator(validator: &fs::File, request: &Json, budget: Duration, memory_
 /// `repeat`. This is the harness's own copy of the probes, so the count is what
 /// the child's `probe_results` is checked against. `Err` is an authoring bug.
 fn probe_total(tc: &Json) -> Result<usize, String> {
+    // `app.schemas.problem.MAX_PROBE_CALLS`: bounds the results the case's process
+    // allocates and sends back, so a hand-stored `repeat: 10^12` is the author's
+    // judge_error, not the submission's crash.
+    const MAX_PROBE_CALLS: usize = 20_000;
     let n_ops = tc.get("input").as_arr().first().map_or(0, |o| o.as_arr().len());
     let mut total = 0usize;
     for probe in tc.get("probes").as_arr() {
@@ -1090,11 +1110,18 @@ fn probe_total(tc: &Json) -> Result<usize, String> {
             }
             _ => return Err(bad("refs is not an object")),
         }
-        total += match probe.get("repeat") {
+        let repeat = match probe.get("repeat") {
             Json::Null => 1,
-            Json::Int(n) if *n >= 1 => *n as usize,
-            _ => return Err(bad("repeat is not a positive integer")),
+            Json::Int(n) if *n >= 1 && *n as u64 <= MAX_PROBE_CALLS as u64 => *n as usize,
+            _ => return Err(bad("repeat is not an integer in 1..=20000")),
         };
+        if repeat > 1 && matches!(probe.get("refs"), Json::Obj(r) if !r.is_empty()) {
+            return Err(bad("refs and repeat can't be combined"));
+        }
+        total += repeat;
+        if total > MAX_PROBE_CALLS {
+            return Err(bad("the case's probes make over 20000 calls"));
+        }
     }
     Ok(total)
 }
@@ -1358,6 +1385,21 @@ fn run(payload: &Json) -> Vec<CaseResult> {
         Json::Str(k) => k.as_str(),
         _ => "function",
     };
+    let comparison = payload.get("comparison");
+    let validating = comparison.get("mode") == &Json::Str("custom_validator".into());
+    if validating {
+        // Probes are the problem's data, so a malformed one is its author's bug
+        // (ProbeIn refuses them at seed time; this is the backstop), reported
+        // before anything compiles rather than as every case's judge_error. Checked
+        // before `case_ops` reads their op names into the glue.
+        if let Some(e) = cases.iter().find_map(|c| probe_total(c).err()) {
+            eprintln!("harness: {}", e);
+            return vec![CaseResult::judge_error_row(first_id, "a test case's probes are malformed (a problem bug, not your code)".into())];
+        }
+        if kind != "operations" && cases.iter().any(|c| !c.get("probes").as_arr().is_empty()) {
+            return vec![CaseResult::judge_error_row(first_id, "test case probes need kind 'operations'".into())];
+        }
+    }
     let nodes = node_structs(payload);
     let (generated, operations) = match kind {
         "function" => {
@@ -1383,8 +1425,12 @@ fn run(payload: &Json) -> Vec<CaseResult> {
             };
             // Op names are pasted into generated source too. ProblemIn refuses a bad
             // one at seed time; this is the backstop.
-            let ops = case_ops(cases).unwrap_or_else(|e| judge_fault(e));
-            (operations_glue(&class_name, &ops, &nodes), Some((class_name, ops)))
+            let ops = case_ops(cases, validating).unwrap_or_else(|e| judge_fault(e));
+            // The ops only a probe calls, for `ops_hint`.
+            let case_only = case_ops(cases, false).unwrap_or_else(|e| judge_fault(e));
+            let probe_only: Vec<String> =
+                ops.iter().filter(|(op, _)| !case_only.iter().any(|(o, _)| o == op)).map(|(op, _)| op.clone()).collect();
+            (operations_glue(&class_name, &ops, &nodes), Some((class_name, ops, probe_only)))
         }
         // Scope (DESIGN.md §13): no sql, which is MariaDB's. ProblemIn rejects anything
         // else for Rust at seed time; this is the backstop.
@@ -1407,7 +1453,7 @@ fn run(payload: &Json) -> Vec<CaseResult> {
         _ => DEFAULT_COMPILE_TIMEOUT_S,
     });
     let hint = |diag: &str| match &operations {
-        Some((class_name, ops)) => ops_hint(diag, class_name, ops),
+        Some((class_name, ops, probe_only)) => ops_hint(diag, class_name, ops, probe_only),
         None => String::new(),
     };
     let compile_start = Instant::now();
@@ -1420,19 +1466,8 @@ fn run(payload: &Json) -> Vec<CaseResult> {
     // A custom validator compiles after the submission (a submission that doesn't
     // compile never pays for it), inside the same deadline: the worker's wall budget
     // reserves one `compile_timeout_s` for both (app/sandbox.py).
-    let comparison = payload.get("comparison");
-    let validator = match comparison.get("mode") {
-        Json::Str(m) if m == "custom_validator" => {
-            // Probes are the problem's data, so a malformed one is its author's bug
-            // (ProbeIn refuses them at seed time; this is the backstop), reported
-            // before any case runs rather than as every case's judge_error.
-            if let Some(e) = cases.iter().find_map(|c| probe_total(c).err()) {
-                eprintln!("harness: {}", e);
-                return vec![CaseResult::judge_error_row(first_id, "a test case's probes are malformed (a problem bug, not your code)".into())];
-            }
-            if kind != "operations" && cases.iter().any(|c| !c.get("probes").as_arr().is_empty()) {
-                return vec![CaseResult::judge_error_row(first_id, "test case probes need kind 'operations'".into())];
-            }
+    let validator = match validating {
+        true => {
             let code = match comparison.get("validator_code") {
                 Json::Str(code) => code.as_str(),
                 _ => return vec![CaseResult::judge_error_row(first_id, "custom validator: no Rust validator_code".into())],
@@ -1460,7 +1495,7 @@ fn run(payload: &Json) -> Vec<CaseResult> {
                 }
             }
         }
-        _ => None,
+        false => None,
     };
     let judge = match &validator {
         Some(file) => Judge::Validate { binary: file, top_up_pool: Cell::new(VALIDATOR_TOP_UP_POOL) },

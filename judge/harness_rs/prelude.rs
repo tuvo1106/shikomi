@@ -1261,16 +1261,29 @@ fn write_fields(m: BTreeMap<String, Json>) {
 }
 
 std::thread_local! {
-    /// The probe call in progress (`ops::replay`), e.g. "decode(), call 1 of 1",
-    /// so a panic in it can say the judge made that call: the user never wrote it
-    /// and won't find it in their test case. Empty outside probes.
-    static PROBE_CALL: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+    /// The probe call in progress (`ops::replay`): its op name, set once per probe,
+    /// and (call number, total calls), set per call. A panic in it can then say the
+    /// judge made that call, which the user never wrote and won't find in their test
+    /// case. Only numbers change per call, so a 20,000-call distribution probe
+    /// allocates nothing for its label; the text is built only on failure. `None`
+    /// outside probes.
+    static PROBE_OP: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+    static PROBE_CALL: std::cell::Cell<Option<(usize, usize)>> = const { std::cell::Cell::new(None) };
 }
 
-/// How a failure inside probe call `call` is introduced, the same wording as
-/// harness.py's.
-fn probe_prefix(call: &str) -> String {
-    format!("In a call the judge added after your operations to check the result ({}):\n", call)
+/// How a failure inside the probe call in progress is introduced, the same
+/// wording as harness.py's. Empty outside a probe call.
+fn probe_prefix() -> String {
+    match PROBE_CALL.with(|c| c.get()) {
+        Some((call, total)) => {
+            let op = PROBE_OP.with(|o| o.try_borrow().map(|o| o.clone()).unwrap_or_default());
+            format!(
+                "In a call the judge added after your operations to check the result ({}(), call {} of {}):\n",
+                op, call, total
+            )
+        }
+        None => String::new(),
+    }
 }
 
 /// Decode argument `i` of the case. Called by generated glue as
@@ -1313,9 +1326,7 @@ pub fn __run<R: Into<Reply>, F: FnOnce(&[Json]) -> Result<R, Fail>>(call: F) {
         let at = info.location().map_or(String::new(), |l| {
             format!(" (at {}:{}:{})", l.file().rsplit('/').next().unwrap_or(""), l.line(), l.column())
         });
-        let probe = PROBE_CALL.with(|c| c.try_borrow().map(|c| c.clone()).unwrap_or_default());
-        let intro = if probe.is_empty() { String::new() } else { probe_prefix(&probe) };
-        write_result("panic", Json::Str(format!("{}panicked: {}{}", intro, msg, at)));
+        write_result("panic", Json::Str(format!("{}panicked: {}{}", probe_prefix(), msg, at)));
     }));
 
     let mut input = String::new();
@@ -1395,7 +1406,7 @@ pub fn __entry<R: Into<Reply>, F: FnOnce(&[Json]) -> Result<R, Fail>>(call: F) -
 /// own results (those are what the user sees). A probe's op goes through the
 /// same `dispatch` as a case's, so harness.rs gives probe ops dispatch arms too.
 pub mod ops {
-    use super::{arg, probe_prefix, ret, Fail, FromJson, Json, Reply, ToJson, PROBE_CALL};
+    use super::{arg, probe_prefix, ret, Fail, FromJson, Json, Reply, ToJson, PROBE_CALL, PROBE_OP};
 
     /// Marks a `&mut self` method in a `Method` impl's marker tuple.
     pub struct ByMut;
@@ -1545,6 +1556,13 @@ pub mod ops {
     /// repeat decodes its arguments afresh, so a method that consumes or mutates
     /// its argument can't affect the next call. harness.rs has checked the probes'
     /// shape against its own copy; the errors here are only a backstop.
+    ///
+    /// A failed call is always `Malformed`, which harness.rs shows as it is, never
+    /// `Decode` ("could not decode the test case"): a probe argument that doesn't
+    /// fit the method is usually a `ref`, a value the submission's own op returned
+    /// (an `encode` returning `Vec<u8>` to a `decode` taking `String`), not bad
+    /// test data. A stack overflow or abort in a probe call isn't labelled: it
+    /// kills the process before any of this code can run.
     fn run_probes<S, D>(obj: &mut S, probes: &[Json], results: &[Json], dispatch: &mut D) -> Result<Vec<Json>, Fail>
     where
         D: FnMut(&mut S, &str, &[Json]) -> Option<Result<Json, Fail>>,
@@ -1563,18 +1581,18 @@ pub mod ops {
                     *call_args.get_mut(index).ok_or_else(malformed)? = source.clone();
                 }
             }
+            PROBE_OP.with(|o| *o.borrow_mut() = op.to_string());
             for _ in 0..repeat(probe) {
-                let call = format!("{}(), call {} of {}", op, out.len() + 1, total);
-                PROBE_CALL.with(|c| *c.borrow_mut() = call.clone());
+                PROBE_CALL.with(|c| c.set(Some((out.len() + 1, total))));
                 let result = match dispatch(obj, op, &call_args) {
                     Some(result) => result,
                     None => Err(Fail::Decode(format!("unknown operation {:?}", op))),
                 };
-                PROBE_CALL.with(|c| c.borrow_mut().clear());
-                out.push(result.map_err(|e| match e {
-                    Fail::Decode(m) => Fail::Decode(format!("{}{}", probe_prefix(&call), m)),
-                    Fail::Malformed(m) => Fail::Malformed(format!("{}{}", probe_prefix(&call), m)),
-                })?);
+                let result = result.map_err(|e| match e {
+                    Fail::Decode(m) | Fail::Malformed(m) => Fail::Malformed(format!("{}{}", probe_prefix(), m)),
+                });
+                PROBE_CALL.with(|c| c.set(None));
+                out.push(result?);
             }
         }
         Ok(out)
@@ -1677,8 +1695,9 @@ impl Rng {
         (m >> 64) as u64
     }
 
-    /// A uniform value in `range`: `a..b` or `a..=b` for any integer type, or
-    /// `a..b` for `f64`. Panics on an empty range, like the `rand` crate.
+    /// A uniform value in `range`: `a..b` or `a..=b` for any integer type up to
+    /// 64 bits, or `a..b` for `f64` (finite bounds). Panics on an empty range,
+    /// like the `rand` crate.
     pub fn gen_range<T, R: SampleRange<T>>(&mut self, range: R) -> T {
         range.sample(self)
     }
@@ -1707,7 +1726,8 @@ impl Rng {
 }
 
 /// A range `Rng::gen_range` can draw from. Implemented for `Range` and
-/// `RangeInclusive` of every primitive integer, and `Range<f64>`.
+/// `RangeInclusive` of every primitive integer up to 64 bits (`i128`/`u128`
+/// spans don't fit the 64-bit draw), and for `Range<f64>` with finite bounds.
 pub trait SampleRange<T> {
     fn sample(self, rng: &mut Rng) -> T;
 }
@@ -1740,7 +1760,12 @@ sample_int!(i8, i16, i32, i64, isize, u8, u16, u32, u64, usize);
 impl SampleRange<f64> for ::std::ops::Range<f64> {
     fn sample(self, rng: &mut Rng) -> f64 {
         assert!(self.start < self.end, "gen_range: empty range {}..{}", self.start, self.end);
-        let x = self.start + rng.gen_f64() * (self.end - self.start);
+        assert!(self.start.is_finite() && self.end.is_finite(), "gen_range: infinite bound {}..{}", self.start, self.end);
+        let u = rng.gen_f64();
+        let width = self.end - self.start;
+        // A range wider than f64::MAX (-1e308..1e308) makes `width` infinite, so
+        // interpolate from both ends instead: each term stays finite.
+        let x = if width.is_finite() { self.start + u * width } else { self.start * (1.0 - u) + self.end * u };
         // Rounding can land exactly on `end` for a wide range; keep it half-open.
         if x < self.end { x } else { self.start }
     }
