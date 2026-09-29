@@ -105,14 +105,8 @@ def test_a_validator_map_loads_unchanged():
     assert p.comparison == _validator({"python": "p"})
 
 
-def test_every_language_needs_its_own_validator(monkeypatch):
-    """A bare string is Python's validator only. Only Python's harness runs
-    validators today, so pretend Rust's does too, to reach the rule."""
-    import dataclasses
-
-    from app import sandbox
-    monkeypatch.setitem(sandbox.PROFILES, "rust",
-                        dataclasses.replace(sandbox.PROFILES["rust"], custom_validator=True))
+def test_every_language_needs_its_own_validator():
+    """A bare string is Python's validator only; the Rust variant needs its own."""
     both = (_variant("python"), _variant("rust"))
     assert "non-empty validator for language 'rust'" in _error(
         _file(*both, comparison=_validator("p")))
@@ -121,10 +115,14 @@ def test_every_language_needs_its_own_validator(monkeypatch):
 
 
 def test_a_language_whose_harness_cant_run_validators_is_refused():
-    for lang in ("js", "rust"):
-        assert f"language '{lang}' does not support comparison mode 'custom_validator'" in _error(
-            _file(_variant("python"), _variant(lang),
-                  comparison=_validator({"python": "p", lang: "v"})))
+    assert "language 'js' does not support comparison mode 'custom_validator'" in _error(
+        _file(_variant("python"), _variant("js"), comparison=_validator({"python": "p", "js": "v"})))
+
+
+def test_a_rust_only_validator_problem_loads():
+    """Rust's harness runs its own validators (harness.rs `Judge::Validate`)."""
+    p = ProblemFile.model_validate(_file(_variant("rust"), comparison=_validator({"rust": "fn validate"})))
+    assert p.comparison["validator_code"] == {"rust": "fn validate"}
 
 
 def test_an_empty_validator_is_refused():

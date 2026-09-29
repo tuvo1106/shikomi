@@ -207,7 +207,7 @@ The rules tying a language to `kind` and `comparison` span both tables, so no `C
 hold them; `ProblemIn` (§7.1) checks them for every variant, and the seed loader is the only
 writer: `"js"`/`"rust"` only support `kind="function"` with no node-typed params or return;
 `"mysql"` always pairs with `kind="sql"`; a `custom_validator` comparison needs a validator
-for every language, each in a language whose harness runs them (Python only, so far; §5.4); exactly one of `function_name`/`class_name` matches `kind` (neither for
+for every language, each in a language whose harness runs them (Python and Rust; §5.4); exactly one of `function_name`/`class_name` matches `kind` (neither for
 `"sql"`); `memory_limit_mb` clears every language's floor (§13).
 
 ### 3.3 `test_cases`
@@ -633,11 +633,30 @@ The alternative, requiring each author to stash the original in `expected`
 instead, was rejected: it's a per-problem discipline that's easy to miss,
 whereas a separate copy closes it for every problem. A broken validator (bad script, or one that raises
 mid-case) reports `judge_error`, never `runtime_error` — it's a
-problem-authoring fault, not the submitter's. Only `harness.py` runs
-validators so far (`SandboxProfile.custom_validator`; `ProblemIn` refuses a
+problem-authoring fault, not the submitter's. `harness.py` and the Rust harness
+run validators (`SandboxProfile.custom_validator`; `ProblemIn` refuses a
 validator problem offered in any other language at seed time, and the rule spans
-`problems` and `problem_languages`, so no database `CHECK` backs it up, §3.2);
-ADR-0007 brings Rust next.
+`problems` and `problem_languages`, so no database `CHECK` backs it up, §3.2).
+
+**Rust validators.** A Rust validator is the same function in Rust, over the
+prelude's `Json` (an operations result list mixes `null`, bools and numbers, so it
+has no one Rust type): `fn validate(actual: &Json, expected: &Json, args: &Json,
+probe_results: &[Json]) -> bool`, with `as_i64`/`as_str`/`as_bool`, forgiving
+`j[i]`/`j["k"]` indexing, and `j.decode::<T>()` for a typed view. The harness
+compiles it, after the submission and inside the same compile deadline, into a
+program of its own that is never linked with the submission, and runs it once per
+case after the case's process has ended: the request on stdin, the verdict on
+stdout's last line (so a debugging `println!` can't corrupt it), under the case's
+memory limit and with what's left of its time limit. A panic or missing verdict is
+`judge_error`; a validator that doesn't compile is one `judge_error` row whose
+rustc diagnostics go only to the judge's log. **The binary is sealed in memory**:
+a case's process runs as the harness's uid, and `/tmp/judge` is writable by it, so
+a validator binary left there could be replaced by one that always prints `true`.
+Right after compiling, before any submission code has run, the harness copies it
+into a close-on-exec memfd sealed against writes, deletes the file, and executes
+it as `/proc/self/fd/N`; the fd lives only in the non-dumpable harness. Probes
+aren't implemented in the Rust harness yet (ADR-0007 step 4b): it refuses a case
+that has them, and `ProblemIn` refuses a Rust variant of a problem that uses them.
 
 ### 5.5 Sandbox container
 

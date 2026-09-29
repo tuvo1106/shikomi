@@ -2,8 +2,9 @@
 
 - **Status:** Accepted: step 1 (function-mode validators in the parent) implemented in
   `judge/harness.py`, step 2 (the per-language `validator_code` map) in `app/comparison.py`
-  and `ProblemIn`, step 3 (probes) in `harness.py`, `ProbeIn` and `test_cases.probes`;
-  steps 4–6 are open work (AGENTS.md TODO)
+  and `ProblemIn`, step 3 (probes) in `harness.py`, `ProbeIn` and `test_cases.probes`,
+  step 4a (Rust validators, sealed in memory) in `harness_rs/`; steps 4b–6 are open work
+  (AGENTS.md TODO)
 - **Date:** 2026-09-28
 
 ## Context

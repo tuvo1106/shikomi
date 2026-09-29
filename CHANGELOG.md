@@ -8,6 +8,14 @@ All notable changes to this project are recorded here. The format follows
 
 ### Added
 
+- **Rust custom validators.** A `custom_validator` problem can be offered in Rust, with a
+  Rust validator, `fn validate(actual: &Json, expected: &Json, args: &Json, probe_results:
+  &[Json]) -> bool`, next to the Python one in `validator_code`. The judge compiles it
+  into its own program and runs it once per case, after the submission's code has
+  finished. The submission can't replace it, because it runs from a sealed in-memory
+  copy rather than a file. A validator that doesn't compile or panics is a
+  `judge_error`, and its compiler output isn't shown to the user. Probes aren't
+  supported in Rust yet. Rebuild the Rust judge image to pick this up.
 - **Probes** for operations problems with a `custom_validator`: a test case can list
   extra calls the judge makes on the instance after the replay, such as
   `{"op": "pickIndex", "repeat": 4000}` or a round trip, `{"op": "decode", "args": [null],
@@ -23,9 +31,7 @@ All notable changes to this project are recorded here. The format follows
   `{"python": "..."}`, so each language a problem is offered in can have its own
   (ADR-0007). A single string still works and means Python's; it's stored as the map
   when seeded. Existing deployments need `alembic upgrade head`, which converts problems
-  seeded earlier (its downgrade converts them back). Only Python's judge runs
-  validators so far, so a validator problem is still Python-only until the Rust judge
-  gains them.
+  seeded earlier (its downgrade converts them back).
 - An operations problem's `Iterator` constructor argument now works in Rust: the
   starter takes an `IntIter` (an `Iterator<Item = i32>`), e.g. `fn new(nums: IntIter)`.
   Rebuild the Rust judge image to pick it up. A new starter, *Design a Run Cursor*,

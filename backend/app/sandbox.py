@@ -96,7 +96,7 @@ PROFILES = {
     # The margin over the compile timeout covers the harness's own startup and payload parsing.
     "rust": SandboxProfile("judge_image_rust", "shikomi-judge-rust:latest", tmpfs_size_mb=32,
                            tmpfs_exec=True, startup_slack_s=RUST_COMPILE_TIMEOUT_S + 2,
-                           min_memory_limit_mb=128,
+                           min_memory_limit_mb=128, custom_validator=True,
                            node_types=RUST_NODE_TYPES, node_value_range=I32_RANGE),
     # ADR-0002: the tuned MariaDB datadir needs ~22MB of tmpfs and boots in ~0.05s; 2s is a
     # generous multiple.

@@ -31,7 +31,7 @@ class Problem(Base, PKMixin, TimestampMixin):
       `validator_code` maps each language to its validator, since each harness runs
       only its own language (migration e5a8c2f41d93 converted the old one-string form);
       app/comparison.py picks the submission's, and `ProblemIn` requires one per
-      language, in a language whose harness can run it (only Python so far,
+      language, in a language whose harness can run it (Python and Rust,
       docs/adr/0007-custom-validators-in-every-language.md).
     * `time_limit_ms` / `memory_limit_mb` — the sandbox caps enforced per case.
     * `is_published` — draft vs live; an unpublished problem is invisible to

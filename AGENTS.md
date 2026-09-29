@@ -356,6 +356,12 @@ and `playwright`.
   that still runs in the child, so such a problem must not rely on `expected` being
   hidden, and its verdict can be forged through the result pipe. The harness tells
   the forms apart by the `probe_results` parameter; author the probe form.
+  **Never execute (or trust) a file under `/tmp` after a case has run.** A case's process
+  has the harness's uid, and `/tmp/judge` is writable by it, so any binary or data left
+  there can be swapped by the submission. The Rust harness's custom validator is
+  compiled before any case runs and moved into a sealed, close-on-exec memfd (harness.rs
+  `sealed_copy`); the submission's own binary may stay on disk, since swapping it only
+  changes the submission's own behaviour.
 
 - **Rust calls each op by its snake_case name.** The shared cases spell an op once for
   every language (`getState`), and the Rust glue calls `get_state`. The mapping exists
@@ -413,12 +419,14 @@ slice ships, delete its entry here.
 
 - **Custom validators in every language**
   ([ADR-0007](docs/adr/0007-custom-validators-in-every-language.md)), in order:
-  (4) Rust: a separate validator binary run by the parent (non-dumpable, one compile
-  deadline shared with the submission, a compile failure is `judge_error` with its
-  diagnostics hidden); probes in the Rust harness (each probe op needs a dispatch arm in
-  `operations_glue`, since `case_ops` only scans the cases' ops; `refs` resolved in the
-  prelude's `ops::replay`; results split into `actual` + `probe_results`); a seedable RNG
-  in the prelude; then flip `custom_validator=True` on Rust's `SandboxProfile`;
+  (4b) probes in the Rust harness: each probe op needs a dispatch arm in `operations_glue`
+  (`case_ops` only scans the cases' ops, and `decode` never appears there), `refs` resolved
+  in the prelude's `ops::replay` from a JSON snapshot of the results, `probe_results` in
+  the result file with its length checked by the harness; then drop the Rust refusals
+  (harness.rs `run`, `ProblemFile._probes_feed_a_probe_validator`) and re-add a test for
+  `_ops_are_rust_methods` covering probe ops (unreachable while Rust refuses probes); plus
+  a seedable RNG in the prelude (`Rng::new()` from /dev/urandom, `Rng::seeded`,
+  `gen_range` without modulo bias), which the random problems' Rust starters need;
   (5) port the 19 problems in the external problem set: the 13 operations validators to
   the probe form (a converter that does this mechanically, and passes all their reference
   solutions, was proven on a copy), each with a known-wrong solution its validator

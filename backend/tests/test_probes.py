@@ -4,13 +4,11 @@ docs/adr/0007-custom-validators-in-every-language.md).
 Probes only feed a probe-form custom validator, and the harness quietly drops them
 anywhere else, so every misuse is refused here, at seed time.
 """
-import dataclasses
 import json
 
 import pytest
 from pydantic import ValidationError
 
-from app import sandbox
 from app.schemas.problem import MAX_PROBE_CALLS, ProblemFile
 from worker.judge import _case_payload
 
@@ -88,17 +86,16 @@ def test_repeat_is_bounded_per_probe_and_per_case():
     assert "over the" in _error(_file([{"op": "encode", "repeat": half}] * 2))
 
 
-def test_a_probe_op_must_map_to_a_rust_method_too(monkeypatch):
-    """The Rust glue dispatches a probe's op like any other. Only Python runs
-    validators today, so pretend Rust does, to reach the rule."""
-    monkeypatch.setitem(sandbox.PROFILES, "rust",
-                        dataclasses.replace(sandbox.PROFILES["rust"], custom_validator=True))
+def test_probes_are_refused_for_rust_until_its_harness_makes_them():
+    """harness.rs runs validators but not probe calls yet (ADR-0007 step 4b), and
+    refuses such a case, so seeding one would make every Rust submission a
+    judge_error."""
     languages = [{"language": "python", "class_name": "Codec", "starter_code": "c", "params": []},
                  {"language": "rust", "class_name": "Codec", "starter_code": "c", "params": []}]
     comparison = {"mode": "custom_validator",
                   "validator_code": {"python": PROBE_VALIDATOR, "rust": "fn validate() {}"}}
-    assert "op 'new' can't be a Rust method name" in _error(
-        _file([{"op": "new"}], comparison=comparison, languages=languages))
+    assert "probes aren't supported for language 'rust' yet" in _error(
+        _file([DECODE], comparison=comparison, languages=languages))
 
 
 class _Case:
