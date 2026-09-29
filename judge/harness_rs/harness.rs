@@ -43,7 +43,10 @@
 //! A `custom_validator` problem adds a second program: the problem's own Rust
 //! validator, compiled after the submission and run once per case to decide its
 //! verdict. It's sealed in memory before any case runs, because the submission
-//! could otherwise overwrite it on disk (the "custom validators" section).
+//! could otherwise overwrite it on disk (the "custom validators" section). An
+//! operations case may also carry probes, extra calls the case's process makes
+//! after the replay, whose results go to the validator (`probe_total`,
+//! prelude.rs `ops::replay`).
 //!
 //! Limits applied to each case's process: wall time `time_limit_ms` (enforced
 //! here, with SIGKILL), address space `memory_limit_mb` (`RLIMIT_AS`, so an
@@ -502,13 +505,16 @@ fn operations_glue(class_name: &str, ops: &[(String, String)], nodes: &[String])
 }
 
 /// The distinct op names the cases call (everything after each case's
-/// constructor), in first-use order, each paired with its Rust method. Only
-/// these get a dispatch arm, so a Run that judges only the samples compiles
-/// only the methods the samples use; an op no case calls needs no method.
+/// constructor, then each probe's op), in first-use order, each paired with its
+/// Rust method. Only these get a dispatch arm, so a Run that judges only the
+/// samples compiles only the methods the samples use; an op no case calls needs
+/// no method. A probe's op (`decode`) often appears in no case's ops at all, so
+/// it has to be collected here or its call would find no arm.
 fn case_ops(cases: &[Json]) -> Result<Vec<(String, String)>, String> {
     let mut seen: Vec<(String, String)> = Vec::new();
     for tc in cases {
-        for op in tc.get("input").as_arr().first().map_or(&[][..], |o| o.as_arr()).iter().skip(1) {
+        let ops = tc.get("input").as_arr().first().map_or(&[][..], |o| o.as_arr()).iter().skip(1);
+        for op in ops.chain(tc.get("probes").as_arr().iter().map(|p| p.get("op"))) {
             let Json::Str(op) = op else { return Err(format!("op {} is not a string", op.dump())) };
             if seen.iter().any(|(o, _)| o == op) {
                 continue;
@@ -1052,6 +1058,47 @@ fn run_validator(validator: &fs::File, request: &Json, budget: Duration, memory_
     Verdict::Fault("the problem's custom validator failed (a problem bug, not your code)".into())
 }
 
+/// How many results case `tc`'s probes produce (0 without probes), after
+/// checking their shape the way `app.schemas.problem.ProbeIn` does at seed time:
+/// an op name, an `args` array, `refs` naming a real argument and one of the
+/// case's own ops (1.., since op 0 is the constructor), and a positive
+/// `repeat`. This is the harness's own copy of the probes, so the count is what
+/// the child's `probe_results` is checked against. `Err` is an authoring bug.
+fn probe_total(tc: &Json) -> Result<usize, String> {
+    let n_ops = tc.get("input").as_arr().first().map_or(0, |o| o.as_arr().len());
+    let mut total = 0usize;
+    for probe in tc.get("probes").as_arr() {
+        let bad = |why: &str| format!("test case {}: malformed probe {}: {}", tc.get("id").dump(), probe.dump(), why);
+        if probe.get("op").as_str().is_none() {
+            return Err(bad("no op name"));
+        }
+        let n_args = match probe.get("args") {
+            Json::Null => 0,
+            Json::Arr(a) => a.len(),
+            _ => return Err(bad("args is not an array")),
+        };
+        match probe.get("refs") {
+            Json::Null => {}
+            Json::Obj(refs) => {
+                for (index, source) in refs {
+                    let fits_arg = index.parse::<usize>().is_ok_and(|i| i < n_args);
+                    let fits_op = source.as_i64().is_some_and(|j| j >= 1 && (j as usize) < n_ops);
+                    if !fits_arg || !fits_op {
+                        return Err(bad("a ref names a missing argument or op"));
+                    }
+                }
+            }
+            _ => return Err(bad("refs is not an object")),
+        }
+        total += match probe.get("repeat") {
+            Json::Null => 1,
+            Json::Int(n) if *n >= 1 => *n as usize,
+            _ => return Err(bad("repeat is not a positive integer")),
+        };
+    }
+    Ok(total)
+}
+
 // --- run one case ---------------------------------------------------------------
 
 /// A `Command` for `program` under a case's limits, used for both the
@@ -1135,7 +1182,18 @@ fn run_case(tc: &Json, time_limit: Duration, memory_bytes: Option<u64>, judge: &
     // constructor before `main`) would otherwise block the harness with no
     // deadline at all. Killing the child breaks the pipe, which ends the write
     // with EPIPE (Rust ignores SIGPIPE), so the thread always finishes.
-    let input = tc.get("input").dump();
+    // A validated case's probes ride along as a third element, `[ops, args,
+    // probes]` (prelude.rs `ops::replay`). Only a custom validator reads their
+    // results, so a fixed-answer case never makes the calls.
+    let probes = tc.get("probes").as_arr();
+    let validating = matches!(judge, Judge::Validate { .. });
+    let input = if validating && !probes.is_empty() {
+        let mut sent = tc.get("input").as_arr().to_vec();
+        sent.push(Json::Arr(probes.to_vec()));
+        Json::Arr(sent).dump()
+    } else {
+        tc.get("input").dump()
+    };
     let writer = child.stdin.take().map(|mut stdin| {
         std::thread::spawn(move || {
             let _ = stdin.write_all(input.as_bytes());
@@ -1176,6 +1234,25 @@ fn run_case(tc: &Json, time_limit: Duration, memory_bytes: Option<u64>, judge: &
             let passed = match judge {
                 Judge::Compare(comparison) => compare(actual, tc.get("expected"), comparison),
                 Judge::Validate { binary: validator, top_up_pool } => {
+                    // The result file is the submission's to write, so a forged
+                    // `probe_results` is possible. Anything it could claim, the
+                    // submission's methods could have returned, so that's harmless,
+                    // but a malformed one would reach the validator and read as the
+                    // author's bug. Its length is checked against the harness's own
+                    // copy of the probes, and a mismatch is the submission's.
+                    let probe_results = if probes.is_empty() {
+                        Vec::new()
+                    } else {
+                        match r.get("probe_results") {
+                            Json::Arr(p) if Ok(p.len()) == probe_total(tc) => p.clone(),
+                            _ => {
+                                return fail(
+                                    "runtime_error",
+                                    Some("the submission's reply didn't account for every check the judge ran".into()),
+                                );
+                            }
+                        }
+                    };
                     // What's left of the case's limit, so submission + validator stay
                     // within it (plus at most the run's fixed top-up pool).
                     let budget = validator_budget(time_limit, took, top_up_pool);
@@ -1183,7 +1260,7 @@ fn run_case(tc: &Json, time_limit: Duration, memory_bytes: Option<u64>, judge: &
                     request.insert("actual".to_string(), actual.clone());
                     request.insert("expected".to_string(), tc.get("expected").clone());
                     request.insert("args".to_string(), tc.get("input").clone());
-                    request.insert("probe_results".to_string(), Json::Arr(Vec::new()));
+                    request.insert("probe_results".to_string(), Json::Arr(probe_results));
                     match run_validator(validator, &Json::Obj(request), budget, memory_bytes) {
                         Verdict::Checked(passed) => passed,
                         Verdict::TimedOut => {
@@ -1346,14 +1423,15 @@ fn run(payload: &Json) -> Vec<CaseResult> {
     let comparison = payload.get("comparison");
     let validator = match comparison.get("mode") {
         Json::Str(m) if m == "custom_validator" => {
-            // Probes (ADR-0007) aren't implemented here yet; ProblemIn refuses a Rust
-            // variant of a problem that uses them. Judging without them would hand
-            // the validator empty `probe_results`, so refuse rather than misjudge.
-            if cases.iter().any(|c| !c.get("probes").as_arr().is_empty()) {
-                return vec![CaseResult::judge_error_row(
-                    first_id,
-                    "test case probes aren't supported by the Rust judge yet".into(),
-                )];
+            // Probes are the problem's data, so a malformed one is its author's bug
+            // (ProbeIn refuses them at seed time; this is the backstop), reported
+            // before any case runs rather than as every case's judge_error.
+            if let Some(e) = cases.iter().find_map(|c| probe_total(c).err()) {
+                eprintln!("harness: {}", e);
+                return vec![CaseResult::judge_error_row(first_id, "a test case's probes are malformed (a problem bug, not your code)".into())];
+            }
+            if kind != "operations" && cases.iter().any(|c| !c.get("probes").as_arr().is_empty()) {
+                return vec![CaseResult::judge_error_row(first_id, "test case probes need kind 'operations'".into())];
             }
             let code = match comparison.get("validator_code") {
                 Json::Str(code) => code.as_str(),

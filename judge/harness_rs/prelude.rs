@@ -2,7 +2,7 @@
 //! program it compiles (DESIGN.md §13, ADR-0004).
 //!
 //! Built once, at image build time, into `libshikomi_prelude.rlib`
-//! (judge/Dockerfile.rust). Two very different crates link against it:
+//! (judge/Dockerfile.rust). Three kinds of program link against it:
 //!
 //! * **`harness.rs`** — the trusted driver. Parses the payload, compares each
 //!   case's return value against `expected`, prints the result document.
@@ -10,7 +10,10 @@
 //!   `harness.rs` generates. Its `main` is just `__run(|a| ...)`: decode the
 //!   case's arguments, call the user's function, write the return value back.
 //!   An operations problem's glue replays a sequence of method calls instead
-//!   (the `ops` module).
+//!   (the `ops` module), plus any probe calls the judge adds for a validator.
+//! * **a problem's custom validator**, its own program (the `validator` module).
+//!
+//! Solutions can also use `Rng`, the random number generator std doesn't have.
 //!
 //! **No serde.** The sandbox has `--network=none`, so crates can't be fetched at
 //! judge time. Vendoring serde into the image would work, but its proc-macros
@@ -1206,6 +1209,9 @@ pub mod nodes {
 // Wire format of the result file, one JSON object:
 //   {"ok": <return value>}  |  {"panic": "<message>"}  |  {"decode": "<message>"}
 //   |  {"malformed": "<message>"}
+// An operations case sent with probes answers
+//   {"ok": <the ops' results>, "probe_results": [<one per probe call>]}
+// (see `ops::replay`).
 
 /// Why a case produced no value to compare. `Decode` is the test data not
 /// fitting the signature (an authoring bug); `Malformed` is the submission
@@ -1226,14 +1232,45 @@ impl From<String> for Fail {
 /// Environment variable naming the per-case result file.
 pub const RESULT_ENV: &str = "SHIKOMI_RESULT";
 
+/// What a case returned: its value, plus the probes' results when the case had
+/// probes (operations mode). A function's glue returns a bare `Json`, which
+/// `From` lifts, so only `ops::replay` ever spells this out.
+pub struct Reply {
+    pub value: Json,
+    pub probe_results: Option<Vec<Json>>,
+}
+
+impl From<Json> for Reply {
+    fn from(value: Json) -> Reply {
+        Reply { value, probe_results: None }
+    }
+}
+
 fn write_result(key: &str, value: Json) {
     let mut m = BTreeMap::new();
     m.insert(key.to_string(), value);
+    write_fields(m);
+}
+
+fn write_fields(m: BTreeMap<String, Json>) {
     if let Ok(path) = std::env::var(RESULT_ENV) {
         // Nothing useful to do if this fails (e.g. tmpfs full); the harness
         // sees no result file and reports the case as a runtime_error.
         let _ = std::fs::write(path, Json::Obj(m).dump());
     }
+}
+
+std::thread_local! {
+    /// The probe call in progress (`ops::replay`), e.g. "decode(), call 1 of 1",
+    /// so a panic in it can say the judge made that call: the user never wrote it
+    /// and won't find it in their test case. Empty outside probes.
+    static PROBE_CALL: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+/// How a failure inside probe call `call` is introduced, the same wording as
+/// harness.py's.
+fn probe_prefix(call: &str) -> String {
+    format!("In a call the judge added after your operations to check the result ({}):\n", call)
 }
 
 /// Decode argument `i` of the case. Called by generated glue as
@@ -1263,7 +1300,7 @@ pub fn ret<T: ToJson>(v: T) -> Result<Json, Fail> {
 /// deliberately don't `catch_unwind`: the process is thrown away after one
 /// case anyway, and the hook sees the panic *before* any user `Drop` impl gets
 /// a chance to run code during unwinding.
-pub fn __run<F: FnOnce(&[Json]) -> Result<Json, Fail>>(call: F) {
+pub fn __run<R: Into<Reply>, F: FnOnce(&[Json]) -> Result<R, Fail>>(call: F) {
     use std::io::Read;
     std::panic::set_hook(Box::new(|info| {
         let msg = if let Some(s) = info.payload().downcast_ref::<&str>() {
@@ -1276,7 +1313,9 @@ pub fn __run<F: FnOnce(&[Json]) -> Result<Json, Fail>>(call: F) {
         let at = info.location().map_or(String::new(), |l| {
             format!(" (at {}:{}:{})", l.file().rsplit('/').next().unwrap_or(""), l.line(), l.column())
         });
-        write_result("panic", Json::Str(format!("panicked: {}{}", msg, at)));
+        let probe = PROBE_CALL.with(|c| c.try_borrow().map(|c| c.clone()).unwrap_or_default());
+        let intro = if probe.is_empty() { String::new() } else { probe_prefix(&probe) };
+        write_result("panic", Json::Str(format!("{}panicked: {}{}", intro, msg, at)));
     }));
 
     let mut input = String::new();
@@ -1295,8 +1334,14 @@ pub fn __run<F: FnOnce(&[Json]) -> Result<Json, Fail>>(call: F) {
             return;
         }
     };
-    match call(&args) {
-        Ok(v) => write_result("ok", v),
+    match call(&args).map(Into::into) {
+        Ok(Reply { value, probe_results: None }) => write_result("ok", value),
+        Ok(Reply { value, probe_results: Some(probes) }) => {
+            let mut m = BTreeMap::new();
+            m.insert("ok".to_string(), value);
+            m.insert("probe_results".to_string(), Json::Arr(probes));
+            write_fields(m);
+        }
         Err(Fail::Decode(e)) => write_result("decode", Json::Str(e)),
         Err(Fail::Malformed(e)) => write_result("malformed", Json::Str(e)),
     }
@@ -1309,7 +1354,7 @@ pub fn __run<F: FnOnce(&[Json]) -> Result<Json, Fail>>(call: F) {
 /// has already recorded it by then. And stdout is flushed, since std only
 /// flushes its line buffer at a normal Rust exit, and a final `print!` with no
 /// newline would otherwise be lost.
-pub fn __entry<F: FnOnce(&[Json]) -> Result<Json, Fail>>(call: F) -> i32 {
+pub fn __entry<R: Into<Reply>, F: FnOnce(&[Json]) -> Result<R, Fail>>(call: F) -> i32 {
     use std::io::Write;
     let code = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| __run(call))) {
         Ok(()) => 0,
@@ -1341,8 +1386,16 @@ pub fn __entry<F: FnOnce(&[Json]) -> Result<Json, Fail>>(call: F) -> i32 {
 /// (`Method<S, (ByMut, A, B)>`): without it, the impls for `Fn(&mut S, A)` and
 /// `Fn(&S, A)` would overlap as far as coherence can tell, although no function
 /// implements both.
+///
+/// **Probes** (docs/adr/0007; harness.py's "probes" section has the model): a
+/// custom-validator case may list extra calls for the judge to make on the same
+/// object after the replay, `{"op", "args", "refs", "repeat"}`. harness.rs then
+/// sends the case as `[ops, args, probes]`, and `replay` answers with a `Reply`
+/// whose `probe_results` hold one result per call, kept apart from the ops'
+/// own results (those are what the user sees). A probe's op goes through the
+/// same `dispatch` as a case's, so harness.rs gives probe ops dispatch arms too.
 pub mod ops {
-    use super::{arg, ret, Fail, FromJson, Json, ToJson};
+    use super::{arg, probe_prefix, ret, Fail, FromJson, Json, Reply, ToJson, PROBE_CALL};
 
     /// Marks a `&mut self` method in a `Method` impl's marker tuple.
     pub struct ByMut;
@@ -1438,19 +1491,21 @@ pub mod ops {
 
     /// Runs a whole case. `new` is the class's constructor; `dispatch` maps a
     /// case's op name to a `call`, or returns `None` for a name it doesn't know.
-    /// The glue generates `dispatch` from the op names the payload's cases use.
+    /// The glue generates `dispatch` from the op names the payload's cases (and
+    /// their probes) use.
     ///
     /// The object is never dropped, on any path (it's held in a `ManuallyDrop`),
     /// for the same reason `ret` never drops a return value: freeing a long linked
     /// structure recurses once per node, which could overflow the stack after a
     /// clear error was already found, and the process exits after this case anyway.
-    pub fn replay<S, K, C, D>(case: &[Json], new: C, mut dispatch: D) -> Result<Json, Fail>
+    pub fn replay<S, K, C, D>(case: &[Json], new: C, mut dispatch: D) -> Result<Reply, Fail>
     where
         C: Constructor<S, K>,
         D: FnMut(&mut S, &str, &[Json]) -> Option<Result<Json, Fail>>,
     {
-        let (ops, args) = match case {
-            [Json::Arr(ops), Json::Arr(args)] => (ops, args),
+        let (ops, args, probes) = match case {
+            [Json::Arr(ops), Json::Arr(args)] => (ops, args, None),
+            [Json::Arr(ops), Json::Arr(args), Json::Arr(probes)] => (ops, args, Some(probes)),
             _ => return Err(Fail::Decode("an operations case's input must be [ops, args]".into())),
         };
         if ops.is_empty() || ops.len() != args.len() {
@@ -1475,7 +1530,219 @@ pub mod ops {
                 None => return Err(Fail::Decode(format!("unknown operation {:?}", op))),
             }
         }
-        Ok(Json::Arr(out))
+        let probe_results = match probes {
+            Some(probes) => Some(run_probes(&mut *obj, probes, &out, &mut dispatch)?),
+            None => None,
+        };
+        Ok(Reply { value: Json::Arr(out), probe_results })
+    }
+
+    /// Make every probe's call(s) on `obj`, in order, and return their results.
+    ///
+    /// `results` are the ops' results, already encoded: a `ref` reads from them,
+    /// so a probe is fed exactly the value the validator sees, and nothing the
+    /// submission returned needs copying (or can be changed by a later call). Each
+    /// repeat decodes its arguments afresh, so a method that consumes or mutates
+    /// its argument can't affect the next call. harness.rs has checked the probes'
+    /// shape against its own copy; the errors here are only a backstop.
+    fn run_probes<S, D>(obj: &mut S, probes: &[Json], results: &[Json], dispatch: &mut D) -> Result<Vec<Json>, Fail>
+    where
+        D: FnMut(&mut S, &str, &[Json]) -> Option<Result<Json, Fail>>,
+    {
+        let repeat = |p: &Json| p.get("repeat").as_i64().unwrap_or(1).max(0) as usize;
+        let total: usize = probes.iter().map(repeat).sum();
+        let mut out = Vec::with_capacity(total);
+        for probe in probes {
+            let malformed = || Fail::Decode(format!("malformed probe {}", probe.dump()));
+            let op = probe.get("op").as_str().ok_or_else(malformed)?;
+            let mut call_args = probe.get("args").as_arr().to_vec();
+            if let Json::Obj(refs) = probe.get("refs") {
+                for (index, source) in refs {
+                    let index: usize = index.parse().map_err(|_| malformed())?;
+                    let source = source.as_i64().and_then(|j| results.get(j as usize)).ok_or_else(malformed)?;
+                    *call_args.get_mut(index).ok_or_else(malformed)? = source.clone();
+                }
+            }
+            for _ in 0..repeat(probe) {
+                let call = format!("{}(), call {} of {}", op, out.len() + 1, total);
+                PROBE_CALL.with(|c| *c.borrow_mut() = call.clone());
+                let result = match dispatch(obj, op, &call_args) {
+                    Some(result) => result,
+                    None => Err(Fail::Decode(format!("unknown operation {:?}", op))),
+                };
+                PROBE_CALL.with(|c| c.borrow_mut().clear());
+                out.push(result.map_err(|e| match e {
+                    Fail::Decode(m) => Fail::Decode(format!("{}{}", probe_prefix(&call), m)),
+                    Fail::Malformed(m) => Fail::Malformed(format!("{}{}", probe_prefix(&call), m)),
+                })?);
+            }
+        }
+        Ok(out)
+    }
+}
+
+// --- random numbers -----------------------------------------------------------------
+
+/// A small, seedable random number generator for solutions that need randomness
+/// (shuffle an array, pick a random index, sample a point), since std has none and
+/// the sandbox can't fetch the `rand` crate (docs/adr/0007, decision 5).
+///
+/// ```ignore
+/// use shikomi_prelude::Rng;
+/// let mut rng = Rng::new();            // seeded from the OS
+/// let i = rng.gen_range(0..nums.len()); // uniform in [0, len)
+/// let x = rng.gen_range(-1.0..1.0);     // uniform f64 in [-1, 1)
+/// rng.shuffle(&mut nums);
+/// ```
+///
+/// **Algorithm.** xoshiro256** (Blackman and Vigna): 256 bits of state, fast,
+/// and statistically strong enough for any distribution test a validator makes.
+/// It is *not* cryptographic, which no judge problem needs. The state is filled
+/// by SplitMix64 from a single `u64` seed, the construction its authors
+/// recommend, so no seed (not even 0) yields the all-zero state it can't leave.
+///
+/// **No modulo bias.** `x % n` over-weights the low values whenever `n` doesn't
+/// divide 2^64. `gen_range` uses Lemire's multiply-and-reject method instead: an
+/// exactly uniform result, and a rejection so rare (probability < n / 2^64) that
+/// it costs a multiply, not a division, on almost every call. The bias is tiny
+/// for a small `n`, but a problem's validator checks a submission's
+/// distribution, so the generator it's told to use shouldn't carry one.
+///
+/// `seeded` gives a fixed sequence, for tests and for reproducing a failure.
+#[derive(Debug, Clone)]
+pub struct Rng {
+    s: [u64; 4],
+}
+
+impl Default for Rng {
+    fn default() -> Rng {
+        Rng::new()
+    }
+}
+
+impl Rng {
+    /// A generator seeded from `/dev/urandom`. If that can't be read (a sandbox
+    /// without /dev), the seed comes from std's `RandomState`, which std seeds
+    /// from the OS's randomness syscall, so it's never a fixed sequence.
+    pub fn new() -> Rng {
+        use std::io::Read;
+        let mut bytes = [0u8; 8];
+        let seed = match std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut bytes)) {
+            Ok(()) => u64::from_le_bytes(bytes),
+            Err(_) => {
+                use std::hash::{BuildHasher, Hasher};
+                std::collections::hash_map::RandomState::new().build_hasher().finish()
+            }
+        };
+        Rng::seeded(seed)
+    }
+
+    /// A generator whose whole sequence is fixed by `seed`.
+    pub fn seeded(seed: u64) -> Rng {
+        let mut x = seed;
+        let mut splitmix = || {
+            x = x.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            let mut z = x;
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            z ^ (z >> 31)
+        };
+        Rng { s: [splitmix(), splitmix(), splitmix(), splitmix()] }
+    }
+
+    /// 64 uniformly random bits.
+    pub fn next_u64(&mut self) -> u64 {
+        let s = &mut self.s;
+        let out = s[1].wrapping_mul(5).rotate_left(7).wrapping_mul(9);
+        let t = s[1] << 17;
+        s[2] ^= s[0];
+        s[3] ^= s[1];
+        s[1] ^= s[2];
+        s[0] ^= s[3];
+        s[2] ^= t;
+        s[3] = s[3].rotate_left(45);
+        out
+    }
+
+    /// Uniform in `[0, n)`, for `n > 0`, by Lemire's method (see the type's docs).
+    fn below(&mut self, n: u64) -> u64 {
+        let mut m = self.next_u64() as u128 * n as u128;
+        if (m as u64) < n {
+            // The low word falls in the biased zone only below 2^64 mod n.
+            let threshold = n.wrapping_neg() % n;
+            while (m as u64) < threshold {
+                m = self.next_u64() as u128 * n as u128;
+            }
+        }
+        (m >> 64) as u64
+    }
+
+    /// A uniform value in `range`: `a..b` or `a..=b` for any integer type, or
+    /// `a..b` for `f64`. Panics on an empty range, like the `rand` crate.
+    pub fn gen_range<T, R: SampleRange<T>>(&mut self, range: R) -> T {
+        range.sample(self)
+    }
+
+    /// A uniform `f64` in `[0, 1)`, from the top 53 bits (an `f64`'s precision).
+    pub fn gen_f64(&mut self) -> f64 {
+        (self.next_u64() >> 11) as f64 * (1.0 / (1u64 << 53) as f64)
+    }
+
+    /// `true` with probability `p` (clamped to [0, 1]).
+    pub fn gen_bool(&mut self, p: f64) -> bool {
+        self.gen_f64() < p
+    }
+
+    /// Shuffle `items` in place, every order equally likely (Fisher-Yates).
+    pub fn shuffle<T>(&mut self, items: &mut [T]) {
+        for i in (1..items.len()).rev() {
+            items.swap(i, self.below(i as u64 + 1) as usize);
+        }
+    }
+
+    /// A uniformly chosen element, or `None` for an empty slice.
+    pub fn choose<'a, T>(&mut self, items: &'a [T]) -> Option<&'a T> {
+        if items.is_empty() { None } else { items.get(self.below(items.len() as u64) as usize) }
+    }
+}
+
+/// A range `Rng::gen_range` can draw from. Implemented for `Range` and
+/// `RangeInclusive` of every primitive integer, and `Range<f64>`.
+pub trait SampleRange<T> {
+    fn sample(self, rng: &mut Rng) -> T;
+}
+
+macro_rules! sample_int {
+    ($($t:ty),*) => {$(
+        impl SampleRange<$t> for ::std::ops::Range<$t> {
+            fn sample(self, rng: &mut Rng) -> $t {
+                assert!(self.start < self.end, "gen_range: empty range {}..{}", self.start, self.end);
+                // i128 holds every span of a 64-bit type, which fits a u64 when half-open.
+                let span = (self.end as i128 - self.start as i128) as u64;
+                (self.start as i128 + rng.below(span) as i128) as $t
+            }
+        }
+        impl SampleRange<$t> for ::std::ops::RangeInclusive<$t> {
+            fn sample(self, rng: &mut Rng) -> $t {
+                let (lo, hi) = (*self.start(), *self.end());
+                assert!(lo <= hi, "gen_range: empty range {}..={}", lo, hi);
+                let span = (hi as i128 - lo as i128) as u128 + 1;
+                // The one span a u64 can't hold is a 64-bit type's whole range,
+                // where every u64 is already a uniform draw.
+                let offset = if span > u64::MAX as u128 { rng.next_u64() } else { rng.below(span as u64) };
+                (lo as i128 + offset as i128) as $t
+            }
+        }
+    )*};
+}
+sample_int!(i8, i16, i32, i64, isize, u8, u16, u32, u64, usize);
+
+impl SampleRange<f64> for ::std::ops::Range<f64> {
+    fn sample(self, rng: &mut Rng) -> f64 {
+        assert!(self.start < self.end, "gen_range: empty range {}..{}", self.start, self.end);
+        let x = self.start + rng.gen_f64() * (self.end - self.start);
+        // Rounding can land exactly on `end` for a wide range; keep it half-open.
+        if x < self.end { x } else { self.start }
     }
 }
 

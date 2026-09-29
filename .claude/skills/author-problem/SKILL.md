@@ -80,7 +80,10 @@ the reference-solution run in step 5 catches it. Integer overflow **panics**
 (overflow checks are on), so pick `i64` wherever a sum or product can pass
 2^31. `memory_limit_mb` must be at least 128, because rustc compiles inside the
 same limit. Each case runs in a fresh process, so statics don't carry over
-between cases.
+between cases. There's no `rand` crate: a problem that needs randomness puts
+`use shikomi_prelude::Rng;` in its Rust starter, and solutions use `Rng::new()`,
+`gen_range(0..n)`/`gen_range(a..=b)` (any integer type, or `f64`), `gen_f64`,
+`shuffle` and `choose`.
 
 A Rust **operations** problem needs no method signatures in the file either: the
 judge calls `ClassName::new(...)` with the first argument list, then each method,
@@ -178,8 +181,7 @@ never both.
     whose results arrive as `probe_results`:
     `[{"op": "pickIndex", "repeat": 4000}]` for a distribution, or
     `[{"op": "decode", "args": [null], "refs": {"0": 1}}]` to feed op 1's result
-    back in (`refs` and `repeat` don't combine; Python only until the Rust judge
-    makes probe calls, ADR-0007 step 4b). Probes reach the submission's
+    back in (`refs` and `repeat` don't combine; both languages make them). Probes reach the submission's
     process with the input, so they hold no secrets. Don't use the older
     `instance` argument: that form runs next to the submission, where it can read
     `expected` and its verdict can be forged (seeding warns about it).
