@@ -17,6 +17,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+from app.comparison import LEGACY_VALIDATOR_LANGUAGE
 from app.judge_budget import fits_job_timeout, max_cases_within_job_timeout
 from app.sandbox import ALL_NODE_TYPES, profile_for, rust_method_name
 from app.schemas.solution import SolutionIn
@@ -382,23 +383,44 @@ class ProblemIn(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def _custom_validator_requires_python_and_code(self) -> "ProblemIn":
-        # judge/harness.py's custom_validator mode (DESIGN.md §5.4) is
-        # Python-only for v1 (harness.js/harness_sql.py don't implement it) and
-        # needs the problem author's `validator_code` to actually check
-        # anything — reject a missing/empty one at authoring time rather than
-        # letting every submission to the problem silently pass/fail against
-        # whatever the harness falls back to. The comparison is shared, so a
-        # second language would be judged by a harness that can't run it.
-        if self.comparison.get("mode") == "custom_validator":
-            if [v.language for v in self.languages] != ["python"]:
+    def _custom_validator_for_every_language(self) -> "ProblemIn":
+        # A custom validator is code, and each harness runs only its own language's
+        # (DESIGN.md §5.4, docs/adr/0007-custom-validators-in-every-language.md), so
+        # `validator_code` maps language → source, one entry per language the problem
+        # is offered in. The bare-string form every existing file uses is Python's
+        # validator; it's lifted to `{"python": s}` here, so the stored row is always
+        # the map (app/comparison.py still reads an old row's string the same way).
+        #
+        # Each rule is checked at authoring time rather than left to surface later:
+        # a language whose harness can't run validators, or one with no validator,
+        # would make every submission in it a judge_error; an empty validator would
+        # judge nothing. A key for a language the problem doesn't offer is almost
+        # certainly a typo (`"rs"`), and would be silently dead code.
+        if self.comparison.get("mode") != "custom_validator":
+            return self
+        code = self.comparison.get("validator_code")
+        if isinstance(code, str):
+            code = {LEGACY_VALIDATOR_LANGUAGE: code}
+        if not isinstance(code, dict) or not code:
+            raise ValueError(
+                "comparison mode 'custom_validator' requires 'validator_code': a map of "
+                "language to validator source (or one Python source string)")
+        offered = [v.language for v in self.languages]
+        for lang in offered:
+            if not profile_for(lang).custom_validator:
                 raise ValueError(
-                    "comparison mode 'custom_validator' is only supported when "
-                    "'python' is the problem's only language")
-            code = self.comparison.get("validator_code")
-            if not isinstance(code, str) or not code.strip():
+                    f"language '{lang}' does not support comparison mode 'custom_validator'")
+            source = code.get(lang)
+            if not isinstance(source, str) or not source.strip():
                 raise ValueError(
-                    "comparison mode 'custom_validator' requires a non-empty 'validator_code' string")
+                    f"comparison mode 'custom_validator' needs a non-empty validator for "
+                    f"language '{lang}' in 'validator_code'")
+        extra = sorted(set(code) - set(offered))
+        if extra:
+            raise ValueError(
+                f"'validator_code' has a validator for {extra}, which the problem's "
+                f"'languages' doesn't list")
+        self.comparison = {**self.comparison, "validator_code": code}
         return self
 
     @model_validator(mode="after")

@@ -164,6 +164,58 @@ async def test_a_cancelled_judge_job_is_marked_judge_error_and_releases_the_lock
     assert lock not in redis.store                         # the in-flight lock was released
 
 
+async def _set_comparison(session_factory, problem_id, comparison):
+    from app.models import Problem
+    async with session_factory() as s:
+        (await s.get(Problem, uuid.UUID(problem_id))).comparison = comparison
+        await s.commit()
+
+
+@pytest.mark.parametrize("stored", [
+    {"python": "def validate(*a, **k): return True", "rust": "fn validate() {}"},
+    "def validate(*a, **k): return True",  # a row seeded before the per-language map
+])
+async def test_the_worker_hands_the_harness_its_languages_validator(
+        session_factory, make_problem, make_user, monkeypatch, stored):
+    """ADR-0007: the harness gets one source string, for the submission's language."""
+    from worker.aggregate import Verdict
+    pid, _ = await make_problem()
+    await _set_comparison(session_factory, pid, {"mode": "custom_validator", "validator_code": stored})
+    user, _ = await make_user()
+    sid = await _pending(session_factory, user["id"], pid)
+    seen = {}
+
+    async def fake_run_judgement(**kwargs):
+        seen.update(kwargs)
+        return Verdict("accepted", 1.0, [], passed=0, total=0)
+
+    monkeypatch.setattr(judge_mod, "SessionLocal", session_factory)
+    monkeypatch.setattr(judge_mod, "run_judgement", fake_run_judgement)
+    await judge_mod.judge_submission({"redis": FakeRedis()}, sid, "submit")
+
+    assert seen["comparison"] == {"mode": "custom_validator",
+                                  "validator_code": "def validate(*a, **k): return True"}
+
+
+async def test_no_validator_for_the_submissions_language_is_a_judge_error(
+        session_factory, make_problem, make_user, monkeypatch):
+    """Never a fallback to another language's validator (ADR-0007)."""
+    pid, _ = await make_problem()
+    await _set_comparison(session_factory, pid,
+                          {"mode": "custom_validator", "validator_code": {"rust": "fn validate() {}"}})
+    user, _ = await make_user()
+    sid = await _pending(session_factory, user["id"], pid)
+
+    async def never_called(**_kwargs):
+        raise AssertionError("judged without a validator")
+
+    monkeypatch.setattr(judge_mod, "SessionLocal", session_factory)
+    monkeypatch.setattr(judge_mod, "run_judgement", never_called)
+    await judge_mod.judge_submission({"redis": FakeRedis()}, sid, "submit")
+
+    assert await _status(session_factory, sid) == "judge_error"
+
+
 async def test_cancellation_never_overwrites_a_verdict_that_already_landed(
         session_factory, make_problem, make_user):
     pid, _ = await make_problem()

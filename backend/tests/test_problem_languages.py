@@ -89,11 +89,55 @@ def test_the_shared_memory_limit_must_fit_every_language():
         _file(_variant("python"), _variant("rust"), memory_limit_mb=64))
 
 
-def test_custom_validator_needs_python_to_be_the_only_language():
-    comparison = {"mode": "custom_validator", "validator_code": "def validate(): ..."}
-    ProblemFile.model_validate(_file(comparison=comparison))
-    assert "only language" in _error(
-        _file(_variant("python"), _variant("js"), comparison=comparison))
+def _validator(code):
+    return {"mode": "custom_validator", "validator_code": code}
+
+
+def test_a_validator_string_is_pythons_and_is_stored_as_a_map():
+    """Every existing file's form: one Python source string. It's lifted, so a
+    stored row always holds the per-language map (ADR-0007)."""
+    p = ProblemFile.model_validate(_file(comparison=_validator("def validate(): ...")))
+    assert p.comparison["validator_code"] == {"python": "def validate(): ..."}
+
+
+def test_a_validator_map_loads_unchanged():
+    p = ProblemFile.model_validate(_file(comparison=_validator({"python": "p"})))
+    assert p.comparison == _validator({"python": "p"})
+
+
+def test_every_language_needs_its_own_validator(monkeypatch):
+    """A bare string is Python's validator only. Only Python's harness runs
+    validators today, so pretend Rust's does too, to reach the rule."""
+    import dataclasses
+
+    from app import sandbox
+    monkeypatch.setitem(sandbox.PROFILES, "rust",
+                        dataclasses.replace(sandbox.PROFILES["rust"], custom_validator=True))
+    both = (_variant("python"), _variant("rust"))
+    assert "non-empty validator for language 'rust'" in _error(
+        _file(*both, comparison=_validator("p")))
+    p = ProblemFile.model_validate(_file(*both, comparison=_validator({"python": "p", "rust": "r"})))
+    assert p.comparison["validator_code"] == {"python": "p", "rust": "r"}
+
+
+def test_a_language_whose_harness_cant_run_validators_is_refused():
+    for lang in ("js", "rust"):
+        assert f"language '{lang}' does not support comparison mode 'custom_validator'" in _error(
+            _file(_variant("python"), _variant(lang),
+                  comparison=_validator({"python": "p", lang: "v"})))
+
+
+def test_an_empty_validator_is_refused():
+    assert "non-empty validator for language 'python'" in _error(
+        _file(comparison=_validator({"python": "  "})))
+    assert "requires 'validator_code'" in _error(_file(comparison=_validator({})))
+    assert "requires 'validator_code'" in _error(_file(comparison={"mode": "custom_validator"}))
+
+
+def test_a_validator_for_a_language_not_offered_is_refused():
+    """Almost certainly a typo, and it would be dead code."""
+    assert "doesn't list" in _error(
+        _file(comparison=_validator({"python": "p", "rs": "v"})))
 
 
 def test_sql_problems_only_take_mysql_variants():

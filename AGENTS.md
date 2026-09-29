@@ -411,18 +411,17 @@ slice ships, delete its entry here.
   the bundled starters in several languages (`calm-stretch` is still Python-only).
 
 - **Custom validators in every language**
-  ([ADR-0007](docs/adr/0007-custom-validators-in-every-language.md); step 1, function-mode
-  validators in the parent, shipped). Remaining, in order:
-  (2) `comparison.validator_code` as a per-language map (a bare string lifts to
-  `{"python": s}`), with one resolver shared by the worker and `test_seed_solutions.py`,
-  and a `ProblemIn` rule that every language has an entry (still refusing js/mysql);
+  ([ADR-0007](docs/adr/0007-custom-validators-in-every-language.md); steps 1–2 shipped:
+  function-mode validators run in the parent, and `validator_code` is a per-language map
+  resolved by `app/comparison.py`). Remaining, in order:
   (3) probes as test-case data, in `harness.py` and the Rust harness: extra ops the
   harness appends, with references to earlier results in their own field, results split
   into `actual` + `probe_results`, and the legacy `instance` path kept for any validator
   that doesn't take `probe_results`; after that no validator runs in the child and the
   child never gets `expected`; (4) Rust: a separate validator binary run by the parent
   (non-dumpable, one compile deadline shared with the submission, a compile failure is
-  `judge_error` with its diagnostics hidden), plus a seedable RNG in the prelude;
+  `judge_error` with its diagnostics hidden), plus a seedable RNG in the prelude, then flip
+  `custom_validator=True` on Rust's `SandboxProfile`;
   (5) port the 19 problems in the external problem set, each with a known-wrong solution
   that its validator rejects; (6) remove `instance`.
 

@@ -1,7 +1,8 @@
 # ADR-0007: Custom validators in every language, judged in the trusted parent
 
 - **Status:** Accepted: step 1 (function-mode validators in the parent) implemented in
-  `judge/harness.py`; steps 2–6 are open work (AGENTS.md TODO)
+  `judge/harness.py`, step 2 (the per-language `validator_code` map) in `app/comparison.py`
+  and `ProblemIn`; steps 3–6 are open work (AGENTS.md TODO)
 - **Date:** 2026-09-28
 
 ## Context

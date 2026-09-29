@@ -25,11 +25,14 @@ class Problem(Base, PKMixin, TimestampMixin):
 
     * `comparison` (JSONB) — how the judge decides "correct" (default exact match);
       an object so we can add modes (unordered, float-tolerance) without a schema
-      change. `{"mode": "custom_validator", "validator_code": "..."}` hands the
-      check to problem-authored Python (judge/harness.py, DESIGN.md §5.4) for
-      "any output satisfying property P" problems no fixed answer can express —
-      Python-only: `ProblemIn` rejects it unless Python is the problem's only
-      language.
+      change. `{"mode": "custom_validator", "validator_code": {"python": "..."}}`
+      hands the check to problem-authored code (judge/harness.py, DESIGN.md §5.4)
+      for "any output satisfying property P" problems no fixed answer can express.
+      `validator_code` maps each language to its validator, since each harness runs
+      only its own language (a row seeded before that holds one Python string);
+      app/comparison.py picks the submission's, and `ProblemIn` requires one per
+      language, in a language whose harness can run it (only Python so far,
+      docs/adr/0007-custom-validators-in-every-language.md).
     * `time_limit_ms` / `memory_limit_mb` — the sandbox caps enforced per case.
     * `is_published` — draft vs live; an unpublished problem is invisible to
       every API caller, so an operator can load a draft without exposing it.
@@ -44,7 +47,7 @@ class Problem(Base, PKMixin, TimestampMixin):
     and return type live on `languages` (`ProblemLanguage`, one row per language
     the problem is offered in; docs/adr/0005-multi-language-problems.md). The rules
     that tie them to `kind` (a function name for `"function"`, only `"mysql"` for
-    `"sql"`, `custom_validator` only in Python) span both tables, so no CHECK can
+    `"sql"`, a `custom_validator` for every language) span both tables, so no CHECK can
     express them; `ProblemIn` enforces them for every variant, and the seed loader
     is the only writer.
 

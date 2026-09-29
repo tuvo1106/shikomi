@@ -44,6 +44,9 @@ class SandboxProfile:
             compile), added to the worker's wall-clock budget (`app.judge_budget`).
         function_mode_only: the harness has no `operations` kind, and `ProblemIn` refuses
             that combination at seed time.
+        custom_validator: the harness can run a `custom_validator` written in this language
+            (DESIGN.md §5.4, ADR-0007). `ProblemIn` refuses a validator problem offered in a
+            language without it.
         node_types: the node codecs (`ListNode`, `TreeNode`, ...) the harness implements, as
             the names a problem declares in `params[].type`/`return_type`. `ProblemIn`
             refuses any other node type for this language.
@@ -61,6 +64,7 @@ class SandboxProfile:
     tmpfs_exec: bool = False
     startup_slack_s: float = 0
     function_mode_only: bool = False
+    custom_validator: bool = False
     min_memory_limit_mb: int = 1
     node_types: frozenset[str] = frozenset()
     node_value_range: tuple[int, int] | None = None
@@ -86,7 +90,8 @@ I32_RANGE = (-(2**31), 2**31 - 1)
 
 
 PROFILES = {
-    "python": SandboxProfile("judge_image", "shikomi-judge:latest", node_types=ALL_NODE_TYPES),
+    "python": SandboxProfile("judge_image", "shikomi-judge:latest", custom_validator=True,
+                             node_types=ALL_NODE_TYPES),
     "js": SandboxProfile("judge_image_js", "shikomi-judge-js:latest", function_mode_only=True),
     # The margin over the compile timeout covers the harness's own startup and payload parsing.
     "rust": SandboxProfile("judge_image_rust", "shikomi-judge-rust:latest", tmpfs_size_mb=32,

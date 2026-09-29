@@ -8,6 +8,12 @@ All notable changes to this project are recorded here. The format follows
 
 ### Added
 
+- A `custom_validator` problem's `validator_code` can be a map of language to validator,
+  `{"python": "..."}`, so each language a problem is offered in can have its own
+  (ADR-0007). A single string still works and means Python's; it's stored as the map
+  when seeded, and rows seeded earlier keep working unchanged. Only Python's judge runs
+  validators so far, so a validator problem is still Python-only until the Rust judge
+  gains them.
 - An operations problem's `Iterator` constructor argument now works in Rust: the
   starter takes an `IntIter` (an `Iterator<Item = i32>`), e.g. `fn new(nums: IntIter)`.
   Rebuild the Rust judge image to pick it up. A new starter, *Design a Run Cursor*,

@@ -31,6 +31,11 @@ import pytest
 from rust_runner import rust_results
 from sql_runner import run_sql_container
 
+# The same per-language validator resolution the worker applies (stdlib-only, so
+# importable here with only pytest installed, like rust_runner's app.sandbox).
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "backend"))
+from app.comparison import for_language as comparison_for_language  # noqa: E402
+
 HARNESS_PY = pathlib.Path(__file__).resolve().parents[1] / "harness.py"
 HARNESS_JS = pathlib.Path(__file__).resolve().parents[1] / "harness.js"
 # Overridable so an operator can validate their own problem directory, not just
@@ -128,7 +133,7 @@ def test_seed_solution_passes_its_own_test_cases(problem, variant, title, code):
         "class_name": variant.get("class_name"),
         "user_code": code,
         "test_cases": _cases(problem),
-        "comparison": problem.get("comparison", {"mode": "exact"}),
+        "comparison": comparison_for_language(problem.get("comparison"), variant["language"]),
         "time_limit_ms": problem.get("time_limit_ms", 2000),
         "memory_limit_mb": problem.get("memory_limit_mb", 256),
         "params": variant.get("params", []),
