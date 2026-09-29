@@ -29,7 +29,7 @@ class Problem(Base, PKMixin, TimestampMixin):
       hands the check to problem-authored code (judge/harness.py, DESIGN.md §5.4)
       for "any output satisfying property P" problems no fixed answer can express.
       `validator_code` maps each language to its validator, since each harness runs
-      only its own language (a row seeded before that holds one Python string);
+      only its own language (migration e5a8c2f41d93 converted the old one-string form);
       app/comparison.py picks the submission's, and `ProblemIn` requires one per
       language, in a language whose harness can run it (only Python so far,
       docs/adr/0007-custom-validators-in-every-language.md).

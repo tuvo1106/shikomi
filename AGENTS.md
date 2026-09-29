@@ -411,9 +411,7 @@ slice ships, delete its entry here.
   the bundled starters in several languages (`calm-stretch` is still Python-only).
 
 - **Custom validators in every language**
-  ([ADR-0007](docs/adr/0007-custom-validators-in-every-language.md); steps 1–2 shipped:
-  function-mode validators run in the parent, and `validator_code` is a per-language map
-  resolved by `app/comparison.py`). Remaining, in order:
+  ([ADR-0007](docs/adr/0007-custom-validators-in-every-language.md)), in order:
   (3) probes as test-case data, in `harness.py` and the Rust harness: extra ops the
   harness appends, with references to earlier results in their own field, results split
   into `actual` + `probe_results`, and the legacy `instance` path kept for any validator

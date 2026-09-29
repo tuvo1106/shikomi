@@ -19,23 +19,35 @@ Stdlib-only on purpose, like `app.sandbox`: the judge tests import it with only 
 installed (AGENTS.md "Test suites").
 """
 
-# Before validators were per language, `validator_code` was one Python string. `ProblemIn`
-# lifts that form to `{"python": code}` at seed time, but a row seeded before then still
-# holds the bare string until it's re-seeded, so the resolver reads it the same way.
+# Before validators were per language, `validator_code` was one Python string, and a
+# problem *file* may still say it that way (it's the terse form for a Python-only
+# problem). The database only ever holds the map: `ProblemIn` stores it on seed, and
+# migration e5a8c2f41d93 converted the rows seeded earlier. The string form is read
+# here for files, which the seed-solution tests hand to `for_language` unvalidated.
 LEGACY_VALIDATOR_LANGUAGE = "python"
 
 
 def validator_codes(comparison: dict | None) -> dict:
-    """The comparison's per-language validator map, reading a bare string as Python.
+    """The comparison's per-language validator map, reading a bare string as Python's.
+
+    The one definition of that rule: `ProblemIn` (seed time) and `for_language` (judge
+    time) both call this, so they can't disagree about which language a string belongs to.
 
     Returns `{}` when there's no `validator_code` at all (every fixed-answer mode).
+
+    Raises:
+        ValueError: `validator_code` is neither a string nor a map.
     """
     code = (comparison or {}).get("validator_code")
     if code is None:
         return {}
     if isinstance(code, str):
         return {LEGACY_VALIDATOR_LANGUAGE: code}
-    return dict(code)
+    if isinstance(code, dict):
+        return code
+    raise ValueError(
+        "'validator_code' must be a map of language to validator source (or one Python "
+        f"source string), not {type(code).__name__}")
 
 
 def for_language(comparison: dict | None, language: str) -> dict:
@@ -46,9 +58,9 @@ def for_language(comparison: dict | None, language: str) -> dict:
     dict is never mutated.
 
     Raises:
-        ValueError: a `custom_validator` with no validator for `language`. `ProblemIn`
-            refuses that at seed time, so reaching it means the row was written some other
-            way. It's a judge fault (the worker records `judge_error`), never a guess:
+        ValueError: a `custom_validator` with no validator for `language`, or a malformed
+            `validator_code`. `ProblemIn` refuses both at seed time, so reaching it means
+            the row was written some other way. It's a judge fault (the worker records `judge_error`), never a guess:
             falling back to another language's validator would hand code to a harness that
             can't run it.
     """

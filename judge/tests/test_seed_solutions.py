@@ -28,13 +28,8 @@ import sys
 
 import pytest
 
-from rust_runner import rust_results
+from rust_runner import BACKEND, rust_results
 from sql_runner import run_sql_container
-
-# The same per-language validator resolution the worker applies (stdlib-only, so
-# importable here with only pytest installed, like rust_runner's app.sandbox).
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "backend"))
-from app.comparison import for_language as comparison_for_language  # noqa: E402
 
 HARNESS_PY = pathlib.Path(__file__).resolve().parents[1] / "harness.py"
 HARNESS_JS = pathlib.Path(__file__).resolve().parents[1] / "harness.js"
@@ -127,6 +122,13 @@ def _solution_cases():
 
 @pytest.mark.parametrize("problem,variant,title,code", _solution_cases())
 def test_seed_solution_passes_its_own_test_cases(problem, variant, title, code):
+    # The same per-language validator resolution the worker applies. Stdlib-only, so
+    # it imports with only pytest installed; imported here rather than at module level
+    # so backend/ joins sys.path only when a test runs, as in rust_runner.
+    if str(BACKEND) not in sys.path:
+        sys.path.insert(0, str(BACKEND))
+    from app.comparison import for_language as comparison_for_language
+
     payload = {
         "kind": problem.get("kind", "function"),
         "function_name": variant.get("function_name"),

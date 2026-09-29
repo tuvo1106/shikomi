@@ -173,7 +173,7 @@ async def _set_comparison(session_factory, problem_id, comparison):
 
 @pytest.mark.parametrize("stored", [
     {"python": "def validate(*a, **k): return True", "rust": "fn validate() {}"},
-    "def validate(*a, **k): return True",  # a row seeded before the per-language map
+    "def validate(*a, **k): return True",  # the string form, still read as Python's
 ])
 async def test_the_worker_hands_the_harness_its_languages_validator(
         session_factory, make_problem, make_user, monkeypatch, stored):

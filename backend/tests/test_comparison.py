@@ -22,8 +22,8 @@ def test_the_languages_validator_becomes_the_string_the_harness_expects():
     assert comparison["validator_code"] == {"python": "p", "rust": "r"}
 
 
-def test_a_row_seeded_before_the_map_is_pythons_validator():
-    """Rows keep the bare string until they're re-seeded."""
+def test_a_bare_string_is_pythons_validator():
+    """A problem file's terse form, read unvalidated by the seed-solution tests."""
     legacy = {"mode": "custom_validator", "validator_code": "p"}
     assert for_language(legacy, "python")["validator_code"] == "p"
     assert validator_codes(legacy) == {"python": "p"}
@@ -37,3 +37,10 @@ def test_no_validator_for_the_language_is_an_error_never_a_fallback():
         for_language({"mode": "custom_validator", "validator_code": {"python": "p"}}, "rust")
     with pytest.raises(ValueError):
         for_language({"mode": "custom_validator", "validator_code": {"python": " "}}, "python")
+
+
+@pytest.mark.parametrize("malformed", [123, [["python", "p"]], True])
+def test_a_malformed_validator_code_is_a_clear_error(malformed):
+    """Not a TypeError from `dict(123)`, and a list of pairs isn't quietly a map."""
+    with pytest.raises(ValueError, match="must be a map of language"):
+        for_language({"mode": "custom_validator", "validator_code": malformed}, "python")

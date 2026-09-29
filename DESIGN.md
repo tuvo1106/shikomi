@@ -568,10 +568,11 @@ over many extra calls (a weighted-random-pick distribution check).
 `validator_code` maps each language the problem is offered in to that
 language's validator, since each harness can run only its own language's code
 (a file may give one Python string instead, which `ProblemIn` stores as
-`{"python": s}`; a row seeded before the map still holds the string, and
-`app/comparison.py`'s `for_language` — the one resolver the worker and the
-seed-solution tests share — reads it the same way, and hands each harness the
-plain source string it has always taken). A missing validator for the
+`{"python": s}`; migration `e5a8c2f41d93` converted rows seeded earlier, so a
+stored row is always the map, and its downgrade converts back to the string the
+previous release runs). `app/comparison.py`'s `for_language` — the one resolver
+the worker and the seed-solution tests share — hands each harness the plain
+source string it has always taken. A missing validator for the
 submission's language is a `judge_error`, never a fallback to another
 language's. Python's validator must define `def validate(actual, expected, args,
 instance=None) -> bool`: `actual`/`expected` are the same values the other

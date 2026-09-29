@@ -17,7 +17,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-from app.comparison import LEGACY_VALIDATOR_LANGUAGE
+from app.comparison import validator_codes
 from app.judge_budget import fits_job_timeout, max_cases_within_job_timeout
 from app.sandbox import ALL_NODE_TYPES, profile_for, rust_method_name
 from app.schemas.solution import SolutionIn
@@ -388,8 +388,8 @@ class ProblemIn(BaseModel):
         # (DESIGN.md §5.4, docs/adr/0007-custom-validators-in-every-language.md), so
         # `validator_code` maps language → source, one entry per language the problem
         # is offered in. The bare-string form every existing file uses is Python's
-        # validator; it's lifted to `{"python": s}` here, so the stored row is always
-        # the map (app/comparison.py still reads an old row's string the same way).
+        # validator (app/comparison.py `validator_codes`, the one definition of that
+        # rule); it's stored as the map, so a row is never the string form.
         #
         # Each rule is checked at authoring time rather than left to surface later:
         # a language whose harness can't run validators, or one with no validator,
@@ -398,10 +398,8 @@ class ProblemIn(BaseModel):
         # certainly a typo (`"rs"`), and would be silently dead code.
         if self.comparison.get("mode") != "custom_validator":
             return self
-        code = self.comparison.get("validator_code")
-        if isinstance(code, str):
-            code = {LEGACY_VALIDATOR_LANGUAGE: code}
-        if not isinstance(code, dict) or not code:
+        code = validator_codes(self.comparison)
+        if not code:
             raise ValueError(
                 "comparison mode 'custom_validator' requires 'validator_code': a map of "
                 "language to validator source (or one Python source string)")

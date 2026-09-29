@@ -132,6 +132,7 @@ def test_an_empty_validator_is_refused():
         _file(comparison=_validator({"python": "  "})))
     assert "requires 'validator_code'" in _error(_file(comparison=_validator({})))
     assert "requires 'validator_code'" in _error(_file(comparison={"mode": "custom_validator"}))
+    assert "must be a map of language" in _error(_file(comparison=_validator(["p"])))
 
 
 def test_a_validator_for_a_language_not_offered_is_refused():

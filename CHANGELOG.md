@@ -11,7 +11,8 @@ All notable changes to this project are recorded here. The format follows
 - A `custom_validator` problem's `validator_code` can be a map of language to validator,
   `{"python": "..."}`, so each language a problem is offered in can have its own
   (ADR-0007). A single string still works and means Python's; it's stored as the map
-  when seeded, and rows seeded earlier keep working unchanged. Only Python's judge runs
+  when seeded. Existing deployments need `alembic upgrade head`, which converts problems
+  seeded earlier (its downgrade converts them back). Only Python's judge runs
   validators so far, so a validator problem is still Python-only until the Rust judge
   gains them.
 - An operations problem's `Iterator` constructor argument now works in Rust: the
