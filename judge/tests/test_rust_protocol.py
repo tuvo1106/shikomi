@@ -1189,11 +1189,15 @@ def test_custom_validator_passes_and_fails():
     assert res[0]["output"] == "[0,0,0]"
 
 
-def test_custom_validator_that_panics_is_judge_error_with_the_message():
-    boom = SAME_MULTISET.replace("a == b", 'panic!("validator bug")')
-    res = rust_results(validator_payload(SORTS, boom))
+def test_a_validator_that_panics_is_judge_error_without_its_message():
+    """A panic's message can quote `expected` (`assert_eq!(actual, expected)`), so
+    the user gets a fixed line and the message goes only to the harness's stderr."""
+    boom = SAME_MULTISET.replace("a == b", 'panic!("secret {:?}", _expected)')
+    proc = run_rust_container(json.dumps(validator_payload(SORTS, boom)))
+    res = json.loads(proc.stdout)["results"]
     assert {r["status"] for r in res} == {"judge_error"}
-    assert "custom validator panicked" in res[0]["error"] and "validator bug" in res[0]["error"]
+    assert "custom validator failed" in res[0]["error"] and "secret" not in res[0]["error"]
+    assert "panicked" in proc.stderr and "secret" in proc.stderr
 
 
 def test_a_validator_that_doesnt_compile_is_one_judge_error_without_its_diagnostics():
@@ -1223,6 +1227,48 @@ def test_a_validator_can_print_and_still_give_its_verdict():
     chatty = SAME_MULTISET.replace("    a == b", '    println!("true");\n    println!("{:?}", a);\n    a == b')
     wrong = "fn f(v: Vec<i64>) -> Vec<i64> { vec![0; v.len()] }"
     assert rust_results(validator_payload(wrong, chatty))[0]["status"] == "wrong_answer"
+    # Far more than the harness keeps: the tail is kept, so the verdict survives.
+    flood = SAME_MULTISET.replace("    a == b", '    for _ in 0..20000 { println!("debug line"); }\n    a == b')
+    assert [r["status"] for r in rust_results(validator_payload(SORTS, flood))] == ["passed", "passed"]
+
+
+def test_a_submission_cannot_read_the_validators_source():
+    """validator.rs (and rustc's output, which quotes it) is deleted before any case
+    runs, so a submission can't print the author's code back out of /tmp."""
+    peek = r'''
+fn f(v: Vec<i64>) -> Vec<i64> {
+    let mut seen = String::new();
+    for p in ["/tmp/judge/validator.rs", "/tmp/judge/validator.rustc.stderr", "/tmp/judge/validator"] {
+        if std::fs::metadata(p).is_ok() { seen.push_str(p); }
+    }
+    print!("{}", seen);
+    v
+}
+'''
+    res = rust_results(validator_payload(peek))
+    assert [r["stdout"] for r in res] == ["", ""]
+
+
+def test_the_validator_runs_from_an_execute_only_file():
+    """The memfd is mode 0111, which makes the kernel mark the validator
+    non-dumpable from exec, before its own prctl: it can't read its own program."""
+    self_read = SAME_MULTISET.replace("    a == b", '    std::fs::read("/proc/self/exe").is_err() && a == b')
+    assert [r["status"] for r in rust_results(validator_payload(SORTS, self_read))] == ["passed", "passed"]
+
+
+def test_a_validator_gets_time_to_start_even_when_the_submission_used_the_limit():
+    """A submission that finishes just inside its limit isn't timed out by the
+    validator's own startup: the validator is topped up to a minimum budget."""
+    slow = """fn f(mut v: Vec<i64>) -> Vec<i64> {
+    let t = std::time::Instant::now();
+    while t.elapsed() < std::time::Duration::from_millis(289) {}
+    v.sort();
+    v
+}"""
+    # 5ms of validator work: more than the ~1ms the submission leaves, less than the top-up.
+    working = SAME_MULTISET.replace("    a == b", "    std::thread::sleep(std::time::Duration::from_millis(5));\n    a == b")
+    res = rust_results(validator_payload(slow, working, time_limit_ms=290))
+    assert [r["status"] for r in res] == ["passed", "passed"]
 
 
 def test_a_submission_cannot_replace_the_validator():

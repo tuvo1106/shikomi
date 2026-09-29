@@ -646,15 +646,25 @@ probe_results: &[Json]) -> bool`, with `as_i64`/`as_str`/`as_bool`, forgiving
 compiles it, after the submission and inside the same compile deadline, into a
 program of its own that is never linked with the submission, and runs it once per
 case after the case's process has ended: the request on stdin, the verdict on
-stdout's last line (so a debugging `println!` can't corrupt it), under the case's
-memory limit and with what's left of its time limit. A panic or missing verdict is
-`judge_error`; a validator that doesn't compile is one `judge_error` row whose
-rustc diagnostics go only to the judge's log. **The binary is sealed in memory**:
-a case's process runs as the harness's uid, and `/tmp/judge` is writable by it, so
-a validator binary left there could be replaced by one that always prints `true`.
-Right after compiling, before any submission code has run, the harness copies it
-into a close-on-exec memfd sealed against writes, deletes the file, and executes
-it as `/proc/self/fd/N`; the fd lives only in the non-dumpable harness. Probes
+stdout's last line (the harness keeps stdout's tail, so a debugging `println!`,
+however long, can't push it out), under the case's memory limit and with what's
+left of its time limit. That remainder is topped up to 20ms, enough to start the
+process, from a 2s pool per run, so a submission that finished just inside its limit
+isn't timed out by the validator's startup, and the run's overrun stays a fixed
+amount inside the worker's wall-clock slack. A panic or missing verdict is
+`judge_error`, with a fixed message: the panic's own text (which could quote
+`expected`) goes only to the harness's stderr. A validator that doesn't compile is
+one `judge_error` row whose rustc diagnostics go only to stderr too; a compile
+timeout is the submission's instead when its own compile used over half the shared
+deadline. **The binary is sealed in memory**: a case's process runs as the
+harness's uid, and `/tmp/judge` is writable by it, so a validator binary left there
+could be replaced by one that always prints `true`. Right after compiling, before
+any submission code has run, the harness copies it into a close-on-exec memfd
+sealed against writes, makes it execute-only (so the kernel marks the validator
+non-dumpable from exec, closing the window before its own `prctl` in which a process
+the submission left running could open its stdin or stdout through `/proc`),
+deletes the file along with `validator.rs` and rustc's output, and executes it as
+`/proc/self/fd/N`; the fd lives only in the non-dumpable harness. Probes
 aren't implemented in the Rust harness yet (ADR-0007 step 4b): it refuses a case
 that has them, and `ProblemIn` refuses a Rust variant of a problem that uses them.
 

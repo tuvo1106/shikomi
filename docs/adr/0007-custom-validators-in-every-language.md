@@ -64,7 +64,11 @@ Because the submission can write its own frame to the child's result pipe, it co
    The parent runs it, and it is marked non-dumpable. Its compile shares the compile deadline
    and runs after the submission's, never alongside it, since rustc's peak memory sits inside
    the problem's limit. A validator that fails to compile is one `judge_error`, and its
-   diagnostics are never shown to the user.
+   diagnostics are never shown to the user, nor is a panic's message, which could quote
+   `expected`. A compile timeout is blamed on the submission when its own compile used
+   over half the shared deadline. The validator gets what's left of the case's time
+   limit, topped up to a minimum that covers process startup from a fixed per-run pool,
+   so the run's budget stays bounded.
 5. **A small RNG in the Rust prelude.** std has no random numbers and the sandbox has no
    crates, and 8+ of these problems need randomness. The RNG is seeded from `/dev/urandom`, and
    seed tests can pin the seed.

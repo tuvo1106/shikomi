@@ -359,9 +359,13 @@ and `playwright`.
   **Never execute (or trust) a file under `/tmp` after a case has run.** A case's process
   has the harness's uid, and `/tmp/judge` is writable by it, so any binary or data left
   there can be swapped by the submission. The Rust harness's custom validator is
-  compiled before any case runs and moved into a sealed, close-on-exec memfd (harness.rs
-  `sealed_copy`); the submission's own binary may stay on disk, since swapping it only
-  changes the submission's own behaviour.
+  compiled before any case runs and moved into a sealed, close-on-exec, execute-only
+  memfd (harness.rs `sealed_copy`), and its source and rustc's output are deleted too;
+  the submission's own binary may stay on disk, since swapping it only changes the
+  submission's own behaviour. The same goes for *reading*: anything the problem's author
+  wrote that's left in `/tmp` can be printed by a case, and a process that escaped the
+  group kill (`setsid`) outlives the case, so a later process holding secrets must be
+  non-dumpable from exec (an unreadable program file), not just after its own `prctl`.
 
 - **Rust calls each op by its snake_case name.** The shared cases spell an op once for
   every language (`getState`), and the Rust glue calls `get_state`. The mapping exists
@@ -431,7 +435,12 @@ slice ships, delete its entry here.
   the probe form (a converter that does this mechanically, and passes all their reference
   solutions, was proven on a copy), each with a known-wrong solution its validator
   rejects; (6) remove the `instance` form from `harness.py`, after which no validator
-  runs in the child and the child never gets `expected`.
+  runs in the child and the child never gets `expected`. Follow-ups found in review:
+  the Rust harness recompiles a problem's validator for every submission (~150ms+ of the
+  compile deadline each time); cache the binary by a hash of its source, or build it at
+  seed time. And `harness.py` still shows a validator exception's message to the user
+  (`ValidatorError(str(exc))`), which could quote `expected`; the Rust harness now shows a
+  fixed line and logs the detail to stderr, and Python should match.
 
 - **Auth roadmap:** revisit session strategy (currently JWT-in-memory access +
   httpOnly refresh cookie — consider server-side sessions / cookie-based access

@@ -13,8 +13,9 @@ All notable changes to this project are recorded here. The format follows
   &[Json]) -> bool`, next to the Python one in `validator_code`. The judge compiles it
   into its own program and runs it once per case, after the submission's code has
   finished. The submission can't replace it, because it runs from a sealed in-memory
-  copy rather than a file. A validator that doesn't compile or panics is a
-  `judge_error`, and its compiler output isn't shown to the user. Probes aren't
+  copy rather than a file, and it can't read the validator's source. A validator that
+  doesn't compile or panics is a `judge_error`, and neither its compiler output nor its
+  panic message (which could quote the expected answer) is shown to the user. Probes aren't
   supported in Rust yet. Rebuild the Rust judge image to pick this up.
 - **Probes** for operations problems with a `custom_validator`: a test case can list
   extra calls the judge makes on the instance after the replay, such as

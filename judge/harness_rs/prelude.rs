@@ -1521,6 +1521,9 @@ pub mod validator {
     pub fn __entry(validate: fn(&Json, &Json, &Json, &[Json]) -> bool) -> i32 {
         // Non-dumpable, like harness.rs itself: this process holds `expected`, and
         // a process the submission left running (same uid) mustn't read it back.
+        // harness.rs already runs this program from an execute-only file, which
+        // makes it non-dumpable from exec (there's no window before this line);
+        // this makes it hold however the program is started.
         unsafe { prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) };
         let mut input = String::new();
         if std::io::stdin().read_to_string(&mut input).is_err() {
