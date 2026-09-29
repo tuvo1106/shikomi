@@ -102,6 +102,7 @@ erDiagram
         jsonb input
         jsonb expected
         bool is_sample
+        jsonb probes
         uuid id PK
         timestamptz created_at
         timestamptz updated_at

@@ -2,7 +2,8 @@
 
 - **Status:** Accepted: step 1 (function-mode validators in the parent) implemented in
   `judge/harness.py`, step 2 (the per-language `validator_code` map) in `app/comparison.py`
-  and `ProblemIn`; steps 3–6 are open work (AGENTS.md TODO)
+  and `ProblemIn`, step 3 (probes) in `harness.py`, `ProbeIn` and `test_cases.probes`;
+  steps 4–6 are open work (AGENTS.md TODO)
 - **Date:** 2026-09-28
 
 ## Context
@@ -39,18 +40,23 @@ Because the submission can write its own frame to the child's result pipe, it co
    step 1. The validator gets whatever is left of the case's `time_limit_ms` after the
    submission's run, so a case's total stays inside the budget `app/judge_budget.py` plans for,
    and a runaway validator is still `time_limit_exceeded`.
-2. **Probes replace `instance`.** A test case may carry extra ops for the harness to append to
-   the replay. A probe's argument may reference an earlier op's result, which covers
-   `decode(encode(x))`. The child returns the full result list; the parent splits it into
-   `actual` (the case's own ops: stored and shown to the user) and `probe_results`, and the
-   validator becomes `validate(actual, expected, args, probe_results)`. Probes are **test-case
-   data**, generated once per problem, not code: op names are already shared across languages,
-   so every harness reads the same list, and seed-time checks (such as Rust's op-name mapping)
-   can see them.
+2. **Probes replace `instance`.** A test case may carry extra calls for the harness to make on
+   the instance after the replay: `{"op", "args", "refs", "repeat"}`. `refs` fills an argument
+   with one of the case's own op results (`{"0": 1}`: argument 0 is op 1's result), which covers
+   `decode(encode(x))`, and `repeat` covers a distribution over thousands of calls. The child
+   returns the probes' results separately from `actual` (the case's own ops: stored and shown to
+   the user), and the validator becomes `validate(actual, expected, args, probe_results)`; the
+   harness tells it from the older form by that parameter. Probes are **test-case data**
+   (`test_cases.probes`), not code: op names are already shared across languages, so every
+   harness reads the same list, and seed-time checks (such as Rust's op-name mapping) can see
+   them. Converting the 13 operations validators is mechanical: each old `instance.m(...)` call
+   becomes `next(_probe)` over `_probe = iter(probe_results)`, with the same calls generated as
+   each case's probes.
 3. **`validator_code` becomes a per-language map** inside `comparison`:
    `{"python": "...", "rust": "..."}`, where a bare string lifts to `{"python": s}` (the same
    precedent as a solution's `code` map, ADR-0005). It stays in the `comparison` JSONB, which no
-   API response exposes, so no migration is needed. One shared resolver picks the variant's
+   API response exposes; a data migration converts stored strings, and its downgrade converts
+   them back so a rollback still judges them. One shared resolver picks the variant's
    string for the payload, so every harness keeps receiving `validator_code: str`. A language
    may later fall back to the Python validator where its judge image ships Python.
 4. **Rust** compiles the validator into a separate binary, never linked with the submission.
@@ -65,10 +71,11 @@ Because the submission can write its own frame to the child's result pipe, it co
 Order of work (progress is on the Status line): (1) function-mode validators in the parent;
 (2) the `validator_code` map, resolver and `ProblemIn` rule, with a data migration so stored
 rows are always the map and a rollback converts them back to the string the previous release
-can run; (3) probes in both harnesses, keeping the legacy `instance` path
-for any validator that doesn't take `probe_results`, since the problem set lives in a separate
-repo and migrates on its own schedule; (4) the Rust validator binary and prelude RNG; (5) port
-the problems; (6) remove `instance`.
+can run; (3) probes in `harness.py`, keeping the older `instance` form for any validator that
+doesn't take `probe_results`, since the problem set lives in a separate repo and migrates on its
+own schedule; (4) the Rust validator binary, probes in the Rust harness (moved here from step 3:
+Rust can't run a validator to use them before this) and the prelude RNG; (5) port the problems;
+(6) remove `instance`.
 
 ## Alternatives considered
 

@@ -79,8 +79,10 @@ def _run_harness(payload, language="python", timeout=15):
 def _cases(problem):
     # Seed JSON keys test cases `ordinal`; the harness protocol keys them `id` —
     # same field, different name at each layer (DESIGN.md §3.3 vs §5.3).
+    # `probes` rides along when a case has them, as the worker sends it (ADR-0007).
     return [
-        {"id": tc["ordinal"], "input": tc["input"], "expected": tc.get("expected")}
+        {"id": tc["ordinal"], "input": tc["input"], "expected": tc.get("expected"),
+         **({"probes": tc["probes"]} if tc.get("probes") else {})}
         for tc in problem["test_cases"]
     ]
 

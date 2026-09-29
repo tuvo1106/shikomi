@@ -165,6 +165,19 @@ never both.
     the statement requires an `ORDER BY`;
   - `"float_tolerance"` (+ `"epsilon"`);
   - `"any_of"` when several answers are acceptable.
+  - `"custom_validator"` when no list of answers can express "correct" (a round
+    trip, "no two adjacent equal", a random distribution). `validator_code` is a
+    map of language to validator, Python only so far (DESIGN.md §5.4). Write the
+    Python one as `def validate(actual, expected, args, probe_results) -> bool`.
+    In an operations problem, when the check needs more calls than the case
+    makes, give the case `probes`, extra calls the judge makes after the replay,
+    whose results arrive as `probe_results`:
+    `[{"op": "pickIndex", "repeat": 4000}]` for a distribution, or
+    `[{"op": "decode", "args": [null], "refs": {"0": 1}}]` to feed op 1's result
+    back in (`refs` and `repeat` don't combine). Probes reach the submission's
+    process with the input, so they hold no secrets. Don't use the older
+    `instance` argument: that form runs next to the submission, where it can read
+    `expected` and its verdict can be forged (seeding warns about it).
 - `tags` describe the technique the **shipped solutions** use, not the topic.
   Reuse the existing vocabulary before inventing a tag. Regenerate it from the
   problem directory you're adding to:

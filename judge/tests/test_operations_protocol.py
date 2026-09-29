@@ -309,3 +309,198 @@ def test_custom_validator_sees_constructor_args_before_the_submission_mutated_th
     res = results(payload(keeps_and_clears, [case(0, ["C", "size"], [[[1, 2, 3]], []], None)],
                           comparison={"mode": "custom_validator", "validator_code": size_matches_input}))
     assert res[0]["status"] == "wrong_answer"
+
+
+# --- probes: judge-added calls, checked in the parent (ADR-0007) --------------
+# A probe-form validator (`validate(actual, expected, args, probe_results)`) gets
+# the results of the case's probes instead of the live instance, so it runs in
+# the trusted parent. Probes run in the child on the same instance, after the
+# replay.
+
+PROBE_ROUND_TRIP = (
+    "def validate(actual, expected, args, probe_results):\n"
+    "    return probe_results == [args[1][1][0]]\n"
+)
+
+
+def probe_case(i, ops, args, probes, expected=None):
+    return {**case(i, ops, args, expected), "probes": probes}
+
+
+def _validator(code):
+    return {"mode": "custom_validator", "validator_code": code}
+
+
+DECODE_OP_1 = [{"op": "decode", "args": [None], "refs": {"0": 1}}]
+
+
+def test_a_probe_ref_feeds_an_earlier_result_back_in():
+    """`decode(encode(x)) == x`: the probe's argument is op 1's result."""
+    res = results(payload(CODEC, [probe_case(0, ["Codec", "encode"], [[], ["https://a.b/c"]], DECODE_OP_1)],
+                          class_name="Codec", comparison=_validator(PROBE_ROUND_TRIP)))
+    assert res[0]["status"] == "passed", res[0]["error"]
+    assert res[0]["output"] == '[null,"http://tiny/0"]'  # `actual` excludes the probes
+
+
+def test_a_broken_round_trip_is_a_wrong_answer():
+    wrong = CODEC.replace("return self.store[short_url.rsplit('/', 1)[-1]]", "return 'nope'")
+    res = results(payload(wrong, [probe_case(0, ["Codec", "encode"], [[], ["https://a.b/c"]], DECODE_OP_1)],
+                          class_name="Codec", comparison=_validator(PROBE_ROUND_TRIP)))
+    assert res[0]["status"] == "wrong_answer"
+
+
+def test_a_probe_that_raises_is_the_submissions_runtime_error_labelled_as_judge_added():
+    """Unlike an older-form validator's own `instance.decode(...)` (judge_error),
+    the harness made this call, so a raise is the submission's bug."""
+    never_stores = CODEC.replace("self.store[key] = long_url", "pass")
+    res = results(payload(never_stores, [probe_case(0, ["Codec", "encode"], [[], ["https://a.b/c"]],
+                                                    DECODE_OP_1)],
+                          class_name="Codec", comparison=_validator(PROBE_ROUND_TRIP)))
+    assert res[0]["status"] == "runtime_error"
+    assert "call the judge added" in res[0]["error"]
+    assert "decode(), call 1 of 1" in res[0]["error"]
+    assert "KeyError" in res[0]["error"]
+
+
+def test_repeat_makes_the_same_call_n_times():
+    counter = (
+        "class C:\n"
+        "    def __init__(self):\n"
+        "        self.n = 0\n"
+        "    def tick(self):\n"
+        "        self.n += 1\n"
+        "        return self.n\n"
+    )
+    counts = (
+        "def validate(actual, expected, args, probe_results):\n"
+        "    return probe_results == list(range(2, 1002))\n"
+    )
+    res = results(payload(counter, [probe_case(0, ["C", "tick"], [[], []], [{"op": "tick", "repeat": 1000}])],
+                          comparison=_validator(counts)))
+    assert res[0]["status"] == "passed", res[0]["error"]
+
+
+def test_probes_run_inside_the_case_time_limit():
+    slow = (
+        "import time\n"
+        "class C:\n"
+        "    def __init__(self):\n"
+        "        pass\n"
+        "    def tick(self):\n"
+        "        time.sleep(0.01)\n"
+    )
+    accept = "def validate(actual, expected, args, probe_results):\n    return True\n"
+    res = results(payload(slow, [probe_case(0, ["C"], [[]], [{"op": "tick", "repeat": 100}])],
+                          comparison=_validator(accept), time_limit_ms=300))
+    assert res[0]["status"] == "time_limit_exceeded"
+
+
+def test_a_probe_form_validator_cannot_be_forged_or_read_expected():
+    """The operations counterpart of test_protocol.py's forge/peek tests: a
+    probe-form validator runs in the parent, so the child gets no `expected` and
+    its verdict frame isn't trusted."""
+    forge = (
+        "import json, os, sys\n"
+        "class C:\n"
+        "    def __init__(self):\n"
+        "        frame = sys._getframe()\n"
+        "        while frame:\n"
+        "            m = frame.f_locals.get('message')\n"
+        "            if isinstance(m, dict) and 'input' in m:\n"
+        "                break\n"
+        "            frame = frame.f_back\n"
+        "        leaked = 'expected' in m\n"
+        "        reply = {'status': 'ok', 'actual': [leaked], 'passed': True,\n"
+        "                 'probe_results': [], 'runtime_ms': 0, 'stdout': ''}\n"
+        "        os.write(int(sys.argv[2]), (json.dumps(reply) + '\\n').encode())\n"
+        "        os._exit(0)\n"
+    )
+    wants_secret = (
+        "def validate(actual, expected, args, probe_results):\n"
+        "    return actual == ['the secret']\n"
+    )
+    res = results(payload(forge, [case(0, ["C"], [[]], "the secret")],
+                          comparison=_validator(wants_secret)))
+    assert res[0]["status"] == "wrong_answer"
+    assert res[0]["output"] == "[false]"  # `expected` never reached the child
+
+
+def test_a_reply_missing_probe_results_is_a_runtime_error_not_a_judge_error():
+    """A forged reply with the wrong number of probe results mustn't reach the
+    validator (whose resulting crash would blame the author)."""
+    forge = (
+        "import json, os, sys\n"
+        "class C:\n"
+        "    def __init__(self):\n"
+        "        reply = {'status': 'ok', 'actual': [None], 'probe_results': [1],\n"
+        "                 'runtime_ms': 0, 'stdout': ''}\n"
+        "        os.write(int(sys.argv[2]), (json.dumps(reply) + '\\n').encode())\n"
+        "        os._exit(0)\n"
+        "    def tick(self):\n"
+        "        return 1\n"
+    )
+    indexes = "def validate(actual, expected, args, probe_results):\n    return probe_results[2] == 1\n"
+    res = results(payload(forge, [probe_case(0, ["C"], [[]], [{"op": "tick", "repeat": 3}])],
+                          comparison=_validator(indexes)))
+    assert res[0]["status"] == "runtime_error"
+    assert "didn't account for every check" in res[0]["error"]
+
+
+def test_a_probe_form_validator_works_without_probes():
+    """Group B problems: a validator that replays the ops against a model needs
+    no probes, only the new signature, to move to the parent."""
+    res = results(payload(LRU_CACHE, [case(0, ["LRUCache", "put", "get"], [[1], [1, 1], [1]], None)],
+                          class_name="LRUCache",
+                          comparison=_validator("def validate(actual, expected, args, probe_results):\n"
+                                                "    return probe_results == [] and actual[2] == 1\n")))
+    assert res[0]["status"] == "passed", res[0]["error"]
+
+
+def test_a_malformed_probe_is_a_judge_error():
+    """A ref past the case's ops is an authoring bug (seed validation refuses it)."""
+    res = results(payload(CODEC, [probe_case(0, ["Codec", "encode"], [[], ["u"]],
+                                             [{"op": "decode", "args": [None], "refs": {"0": 9}}])],
+                          class_name="Codec", comparison=_validator(PROBE_ROUND_TRIP)))
+    assert res[0]["status"] == "judge_error"
+    assert "malformed probe" in res[0]["error"]
+
+
+def test_a_probe_cannot_change_actual_through_returned_internal_state():
+    """`getAll` returns the instance's own list; the probes then append to it.
+    `actual` is what `getAll` returned at the time, not the list afterwards."""
+    leaky = (
+        "class C:\n"
+        "    def __init__(self):\n"
+        "        self.items = []\n"
+        "    def getAll(self):\n"
+        "        return self.items\n"
+        "    def add(self):\n"
+        "        self.items.append(1)\n"
+    )
+    empty_then_three = (
+        "def validate(actual, expected, args, probe_results):\n"
+        "    return actual == [None, []]\n"
+    )
+    res = results(payload(leaky, [probe_case(0, ["C", "getAll"], [[], []], [{"op": "add", "repeat": 3}])],
+                          comparison=_validator(empty_then_three)))
+    assert res[0]["status"] == "passed", res[0]
+    assert res[0]["output"] == "[null,[]]"
+
+
+def test_an_unencodable_result_is_the_submissions_runtime_error_not_a_judge_error():
+    """`refs` read the JSON snapshot, so the harness never copies an object the
+    submission returned; one it can't encode fails as the submission's own error."""
+    returns_a_generator = (
+        "class Codec:\n"
+        "    def __init__(self):\n"
+        "        pass\n"
+        "    def encode(self, s):\n"
+        "        return (c for c in s)\n"
+        "    def decode(self, s):\n"
+        "        return s\n"
+    )
+    res = results(payload(returns_a_generator,
+                          [probe_case(0, ["Codec", "encode"], [[], ["abc"]], DECODE_OP_1)],
+                          class_name="Codec", comparison=_validator(PROBE_ROUND_TRIP)))
+    assert res[0]["status"] == "runtime_error"
+    assert "not JSON serializable" in res[0]["error"]
