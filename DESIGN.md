@@ -633,25 +633,24 @@ generator, an async `__call__`) is a `judge_error` too, since that value is alwa
 truthy. Seeding refuses these, and a call that won't bind, when the source makes
 plain which `validate` runs, by one rule: the identifier `validate` occurs nowhere
 but as the name of top-level `def`s and as the callee of calls, so the last such def
-is what's bound. That def must also be undecorated, or seeding doesn't decide. Any other occurrence (an assignment, an import,
-a same-named local even in an unrelated function, handing it to `update_wrapper`)
-is left to the harness's load-time check, which the seed-solution tests exercise:
-deferring on a harmless shadow is the price of a rule simple enough to be obviously
-right (a list of special-cased rebinding spellings, the rejected alternative, kept
-missing one). It reads the
-script as written: problem authors are trusted maintainers, so it's there to catch
-honest mistakes, and rebinding `validate` by reflection at load time (`globals()`,
-frames) is out of scope. Whether the call binds is decided by
-`inspect.Signature.bind` itself, on a signature built from the def's parameter names
-and kinds, so the check matches the harness's and evaluates none of the validator's
-code.
+is what's bound. That def must also be undecorated, or seeding doesn't decide. Any
+other occurrence (an assignment, an import, a same-named local even in an unrelated
+function, handing it to `update_wrapper`) is left to the harness's load-time check,
+which the seed-solution tests exercise: deferring on a harmless shadow is the price
+of a rule simple enough to be obviously right (a list of special-cased rebinding
+spellings, the rejected alternative, kept missing one). It reads the script as
+written: problem authors are trusted maintainers, so it's there to catch honest
+mistakes, and rebinding `validate` by reflection at load time (`globals()`, frames)
+is out of scope. Whether the call binds is decided by `inspect.Signature.bind`
+itself, on a signature built from the def's parameter names and kinds, so the check
+matches the harness's and evaluates none of the validator's code.
 Source that doesn't compile is refused outright.
 In the Python judge, a returned value with anything more than 511 levels below it
 (the value itself at depth 0) is that case's `runtime_error`: the Rust prelude's
 parser stops past depth 512, and the Rust child reports the answer one level down in
-its result object, so both judges carry the same returned answers (an author's
-`expected` sits three levels down in the Rust payload, so it can nest only 509
-levels there, which nothing checks yet: AGENTS.md). It's checked where the
+its result object, so both judges carry the same returned answers (a case's
+`input` and `expected` sit three levels down in the Rust payload, so they can nest
+only 509 levels there, which nothing checks yet: AGENTS.md). It's checked where the
 reply comes in, before comparing or validating recurses on it, in every comparison
 mode, and the parent's recursion limit is raised so both can walk a value up to that
 depth. The JS judge has no cap yet (AGENTS.md).
