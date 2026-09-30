@@ -188,9 +188,9 @@ never both.
     `[{"op": "pickIndex", "repeat": 4000}]` for a distribution, or
     `[{"op": "decode", "args": [null], "refs": {"0": 1}}]` to feed op 1's result
     back in (`refs` and `repeat` don't combine; both languages make them). Probes reach the submission's
-    process with the input, so they hold no secrets. Don't use the older
-    `instance` argument: that form runs next to the submission, where it can read
-    `expected` and its verdict can be forged (seeding warns about it).
+    process with the input, so they hold no secrets. The older `instance`
+    argument is gone (seeding refuses it): a validator sees results, never the
+    live object.
 - `tags` describe the technique the **shipped solutions** use, not the topic.
   Reuse the existing vocabulary before inventing a tag. Regenerate it from the
   problem directory you're adding to:

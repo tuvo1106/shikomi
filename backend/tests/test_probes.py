@@ -56,11 +56,14 @@ def test_probes_need_a_custom_validator():
         _file([DECODE], comparison={"mode": "exact"}))
 
 
-def test_probes_need_a_validator_that_takes_probe_results():
-    """The harness sends probes only to the probe form, so an older-form validator
-    would never see them."""
+def test_the_older_instance_form_is_refused_in_every_mode():
+    """It ran next to the submission in operations mode (ADR-0007), and the
+    harness now refuses it, so seeding does too, in function mode as well."""
     older = "def validate(actual, expected, args, instance=None):\n    return True\n"
-    assert "take 'probe_results'" in _error(_file([DECODE], validator=older))
+    assert "the older `instance` form is gone" in _error(_file(None, validator=older))
+    function = [{"language": "python", "function_name": "f", "starter_code": "c", "params": []}]
+    assert "the older `instance` form is gone" in _error(
+        _file(None, kind="function", languages=function, validator=older))
 
 
 def test_a_validator_that_cant_be_parsed_is_left_to_the_harness():
@@ -136,22 +139,16 @@ def test_the_last_def_validate_is_the_one_checked_as_it_is_the_one_that_runs():
     older_then_probe = "def validate(actual, expected, args, instance=None):\n    return 1\n" + PROBE_VALIDATOR
     ProblemFile.model_validate(_file([DECODE], validator=older_then_probe))
     probe_then_older = PROBE_VALIDATOR + "def validate(actual, expected, args, instance=None):\n    return 1\n"
-    assert "take 'probe_results'" in _error(_file([DECODE], validator=probe_then_older))
+    assert "the older `instance` form is gone" in _error(_file([DECODE], validator=probe_then_older))
 
 
 def test_a_positional_only_probe_results_doesnt_count():
     """The harness passes it by keyword, which a positional-only parameter refuses."""
     positional = "def validate(actual, expected, args, probe_results, /):\n    return True\n"
-    assert "take 'probe_results'" in _error(_file([DECODE], validator=positional))
+    assert "the older `instance` form is gone" in _error(_file([DECODE], validator=positional))
 
 
-def test_an_older_form_operations_validator_loads_with_a_warning():
-    """It still runs (in the child), so it isn't refused until problem sets that
-    use it are converted, but the author hears why it's weaker."""
-    older = "def validate(actual, expected, args, instance=None):\n    return True\n"
-    warned = ProblemFile.model_validate(
-        {**_file(None, validator=older), "wrong_solutions": [WRONG]}).authoring_warnings()
-    assert len(warned) == 1 and "can read `expected`" in warned[0]
+def test_a_validator_with_a_wrong_solution_has_no_warnings():
     assert ProblemFile.model_validate(
         {**_file(None), "wrong_solutions": [WRONG]}).authoring_warnings() == []
 
@@ -167,7 +164,6 @@ def test_a_validator_with_no_wrong_solution_warns_per_language():
 
 def test_the_seed_cli_prints_authoring_warnings(tmp_path, capsys):
     from app.cli import validate
-    older = "def validate(actual, expected, args, instance=None):\n    return True\n"
-    (tmp_path / "p.json").write_text(json.dumps(_file(None, validator=older)))
+    (tmp_path / "p.json").write_text(json.dumps(_file(None)))
     assert validate(tmp_path) == 0
-    assert "p.json: its operations validator uses the older `instance` form" in capsys.readouterr().err
+    assert "p.json: its custom validator has no wrong solution for ['python']" in capsys.readouterr().err

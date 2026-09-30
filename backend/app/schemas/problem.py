@@ -179,8 +179,9 @@ def _operations_case(case_input: Any) -> tuple[list, list]:
 
 def _validate_params(validator_code: str) -> set[str] | None:
     """The names a Python validator's top-level `validate` can be passed by keyword,
-    or None when that can't be told without running it (it doesn't parse, or
-    `validate` is defined some other way). Parsed, never executed: seed validation
+    or None when that can't be told without running it (it doesn't parse,
+    `validate` is defined some other way, or it takes `**kwargs`, which accepts any
+    name). Parsed, never executed: seed validation
     runs no problem code, and the harness reports a script that doesn't load anyway.
 
     Mirrors how judge/harness.py sees it (`_takes_probe_results`): the *last*
@@ -195,6 +196,8 @@ def _validate_params(validator_code: str) -> set[str] | None:
     if not defs:
         return None
     a = defs[-1].args
+    if a.kwarg:
+        return None
     return {p.arg for p in a.args + a.kwonlyargs}
 
 
@@ -440,6 +443,17 @@ class ProblemIn(BaseModel):
             raise ValueError(
                 f"'validator_code' has a validator for {extra}, which the problem's "
                 f"'languages' doesn't list")
+        # The harness refuses a Python validator with no `probe_results` parameter:
+        # the older `instance` form ran next to the submission, where it could be
+        # read and forged (ADR-0007). A validator whose parameters can't be read
+        # without running it is left to the harness, which reports it on load.
+        params = _validate_params(code.get("python", ""))
+        if params is not None and "probe_results" not in params:
+            raise ValueError(
+                "the Python validator must be `def validate(actual, expected, args, "
+                "probe_results)`: the older `instance` form is gone, and extra calls on an "
+                "operations instance are the cases' probes "
+                "(docs/adr/0007-custom-validators-in-every-language.md)")
         self.comparison = {**self.comparison, "validator_code": code}
         return self
 
@@ -618,25 +632,13 @@ class ProblemFile(ProblemIn):
     def authoring_warnings(self) -> list[str]:
         """What loads but deserves the author's attention; `app.cli` prints these.
 
-        * An operations validator in the older `instance` form (no `probe_results`)
-          runs in the judge's child process, next to the submission, which can then
-          read `expected` and forge that case's verdict (ADR-0007). It's a warning,
-          not an error, until the problem sets written that way are converted: the
-          harness still runs them, and refusing them would stop those sets loading.
-        * A custom validator with no wrong solution in some language: nothing proves
-          that language's validator rejects anything (`WrongSolutionIn`). A warning,
-          since a problem set adds them over time.
+        A custom validator with no wrong solution in some language: nothing proves
+        that language's validator rejects anything (`WrongSolutionIn`). A warning,
+        since a problem set adds them over time.
         """
         if self.comparison.get("mode") != "custom_validator":
             return []
         warnings = []
-        params = _validate_params(validator_codes(self.comparison).get("python", ""))
-        if self.kind == "operations" and params is not None and "probe_results" not in params:
-            warnings.append(
-                "its operations validator uses the older `instance` form, which runs next to "
-                "the submission: it can read `expected`, and its verdict can be forged. Use "
-                "`validate(actual, expected, args, probe_results)`, with probes for any extra "
-                "calls (docs/adr/0007-custom-validators-in-every-language.md)")
         covered = {lang for sol in self.wrong_solutions for lang in sol.code}
         unproven = [v.language for v in self.languages if v.language not in covered]
         if unproven:
@@ -649,8 +651,8 @@ class ProblemFile(ProblemIn):
     def _probes_feed_a_probe_validator(self) -> "ProblemFile":
         # Probes (`ProbeIn`) exist only to give a custom validator more results to
         # check, so each misuse would otherwise be silent: judge/harness.py sends a
-        # case's probes only to a probe-form validator (one taking `probe_results`)
-        # on an operations instance, and drops them anywhere else. A ref must name
+        # case's probes only to a custom validator on an operations instance, and
+        # drops them anywhere else. A ref must name
         # one of the case's own ops (1..len-1; 0 is the constructor, which returns
         # nothing), or the harness reports a judge_error on every submission.
         cases = [tc for tc in self.test_cases if tc.probes]
@@ -660,11 +662,6 @@ class ProblemFile(ProblemIn):
             raise ValueError("test case probes need kind 'operations' (they call the instance)")
         if self.comparison.get("mode") != "custom_validator":
             raise ValueError("test case probes need comparison mode 'custom_validator' to check them")
-        params = _validate_params(validator_codes(self.comparison).get("python", ""))
-        if params is not None and "probe_results" not in params:
-            raise ValueError(
-                "test case probes need the Python validator to take 'probe_results': "
-                "`def validate(actual, expected, args, probe_results)`")
         for tc in cases:
             ops, _ = _operations_case(tc.input)
             for probe in tc.probes:

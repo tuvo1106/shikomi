@@ -580,8 +580,8 @@ def _run_operations(cls, ops, arg_lists, params):
     """Instantiate `cls` via the first op's args, then call each subsequent op
     as a method on that instance. Returns `(instance, results)` — the per-op
     result list (the constructor's own slot is always None, matching the wire
-    convention), plus the live instance itself so a `custom_validator` (below)
-    can make further calls beyond this replay (e.g. a round-trip check).
+    convention), plus the live instance itself so a case's probes (below) can
+    make further calls on it after this replay (e.g. a round-trip check).
 
     `params` describes the *constructor's* parameters (same convention as
     function mode, where `params` describes the one function) and is run
@@ -604,13 +604,12 @@ def _run_operations(cls, ops, arg_lists, params):
 
 # --- probes: extra calls the judge makes to check a result -------------------
 # Some properties can't be read off one replay: that `decode(encode(x)) == x`, or
-# that `pickIndex()` follows its weights over thousands of calls. A validator used
-# to make those calls itself, through the live `instance` — which forced it to run
-# in the child, next to the submission (see "custom validator mode" below). Probes
-# move the calls into the test case instead (docs/adr/0007): after the replay, the
-# child makes each probe's call on the same instance, and returns the results as
-# `probe_results`, separate from `actual`. The validator then needs no instance,
-# so it runs in the trusted parent.
+# that `pickIndex()` follows its weights over thousands of calls. Those calls
+# need the live instance, which exists only in the child, next to the submission,
+# but the validator that judges them must run in the trusted parent (see "custom
+# validator mode" below). So the calls are test-case data instead (docs/adr/0007):
+# after the replay, the child makes each probe's call on the same instance and
+# returns the results as `probe_results`, separate from `actual`.
 #
 # A probe is `{"op": name, "args": [...], "refs": {"<arg index>": <op index>},
 # "repeat": n}`; only `op` is required. `refs` fills an argument with the result
@@ -803,26 +802,21 @@ def compare(actual, expected, comparison):
 # `compare()`. Problem authors are the operator (trusted: problems load only
 # through the operator-run `app.cli seed`, DESIGN.md §7.1), so the validator
 # itself needs no sandbox of its own — but *where* it runs matters, because its
-# verdict is only as trustworthy as the process that computes it. Its signature
-# decides that:
+# verdict is only as trustworthy as the process that computes it.
 #
-# * `def validate(actual, expected, args, probe_results) -> bool` — runs in the
-#   trusted **parent** (`_run_validator`), on the `actual` and `probe_results`
-#   the child sent back, exactly where `compare()` runs for the fixed-answer
-#   modes. The child never sees `expected` and never computes a verdict, so a
-#   submission can neither read the answer nor forge a pass by writing its own
-#   frame to the result pipe. `probe_results` is the flat list of the case's
-#   probe results (see "probes" above), `[]` when it has none.
-# * `def validate(actual, expected, args, instance=None) -> bool` (the older
-#   form, no `probe_results`) — in function mode it runs in the parent too, with
-#   `instance=None`. In operations mode it still runs in the **child**, next to
-#   the submission, because `instance` exists only there. That leaves such a
-#   problem's `expected` readable and its verdict forgeable by a determined
-#   submission (DESIGN.md §5.3), which is why probes replace it; this path goes
-#   once no problem uses it (ADR-0007).
+# `def validate(actual, expected, args, probe_results) -> bool` runs in the
+# trusted **parent** (`_run_validator`), on the `actual` and `probe_results` the
+# child sent back, exactly where `compare()` runs for the fixed-answer modes. The
+# child never sees `expected` and never computes a verdict, so a submission can
+# neither read the answer nor forge a pass by writing its own frame to the result
+# pipe. `probe_results` is the flat list of the case's probe results (see "probes"
+# above), `[]` when it has none. A validator without a `probe_results` parameter
+# is refused (a judge_error): the older `validate(..., instance=None)` form made
+# its extra calls through the live object, so an operations validator had to run
+# in the child, where `expected` was readable and the verdict forgeable. Probes
+# replaced it (ADR-0007), and seeding refuses it too.
 #
-# `instance` (older form only) is the live `kind: "operations"` object, letting
-# a validator make *further* calls beyond the harness's own replay. `args` is the test case's input
+# `args` is the test case's input
 # exactly as it was *before* the submission ran — a separate deep copy from the
 # one the submission received — so a validator can check structure against the
 # original input (e.g. "same multiset as the input" without a fixed
@@ -835,20 +829,31 @@ def compare(actual, expected, comparison):
 # result pipe — a tuple arrives as a list — the same value `compare()` judges
 # for every other mode, so all modes agree on what the submission returned.
 #
-# Any exception raised while `validate()` runs is reported as `judge_error`
-# (see `except ValidatorError` in `run()`): it's the author's code. Probes fix
-# the one case where that blamed the wrong party. An older-form validator's own
-# call into the submission (`instance.decode(...)` raising because `encode` was
-# broken) is indistinguishable from a validator bug, so it was a judge_error.
-# A probe call is made by the harness, so an exception there is the
-# submission's `runtime_error`, labelled as a call the judge added.
+# Any exception raised while `validate()` runs (or loads) is reported as
+# `judge_error`: it's the author's code. The user sees only a fixed line; the
+# exception's own message goes to stderr (the judge's log), since it could quote
+# `expected`, the same rule as the Rust harness. A probe call is made by the
+# harness on the submission's object, so an exception there is the submission's
+# `runtime_error`, labelled as a call the judge added.
+
+
+# What the user sees when a custom validator fails to load or raises. Fixed,
+# because the exception's own message is the author's code talking and could
+# quote `expected`; `_validator_fault` logs the detail to stderr instead.
+VALIDATOR_FAULT = "the problem's custom validator failed (a problem bug, not your code)"
+
+
+def _validator_fault(test_case_id, exc):
+    """The judge_error row for a validator that failed, with its detail logged."""
+    sys.stderr.write("harness: custom validator %s\n" % exc)
+    return _judge_error_result(test_case_id, VALIDATOR_FAULT)
 
 
 def _load_validator(validator_code):
     """Compile+exec a `custom_validator` script once, returning its `validate`
     function. Raises `ValidatorError` on a bad script (syntax error, missing
-    `validate`) — a problem-authoring bug, so callers must not attribute it to
-    the submission (no `runtime_error`)."""
+    `validate`, no `probe_results` parameter) — a problem-authoring bug, so
+    callers must not attribute it to the submission (no `runtime_error`)."""
     namespace = {}
     try:
         exec(compile(validator_code, "<validator>", "exec"), namespace)
@@ -856,27 +861,32 @@ def _load_validator(validator_code):
         raise ValidatorError("failed to load: %s" % exc) from exc
     validate_fn = namespace.get("validate")
     if not callable(validate_fn):
-        raise ValidatorError("custom validator must define a 'validate' function")
+        raise ValidatorError("must define a 'validate' function")
+    if not _takes_probe_results(validate_fn):
+        raise ValidatorError("'validate' must take 'probe_results' (the older 'instance' "
+                             "form is gone; docs/adr/0007-custom-validators-in-every-language.md)")
     return validate_fn
 
 
 def _takes_probe_results(validate_fn):
-    """Whether `validate_fn` is the probe form (a `probe_results` parameter it can
-    be passed by keyword, as `_run_validator` does), which always runs in the
-    parent, rather than the older `instance` form. `app.schemas.problem`'s
-    `_validate_params` applies the same rule at seed time."""
+    """Whether `validate_fn` can be passed `probe_results` by keyword, as
+    `_run_validator` does: a parameter of that name that isn't positional-only,
+    or a `**kwargs`. `app.schemas.problem`'s `_validate_params` applies the same
+    rule at seed time."""
     try:
-        param = inspect.signature(validate_fn).parameters.get("probe_results")
+        params = inspect.signature(validate_fn).parameters
     except (TypeError, ValueError):  # a callable with no introspectable signature
         return False
+    if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return True
+    param = params.get("probe_results")
     return param is not None and param.kind != inspect.Parameter.POSITIONAL_ONLY
 
 
-def _run_validator(validate_fn, actual, expected, args, budget_s, probe_results=None):
+def _run_validator(validate_fn, actual, expected, args, budget_s, probe_results):
     """Call a validator in the parent and return its verdict.
 
-    `probe_results` is passed to a probe-form validator (a list, possibly empty),
-    and `None` means the older form, which is called with `instance=None`.
+    `probe_results` is the case's probe results (a list, possibly empty).
 
     The validator gets whatever is left of the case's time limit after the
     submission's own run (`budget_s`), under the same SIGALRM the child uses —
@@ -890,14 +900,14 @@ def _run_validator(validate_fn, actual, expected, args, budget_s, probe_results=
         TimeLimitExceeded: the validator outran `budget_s`.
         ValidatorError: it raised — an authoring bug, reported as judge_error.
     """
-    extra = {"instance": None} if probe_results is None else {"probe_results": probe_results}
     signal.setitimer(signal.ITIMER_REAL, budget_s)
     try:
-        return bool(validate_fn(actual=actual, expected=expected, args=args, **extra))
+        return bool(validate_fn(actual=actual, expected=expected, args=args,
+                                probe_results=probe_results))
     except TimeLimitExceeded:
         raise
     except BaseException as exc:  # noqa: BLE001 - validator may raise anything
-        raise ValidatorError(str(exc)) from exc
+        raise ValidatorError("raised %s: %s" % (type(exc).__name__, exc)) from exc
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
 
@@ -939,13 +949,8 @@ def _format_user_traceback(exc):
 # one child for the whole run and only respawns it after a timeout or a crash,
 # so the per-case cost is a pipe round trip, not a process launch.
 #
-# A `custom_validator` runs here in the parent too. The one exception is the
-# older form of an *operations* validator (no `probe_results` parameter): it
-# makes further calls into the *live* object, which exists only in the child, so
-# the (operator-authored, trusted) validator runs there and returns pass/fail.
-# Such a problem must not rely on `expected` being hidden from the submission,
-# and a submission that writes its own frame to the result pipe can forge its
-# verdict. Probes replace it (ADR-0007), and the path goes once nothing uses it.
+# A `custom_validator` runs here in the parent too, so no verdict and no
+# `expected` ever come from or go to the child.
 
 CHILD_FLAG = "--child"
 _HANG = "__hang__"     # parent sentinel: no reply within the deadline
@@ -963,21 +968,18 @@ def _judge_error_result(test_case_id, error):
 
 class _Ctx:
     """The child's compiled, per-run state (set up once, reused per case)."""
-    __slots__ = ("kind", "func", "cls", "params", "return_type", "time_limit_s",
-                 "validate_fn", "real_stdout")
+    __slots__ = ("kind", "func", "cls", "params", "return_type", "time_limit_s", "real_stdout")
 
 
 def _child_setup(setup):
-    """Compile the submission and (if any) the validator. Returns `(ctx, err)`;
-    exactly one is None. `err` is a message dict already shaped for the result
-    pipe (a compile failure → the parent's single runtime_error; a bad validator
-    → judge_error), matching what `run()` produced before the split."""
+    """Compile the submission. Returns `(ctx, err)`; exactly one is None. `err`
+    is a message dict already shaped for the result pipe (a compile failure →
+    the parent's single runtime_error)."""
     ctx = _Ctx()
     ctx.kind = setup.get("kind", "function")
     ctx.params = setup.get("params", [])
     ctx.return_type = setup.get("return_type", "")
     ctx.time_limit_s = max(int(setup.get("time_limit_ms", 2000)), 1) / 1000.0
-    ctx.validate_fn = None
     ctx.real_stdout = sys.stdout
 
     namespace = {
@@ -1002,13 +1004,6 @@ def _child_setup(setup):
         ctx.func = namespace.get(setup.get("function_name"))
         if not callable(ctx.func):
             return None, {"setup": "user_error", "error": "Function '%s' not found" % setup.get("function_name")}
-
-    validator_code = setup.get("validator_code")
-    if validator_code is not None:
-        try:
-            ctx.validate_fn = _load_validator(validator_code)
-        except ValidatorError as exc:
-            return None, {"setup": "validator_error", "error": "custom validator: %s" % exc}
     return ctx, None
 
 
@@ -1016,24 +1011,19 @@ def _execute_case(ctx, message):
     """Run one case in the child and return its outcome (no parent-side compare).
 
     The submission's `print()` output is captured per case (as before); its raw
-    fd-1 writes go to /dev/null (redirected in `_child_main`). `expected` is only
-    present when an older-form operations validator runs here (every other
-    validator runs in the parent). On the `ok` path the child returns the
-    raw `actual` value for the parent to compare — it does not, and cannot,
-    decide pass/fail for a fixed-answer problem — plus `probe_results` when the
+    fd-1 writes go to /dev/null (redirected in `_child_main`). On the `ok` path
+    the child returns the raw `actual` value for the parent to judge — it never
+    sees `expected`, so it cannot decide pass/fail — plus `probe_results` when the
     case has probes, made on the same instance after the replay (and timed with
     it, since they run the submission's code)."""
     args = message["input"]  # a fresh parse each case, so nothing leaks across cases
-    expected = message.get("expected")
     probes = message.get("probes")
     probe_results = None
-    validator_args = copy.deepcopy(args) if ctx.validate_fn is not None else None
 
     buffer = io.StringIO()
     sys.stdout = buffer
     signal.setitimer(signal.ITIMER_REAL, ctx.time_limit_s)
     start = time.perf_counter()
-    instance = None
     try:
         if ctx.kind == "operations":
             ops, arg_lists = args
@@ -1048,25 +1038,14 @@ def _execute_case(ctx, message):
                 probe_results = _run_probes(instance, probes, actual)
         else:
             actual = _encode_result(ctx.func(*_decode_args(args, ctx.params)), ctx.return_type)
-        passed = None
-        if ctx.validate_fn is not None:
-            try:
-                passed = bool(ctx.validate_fn(actual=actual, expected=expected,
-                                              args=validator_args, instance=instance))
-            except TimeLimitExceeded:
-                raise
-            except BaseException as exc:  # noqa: BLE001 - validator may raise anything
-                raise ValidatorError(str(exc)) from exc
     except TimeLimitExceeded:
         signal.setitimer(signal.ITIMER_REAL, 0)
         sys.stdout = ctx.real_stdout
         return {"status": "time_limit_exceeded", "stdout": _truncate(buffer.getvalue())}
-    except ValidatorError as exc:
-        elapsed = round((time.perf_counter() - start) * 1000, 3)
+    except ValidatorError as exc:  # a malformed probe (`_run_probes`): the author's bug
         signal.setitimer(signal.ITIMER_REAL, 0)
         sys.stdout = ctx.real_stdout
-        return {"status": "validator_error", "actual": actual, "runtime_ms": elapsed,
-                "stdout": _truncate(buffer.getvalue()), "error": "custom validator: %s" % exc}
+        return {"status": "probe_error", "error": str(exc)}
     except _ProbeFailed as exc:
         elapsed = round((time.perf_counter() - start) * 1000, 3)
         signal.setitimer(signal.ITIMER_REAL, 0)
@@ -1083,7 +1062,7 @@ def _execute_case(ctx, message):
     elapsed = round((time.perf_counter() - start) * 1000, 3)
     signal.setitimer(signal.ITIMER_REAL, 0)
     sys.stdout = ctx.real_stdout
-    reply = {"status": "ok", "actual": actual, "passed": passed, "runtime_ms": elapsed,
+    reply = {"status": "ok", "actual": actual, "runtime_ms": elapsed,
              "stdout": _truncate(buffer.getvalue())}
     if probe_results is not None:
         reply["probe_results"] = probe_results
@@ -1148,9 +1127,7 @@ class _Child:
         so a malformed frame is treated as a dead, desynced child (_CRASH) rather
         than being allowed to raise out of here and abort the whole run. A
         well-formed forged frame still can't pass a case: the parent alone holds
-        `expected` and decides — except for an older-form operations
-        custom_validator, whose verdict the child computes (see the section
-        comment above)."""
+        `expected` and decides."""
         ready, _, _ = select.select([self.reader], [], [], deadline_s)
         if not ready:
             return {"status": _HANG}
@@ -1205,13 +1182,11 @@ def _spawn_child(setup):
     return child, None
 
 
-def _finalize(tc, reply, comparison, validator_mode, validate_fn=None, time_limit_s=None,
-              probe_form=False, probes=None):
+def _finalize(tc, reply, comparison, validate_fn=None, time_limit_s=None, probes=None):
     """Turn the child's per-case `reply` (or None for a hang/crash) into the
-    report row, computing pass/fail here for every fixed-answer problem and for
-    a custom validator the parent loaded (`validate_fn`; `probe_form` if it takes
-    `probe_results`, and `probes` the ones this case sent the child). Only an
-    older-form operations validator's verdict comes from the child's `passed`."""
+    report row, computing pass/fail here: with `compare()` for a fixed-answer
+    problem, or with the custom validator the parent loaded (`validate_fn`, and
+    `probes` the ones this case sent the child)."""
     tc_id = tc.get("id", 0)
     status = reply.get("status")
     if status == _CRASH:
@@ -1227,14 +1202,14 @@ def _finalize(tc, reply, comparison, validator_mode, validate_fn=None, time_limi
         return {"test_case_id": tc_id, "status": "runtime_error", "runtime_ms": reply.get("runtime_ms", 0),
                 "output": None, "stdout": _truncate(reply.get("stdout", "")),
                 "error": _truncate(reply.get("error", ""))}
-    if status == "validator_error":
-        return {"test_case_id": tc_id, "status": "judge_error", "runtime_ms": reply.get("runtime_ms", 0),
-                "output": _truncate(_format_output(reply.get("actual"))),
-                "stdout": _truncate(reply.get("stdout", "")), "error": _truncate(reply.get("error", ""))}
+    if status == "probe_error":
+        # Probes are test data the child already had, so their detail isn't secret
+        # (unlike a validator's own exception). A forged frame can claim this too,
+        # but only to fail its own case.
+        return _judge_error_result(tc_id, reply.get("error", "malformed probe"))
 
     actual = reply.get("actual")
-    probe_results = None
-    if probe_form:
+    if validate_fn is not None:
         # The child's reply is untrusted: a submission can write its own frame. A
         # forged `probe_results` is harmless (anything it claims, the submission's
         # methods could have returned), but a malformed one would reach the
@@ -1246,7 +1221,6 @@ def _finalize(tc, reply, comparison, validator_mode, validate_fn=None, time_limi
             return {"test_case_id": tc_id, "status": "runtime_error", "runtime_ms": reply.get("runtime_ms", 0),
                     "output": None, "stdout": _truncate(reply.get("stdout", "")),
                     "error": "the submission's reply didn't account for every check the judge ran"}
-    if validate_fn is not None:
         # The remaining share of the case's limit. `runtime_ms` is the child's own
         # report, so clamp it: a lying child can't buy its validator extra time
         # (or none at all, which setitimer would read as "disarm"), and a
@@ -1261,12 +1235,9 @@ def _finalize(tc, reply, comparison, validator_mode, validate_fn=None, time_limi
             return {"test_case_id": tc_id, "status": "time_limit_exceeded", "runtime_ms": None,
                     "output": None, "stdout": _truncate(reply.get("stdout", "")), "error": None}
         except ValidatorError as exc:
-            return {"test_case_id": tc_id, "status": "judge_error", "runtime_ms": reply.get("runtime_ms", 0),
+            return {**_validator_fault(tc_id, exc), "runtime_ms": reply.get("runtime_ms", 0),
                     "output": _truncate(_format_output(actual)),
-                    "stdout": _truncate(reply.get("stdout", "")),
-                    "error": _truncate("custom validator: %s" % exc)}
-    elif validator_mode:  # an older-form operations validator: the child ran it
-        passed = bool(reply.get("passed"))
+                    "stdout": _truncate(reply.get("stdout", ""))}
     else:
         passed = compare(actual, tc.get("expected"), comparison)
     return {"test_case_id": tc_id, "status": "passed" if passed else "wrong_answer",
@@ -1280,9 +1251,8 @@ def run(payload):
     The parent compiles nothing user-supplied and never runs it: it spawns the
     child (`_spawn_child`), feeds it one case at a time, and for each reply
     computes pass/fail itself — with `compare()` against an `expected` the child
-    never received, or with a custom validator it loaded here — except for an
-    older-form operations validator, whose verdict it takes from the child. A
-    case's probes go to the child with its input. A case that hangs past the limit is killed and reported
+    never received, or with a custom validator it loaded here. A case's probes
+    go to the child with its input. A case that hangs past the limit is killed and reported
     `time_limit_exceeded`; a case that crashes the child is reported
     `runtime_error`; either way the parent respawns a fresh child for the
     remaining cases. A top-level compile error (or a bad validator) surfaces from
@@ -1298,22 +1268,14 @@ def run(payload):
     stop_on_first_failure = bool(payload.get("stop_on_first_failure", False))
     first_id = test_cases[0].get("id", 0) if test_cases else 0
 
-    validator_mode = (comparison or {}).get("mode") == "custom_validator"
-    # Where the validator runs (see "custom validator mode" above): here, unless
-    # it's the older form of an operations validator, which needs the live
-    # `instance` that only the child has. It's loaded here either way, to tell
-    # which form it is (and so a broken script fails before any child starts).
+    # A custom validator runs here, in the parent (see "custom validator mode"
+    # above). It's loaded before any child starts, so a broken script fails once.
     validate_fn = None
-    probe_form = False
-    if validator_mode:
+    if (comparison or {}).get("mode") == "custom_validator":
         try:
             validate_fn = _load_validator(comparison.get("validator_code", ""))
         except ValidatorError as exc:
-            return [_judge_error_result(first_id, "custom validator: %s" % exc)]
-        probe_form = _takes_probe_results(validate_fn)
-    validator_in_child = validator_mode and kind == "operations" and not probe_form
-    if validator_in_child:
-        validate_fn = None  # the child runs it
+            return [_validator_fault(first_id, exc)]
     setup = {
         "user_code": payload["user_code"],
         "kind": kind,
@@ -1322,17 +1284,12 @@ def run(payload):
         "params": payload.get("params", []),
         "return_type": payload.get("return_type", ""),
         "time_limit_ms": time_limit_ms,
-        # Only an operations validator runs in the child, where the live instance
-        # is; None otherwise, so the child stays a pure input→output box.
-        "validator_code": comparison.get("validator_code", "") if validator_in_child else None,
     }
     time_limit_s = max(time_limit_ms, 1) / 1000.0
 
     deadline_s = max(time_limit_ms, 1) / 1000.0 + _KILL_GRACE_S
     child, err = _spawn_child(setup)
     if child is None:
-        if err is not None and err.get("setup") == "validator_error":
-            return [_judge_error_result(first_id, err.get("error", "custom validator failed to load"))]
         message = err.get("error") if err else "the submission could not be started"
         return [{"test_case_id": first_id, "status": "runtime_error", "runtime_ms": 0,
                  "output": None, "stdout": "", "error": _truncate(message)}]
@@ -1351,16 +1308,13 @@ def run(payload):
                     continue
 
             message = {"input": tc.get("input", [])}
-            if validator_in_child:
-                message["expected"] = tc.get("expected")
-            # Probes only mean anything to a probe-form validator, on an instance.
-            probes = tc.get("probes") if probe_form and kind == "operations" else None
+            # Probes only mean anything to a custom validator, on an instance.
+            probes = tc.get("probes") if validate_fn is not None and kind == "operations" else None
             if probes:
                 message["probes"] = probes
             child.send(message)
             reply = child.read(deadline_s)
-            result = _finalize(tc, reply, comparison, validator_mode, validate_fn, time_limit_s,
-                               probe_form, probes)
+            result = _finalize(tc, reply, comparison, validate_fn, time_limit_s, probes)
             results.append(result)
 
             if reply.get("status") in (_HANG, _CRASH, "time_limit_exceeded"):

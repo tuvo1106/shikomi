@@ -237,12 +237,11 @@ def test_peeking_iterator_constructor_decodes_iterator():
     assert res[0]["status"] == "passed", res[0]["error"]
 
 
-# --- custom_validator mode: the live `instance` -----------------------------
-# `custom_validator` gets the live operations-mode `instance` (not just the
-# per-op result list), so it can make *further* calls beyond the harness's
-# own replay — e.g. a round-trip check where the second call's argument is
-# the first call's result, which the fixed `ops`/`args` wire shape can't
-# express on its own (DESIGN.md §5.4).
+# --- custom_validator mode ---------------------------------------------------
+# An operations validator judges the per-op result list in the parent. Further
+# calls on the instance (a round trip, a distribution) are the case's probes,
+# below; the older form that made them itself through the live `instance` is
+# refused.
 
 CODEC = (
     "class Codec:\n"
@@ -256,36 +255,16 @@ CODEC = (
     "        return self.store[short_url.rsplit('/', 1)[-1]]\n"
 )
 
-ROUND_TRIP_VALIDATOR = (
-    "def validate(actual, expected, args, instance=None):\n"
-    "    original_url = args[1][1][0]\n"
-    "    encoded = actual[1]\n"
-    "    return instance.decode(encoded) == original_url\n"
-)
-
-
-def test_custom_validator_receives_live_instance_for_round_trip():
-    ops = ["Codec", "encode"]
-    args = [[], ["https://example.com/some/path"]]
-    res = results(payload(CODEC, [case(0, ops, args, None)], class_name="Codec",
-                          comparison={"mode": "custom_validator", "validator_code": ROUND_TRIP_VALIDATOR}))
-    assert res[0]["status"] == "passed", res[0]["error"]
-
-
-def test_custom_validator_catches_broken_round_trip():
-    # A broken submission (encode() never stores the url) makes the
-    # validator's own extra call — `instance.decode(...)` — raise KeyError.
-    # Any exception raised while `validate()` runs is reported the same way
-    # (judge_error), whether it's the validator's own bug or a submission bug
-    # surfacing through a call the validator chose to make — the harness has
-    # no way to tell those apart, and doesn't try to.
-    broken_codec = CODEC.replace("self.store[key] = long_url", "pass")  # never stores it
-    ops = ["Codec", "encode"]
-    args = [[], ["https://example.com/some/path"]]
-    res = results(payload(broken_codec, [case(0, ops, args, None)], class_name="Codec",
-                          comparison={"mode": "custom_validator", "validator_code": ROUND_TRIP_VALIDATOR}))
-    assert res[0]["status"] == "judge_error"
-    assert "custom validator" in res[0]["error"]
+def test_an_older_form_operations_validator_is_refused():
+    """The older `validate(..., instance=None)` form made its own calls into the
+    live object, so it had to run in the child, next to the submission, where
+    `expected` was readable and its verdict forgeable. Probes replaced it
+    (ADR-0007), and the harness now refuses it before any child starts."""
+    older = ("def validate(actual, expected, args, instance=None):\n"
+             "    return instance.decode(actual[1]) == args[1][1][0]\n")
+    res = results(payload(CODEC, [case(0, ["Codec", "encode"], [[], ["https://a.b/c"]], None)],
+                          class_name="Codec", comparison={"mode": "custom_validator", "validator_code": older}))
+    assert [r["status"] for r in res] == ["judge_error"]
 
 
 def test_custom_validator_sees_constructor_args_before_the_submission_mutated_them():
@@ -302,7 +281,7 @@ def test_custom_validator_sees_constructor_args_before_the_submission_mutated_th
         "        return len(self.nums)\n"
     )
     size_matches_input = (
-        "def validate(actual, expected, args, instance=None):\n"
+        "def validate(actual, expected, args, probe_results):\n"
         "    ops, arg_lists = args\n"
         "    return actual[1] == len(arg_lists[0][0])\n"
     )
@@ -312,10 +291,9 @@ def test_custom_validator_sees_constructor_args_before_the_submission_mutated_th
 
 
 # --- probes: judge-added calls, checked in the parent (ADR-0007) --------------
-# A probe-form validator (`validate(actual, expected, args, probe_results)`) gets
-# the results of the case's probes instead of the live instance, so it runs in
-# the trusted parent. Probes run in the child on the same instance, after the
-# replay.
+# A validator (`validate(actual, expected, args, probe_results)`) gets the results
+# of the case's probes instead of the live instance, so it runs in the trusted
+# parent. Probes run in the child on the same instance, after the replay.
 
 PROBE_ROUND_TRIP = (
     "def validate(actual, expected, args, probe_results):\n"
@@ -350,8 +328,8 @@ def test_a_broken_round_trip_is_a_wrong_answer():
 
 
 def test_a_probe_that_raises_is_the_submissions_runtime_error_labelled_as_judge_added():
-    """Unlike an older-form validator's own `instance.decode(...)` (judge_error),
-    the harness made this call, so a raise is the submission's bug."""
+    """The harness made this call on the submission's object, so a raise is the
+    submission's bug, not the validator's (judge_error)."""
     never_stores = CODEC.replace("self.store[key] = long_url", "pass")
     res = results(payload(never_stores, [probe_case(0, ["Codec", "encode"], [[], ["https://a.b/c"]],
                                                     DECODE_OP_1)],

@@ -8,6 +8,8 @@ import sys
 
 import pytest
 
+VALIDATOR_FAULT = "the problem's custom validator failed (a problem bug, not your code)"
+
 HARNESS = pathlib.Path(__file__).resolve().parents[1] / "harness.py"
 TRUNC_MAX = 4096 + len("…(truncated)")
 
@@ -243,7 +245,7 @@ def test_bools_and_numbers_still_match_their_own_kind(comparison, returned, expe
 # other comparison mode would leave it unused if the check doesn't need it.
 
 SAME_MULTISET = (
-    "def validate(actual, expected, args, instance=None):\n"
+    "def validate(actual, expected, args, probe_results):\n"
     "    return sorted(actual) == sorted(args[0])\n"
 )
 
@@ -283,14 +285,18 @@ def test_custom_validator_that_raises_is_judge_error_not_runtime_error():
     distinct status from a submission's own runtime_error (AGENTS.md)."""
     code = "def f(s):\n    return s"
     broken_validator = (
-        "def validate(actual, expected, args, instance=None):\n"
+        "def validate(actual, expected, args, probe_results):\n"
         "    raise ValueError('validator bug')\n"
     )
     pl = payload(code, [case(0, ["x"], None)],
                  comparison={"mode": "custom_validator", "validator_code": broken_validator})
-    res = results(pl)
+    proc = run_harness(pl)
+    res = json.loads(proc.stdout)["results"]
     assert res[0]["status"] == "judge_error"
-    assert "validator bug" in res[0]["error"]
+    # The user sees a fixed line: the exception's message is the author's code
+    # talking and could quote `expected`. The detail goes to the judge's log.
+    assert res[0]["error"] == VALIDATOR_FAULT
+    assert "raised ValueError: validator bug" in proc.stderr
 
 
 def test_custom_validator_missing_validate_function_fails_fast():
@@ -299,10 +305,34 @@ def test_custom_validator_missing_validate_function_fails_fast():
     code = "def f(s):\n    return s"
     pl = payload(code, [case(0, ["x"], None), case(1, ["y"], None)],
                  comparison={"mode": "custom_validator", "validator_code": "x = 1\n"})
-    res = results(pl)
+    proc = run_harness(pl)
+    res = json.loads(proc.stdout)["results"]
     assert len(res) == 1
     assert res[0]["status"] == "judge_error"
-    assert "validate" in res[0]["error"]
+    assert res[0]["error"] == VALIDATOR_FAULT
+    assert "must define a 'validate' function" in proc.stderr
+
+
+def test_the_older_instance_form_is_refused():
+    """A validator without `probe_results` is the older form, which ran next to
+    the submission in operations mode (ADR-0007). It's gone: refused once, for
+    the whole payload, even in function mode where it would have been harmless,
+    so a problem set can't keep a form that only works in one mode."""
+    older = "def validate(actual, expected, args, instance=None):\n    return True\n"
+    pl = payload("def f(s):\n    return s", [case(0, ["x"], None), case(1, ["y"], None)],
+                 comparison={"mode": "custom_validator", "validator_code": older})
+    proc = run_harness(pl)
+    res = json.loads(proc.stdout)["results"]
+    assert [r["status"] for r in res] == ["judge_error"]
+    assert "must take 'probe_results'" in proc.stderr
+
+
+def test_a_validator_taking_kwargs_is_passed_probe_results():
+    """`**rest` accepts `probe_results` by keyword, so it counts (seeding agrees)."""
+    kwargs = "def validate(actual, **rest):\n    return rest['probe_results'] == [] and actual == 'x'\n"
+    pl = payload("def f(s):\n    return s", [case(0, ["x"], None)],
+                 comparison={"mode": "custom_validator", "validator_code": kwargs})
+    assert results(pl)[0]["status"] == "passed"
 
 
 def test_custom_validator_syntax_error_fails_fast():
@@ -320,7 +350,7 @@ def test_custom_validator_hang_is_time_limit_exceeded():
     for the other four modes, which stays untimed."""
     code = "def f(s):\n    return s"
     hanging_validator = (
-        "def validate(actual, expected, args, instance=None):\n"
+        "def validate(actual, expected, args, probe_results):\n"
         "    while True:\n"
         "        pass\n"
     )
@@ -332,8 +362,8 @@ def test_custom_validator_hang_is_time_limit_exceeded():
 
 
 def test_custom_validator_verdict_cannot_be_forged_through_the_result_pipe():
-    """A function-mode validator runs in the parent, so the child never sends a
-    verdict the parent trusts. The child's result pipe is reachable from the
+    """A validator runs in the parent, so the child never sends a verdict the
+    parent trusts. The child's result pipe is reachable from the
     submission (its fd is on the child's argv): this one writes a frame claiming
     `passed: true` for a wrong answer and exits. The parent must judge the
     `actual` in that frame itself, and find it wrong."""
@@ -351,8 +381,8 @@ def test_custom_validator_verdict_cannot_be_forged_through_the_result_pipe():
 
 
 def test_custom_validator_expected_is_not_sent_to_the_child():
-    """With a function-mode validator the child receives only the input, as for
-    every fixed-answer mode. The submission walks its caller frames for the
+    """With a custom validator the child receives only the input, as for every
+    fixed-answer mode. The submission walks its caller frames for the
     harness's `message` and reports whether `expected` was in it."""
     peek = (
         "import sys\n"
@@ -365,7 +395,7 @@ def test_custom_validator_expected_is_not_sent_to_the_child():
         "        frame = frame.f_back\n"
         "    return 'no message found'\n"
     )
-    accept_any = "def validate(actual, expected, args, instance=None):\n    return True\n"
+    accept_any = "def validate(actual, expected, args, probe_results):\n    return True\n"
     pl = payload(peek, [case(0, ["x"], "the secret answer")],
                  comparison={"mode": "custom_validator", "validator_code": accept_any})
     assert results(pl)[0]["output"] == '"hidden"'
@@ -377,7 +407,7 @@ def test_custom_validator_shares_the_case_time_limit_with_the_submission():
     code = "import time\ndef f(s):\n    time.sleep(0.15)\n    return s"
     slow_validator = (
         "import time\n"
-        "def validate(actual, expected, args, instance=None):\n"
+        "def validate(actual, expected, args, probe_results):\n"
         "    time.sleep(0.15)\n"
         "    return True\n"
     )

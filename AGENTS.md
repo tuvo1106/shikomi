@@ -352,10 +352,8 @@ and `playwright`.
   case sent (defence in depth). A verdict is only as trustworthy as the process
   that computes it: a `custom_validator` runs in the parent, like `compare()`, and
   gets extra calls' results as `probe_results` rather than calling into the live
-  object. The older `instance` form of an operations validator is the one thing
-  that still runs in the child, so such a problem must not rely on `expected` being
-  hidden, and its verdict can be forged through the result pipe. The harness tells
-  the forms apart by the `probe_results` parameter; author the probe form.
+  object; nothing a validator decides runs in the child. A validator's exception
+  detail goes to stderr, never to the user (it could quote `expected`).
   **Never execute (or trust) a file under `/tmp` after a case has run.** A case's process
   has the harness's uid, and `/tmp/judge` is writable by it, so any binary or data left
   there can be swapped by the submission. The Rust harness's custom validator is
@@ -421,19 +419,19 @@ slice ships, delete its entry here.
   problem list (`ProblemListItem.languages` is already returned); and offering more of
   the bundled starters in several languages (`calm-stretch` is still Python-only).
 
-- **Custom validators in every language**
-  ([ADR-0007](docs/adr/0007-custom-validators-in-every-language.md)), in order:
-  (5) port the 19 problems in the external problem set: the 13 operations validators to
-  the probe form (a converter that does this mechanically, and passes all their reference
-  solutions, was proven on a copy), each with `wrong_solutions` its validator rejects, and add Rust variants (their random starters `use shikomi_prelude::Rng;`;
-  encode-and-decode-strings and random-pick-with-weight were ported on a copy and pass,
-  with wrong solutions rejected); (6) remove the `instance` form from `harness.py`, after which no validator
-  runs in the child and the child never gets `expected`. Follow-ups found in review:
-  the Rust harness recompiles a problem's validator for every submission (~150ms+ of the
-  compile deadline each time); cache the binary by a hash of its source, or build it at
-  seed time. And `harness.py` still shows a validator exception's message to the user
-  (`ValidatorError(str(exc))`), which could quote `expected`; the Rust harness now shows a
-  fixed line and logs the detail to stderr, and Python should match.
+- **Custom validators, follow-ups**
+  ([ADR-0007](docs/adr/0007-custom-validators-in-every-language.md), shipped): the Rust
+  harness recompiles a problem's validator for every submission (~150ms+ of the compile
+  deadline each time); cache the binary by a hash of its source, or build it at seed
+  time. From a review of the Rust probes (#29): `ops::replay` treats any 3-element
+  operations input as `[ops, args, probes]`, so a malformed stored case becomes the
+  learner's `runtime_error` instead of a data error; forged `probe_results` are only
+  length-checked, so a wrong-typed forgery panics the validator into a `judge_error`
+  that blames the problem; probe results go to a per-case file on the 32MB `/tmp`, and
+  a failed write is swallowed, so a huge probe run is an unexplained `runtime_error`
+  (bound `repeat` x result size at seed time, or label it); and each case deep-copies
+  its input to append the probes. The seed tests' Rust container has a fixed name
+  (`judge-seed-validate-rust`), so two runs at once collide; give it a unique one.
 
 - **Auth roadmap:** revisit session strategy (currently JWT-in-memory access +
   httpOnly refresh cookie — consider server-side sessions / cookie-based access

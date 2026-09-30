@@ -113,6 +113,21 @@ All notable changes to this project are recorded here. The format follows
   Tree*) are now offered in Rust too, and a new one, *Design a Sorted Tree Cursor*
   (the Iterator pattern), takes a `TreeNode` in its constructor, in Python and Rust.
 
+### Changed
+
+- **A custom validator's error no longer reaches the user.** A validator that fails
+  to load or raises shows "the problem's custom validator failed (a problem bug, not
+  your code)", as the Rust judge already did, and its detail goes to the judge's log,
+  since it could quote the expected answer.
+
+### Removed
+
+- **The older custom-validator form.** `def validate(actual, expected, args,
+  instance=None)` is refused: the judge reports it as a `judge_error`, and seeding
+  refuses the file. Write `def validate(actual, expected, args, probe_results)`, with
+  the cases' probes for any extra calls on an operations instance (ADR-0007). Convert
+  and re-seed any problem that still uses it before upgrading.
+
 ### Security
 
 - **The judge now runs a submission in a separate process from the grader.** The Python
