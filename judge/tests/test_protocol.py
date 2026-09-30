@@ -437,6 +437,19 @@ def test_an_answer_nested_too_deeply_to_compare_is_that_cases_runtime_error():
     assert [r["status"] for r in json.loads(proc.stdout)["results"]] == ["runtime_error", "passed"]
 
 
+def test_an_answer_nested_too_deeply_is_the_submissions_fault_under_a_validator_too():
+    """Checked where the reply comes in, before any validator sees it: a runtime_error
+    that keeps the case's stdout, not a judge_error blaming the problem's author."""
+    deep = ("def f(s):\n    print('hi')\n    v = []\n    for _ in range(3000):\n        v = [v]\n"
+            "    return v\n")
+    validator = "def validate(actual, expected, args, probe_results):\n    return actual == []\n"
+    row = results(payload(deep, [case(0, ["x"], None)],
+                          comparison={"mode": "custom_validator", "validator_code": validator}))[0]
+    assert row["status"] == "runtime_error"
+    assert row["error"] == "the returned value is nested too deeply to judge"
+    assert row["stdout"] == "hi\n" and isinstance(row["runtime_ms"], (int, float))
+
+
 def test_a_deeply_nested_forged_frame_is_a_crash_not_a_parent_failure():
     forge = ("import os, sys\n"
              "def f(s):\n"

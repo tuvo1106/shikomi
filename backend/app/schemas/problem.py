@@ -193,29 +193,72 @@ def _is_generator(fn: ast.FunctionDef) -> bool:
     return False
 
 
-def _module_bindings(tree: ast.Module, name: str) -> list[ast.AST]:
-    """Every statement that binds `name` at module scope: a def or class of that
-    name, an assignment, `for` or `with` target, walrus, or import, in any block
-    (`if`, `try`, ...). Nested scopes (functions, classes, lambdas,
-    comprehensions) bind their own names, so they aren't searched."""
-    found, todo = [], list(tree.body)
+def _validate_def_that_runs(tree: ast.Module) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+    """The `def validate` that the script leaves bound when it runs, or None when
+    that can't be read off the source without running it.
+
+    Sound by construction, not complete: it answers only when every binding of
+    the name is a top-level statement of the module (a def, a class, an
+    assignment, an import, ...) and the last of them is an undecorated def. Top-level
+    statements run in order, so that def is what's left bound. Anything subtler (a
+    `global validate` in a function, a walrus, an `except ... as validate`, a
+    `match` capture, a star import, a binding inside an `if` or `try` block, a
+    decorator) is None, and the harness judges the real object when it loads it.
+    """
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Global, ast.Nonlocal)) and "validate" in node.names:
+            return None
+        if isinstance(node, ast.ImportFrom) and any(a.name == "*" for a in node.names):
+            return None
+        if isinstance(node, ast.NamedExpr) and node.target.id == "validate":
+            return None
+        if isinstance(node, ast.ExceptHandler) and node.name == "validate":
+            return None
+        if isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name == "validate":
+            return None
+        if isinstance(node, ast.MatchMapping) and node.rest == "validate":
+            return None
+    last = None
+    for stmt in tree.body:
+        binds_directly = (
+            isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and stmt.name == "validate"
+            or isinstance(stmt, (ast.Import, ast.ImportFrom))
+            and any((a.asname or a.name.split(".")[0]) == "validate" for a in stmt.names)
+            or isinstance(stmt, (ast.Assign, ast.AugAssign, ast.AnnAssign, ast.For, ast.AsyncFor,
+                                 ast.With, ast.AsyncWith, ast.Delete))
+            and _stores_name(stmt, "validate"))
+        if binds_directly:
+            last = stmt
+        elif _stores_name(stmt, "validate"):
+            return None  # bound inside a block (`if`, `try`, `while`, ...)
+    if isinstance(last, (ast.FunctionDef, ast.AsyncFunctionDef)) and not last.decorator_list:
+        return last
+    return None
+
+
+def _stores_name(stmt: ast.stmt, name: str) -> bool:
+    """Whether `stmt` binds `name` in the module's own scope: a store or delete of
+    it, or a nested def, class or import of it, outside any nested function,
+    class, lambda or comprehension (those have scopes of their own)."""
+    todo = [stmt]
     while todo:
         node = todo.pop()
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        if node is not stmt and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             if node.name == name:
-                found.append(node)
-            todo.extend(node.decorator_list)
-            continue  # its body is its own scope
-        if isinstance(node, (ast.Lambda, ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+                return True
             continue
+        if isinstance(node, (ast.Lambda, ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+            continue  # scopes of their own; a walrus inside is refused up front
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue  # `stmt` itself: its name is the caller's business
+        if isinstance(node, ast.Name) and node.id == name and isinstance(node.ctx, (ast.Store, ast.Del)):
+            return True
+        if isinstance(node, ast.alias) and (node.asname or node.name.split(".")[0]) == name:
+            return True
         if isinstance(node, ast.AnnAssign) and node.value is None:
-            continue  # a bare annotation (`validate: object`) binds nothing
-        if isinstance(node, ast.Name) and node.id == name and isinstance(node.ctx, ast.Store):
-            found.append(node)
-        elif isinstance(node, ast.alias) and (node.asname or node.name.split(".")[0]) == name:
-            found.append(node)
+            continue  # a bare annotation binds nothing
         todo.extend(ast.iter_child_nodes(node))
-    return found
+    return False
 
 
 def validator_call_problem(validator_code: str) -> str | None:
@@ -223,11 +266,11 @@ def validator_call_problem(validator_code: str) -> str | None:
     wouldn't, or when that can't be told without running it. Parsed, never
     executed: seed validation runs no problem code.
 
-    It decides only the clear case: `validate` is bound once at module scope, by
-    an undecorated `def`. A decorator, a second def, an assignment or an import
-    of the name means what runs isn't simply that def, so it's None, and the
-    harness judges the real object when it loads it (so does a script that
-    doesn't parse). In the clear case it mirrors `_load_validator`:
+    Best-effort by design: it decides only when `_validate_def_that_runs` can name
+    the def that runs, and otherwise leaves it to the harness's load-time check,
+    which the seed-solution tests exercise with every reference solution. It never
+    refuses a validator the harness would accept. For that def it mirrors
+    `_load_validator`:
 
     * an `async def` or a generator is refused: the judge would get a coroutine
       or generator, which is always truthy, so every case would pass;
@@ -240,13 +283,12 @@ def validator_call_problem(validator_code: str) -> str | None:
         return "the validator isn't source code"
     try:
         tree = ast.parse(validator_code)
+        fn = _validate_def_that_runs(tree)
     except SyntaxError:
         return None
-    bindings = _module_bindings(tree, "validate")
-    if len(bindings) != 1 or not isinstance(bindings[0], (ast.FunctionDef, ast.AsyncFunctionDef)):
-        return None
-    fn = bindings[0]
-    if fn.decorator_list:
+    except (RecursionError, MemoryError):  # the harness's compile() fails on it the same way
+        return "the Python validator is too complex (nested too deeply) to compile"
+    if fn is None:
         return None
     if isinstance(fn, ast.AsyncFunctionDef):
         return ("the Python validator is `async def`: the judge calls it without awaiting, "

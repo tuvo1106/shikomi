@@ -129,13 +129,17 @@ All notable changes to this project are recorded here. The format follows
 - **The accounts worker names stored problems whose custom validator the judge refuses**
   when it starts, so an upgrade that ran before the problem set was re-seeded shows up
   in the log at once.
+- **An answer nested too deeply to judge is that case's `runtime_error`** in every
+  comparison mode, with its printed output kept. Under a custom validator it used to
+  be a `judge_error` that blamed the problem's author.
 
 ### Removed
 
 - **The older custom-validator form.** `def validate(actual, expected, args,
   instance=None)` is refused: the judge reports it as a `judge_error`, and seeding
   refuses the file, as it does any validator that can't be called with exactly those
-  four arguments by keyword. Write `def validate(actual, expected, args, probe_results)`, with
+  four arguments by keyword, wherever the source shows which `validate` runs (the
+  last top-level `def`; anything subtler is left to the judge). Write `def validate(actual, expected, args, probe_results)`, with
   the cases' probes for any extra calls on an operations instance (ADR-0007). Convert
   and re-seed any problem that still uses it before upgrading.
 

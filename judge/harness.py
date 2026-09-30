@@ -691,6 +691,27 @@ def _number_or_zero(x):
     return x if _is_number(x) and math.isfinite(x) else 0
 
 
+# How deep a returned value may nest. Comparing, validating and printing a value
+# recurse on it, so one nested thousands deep (a submission's `[[[...]]]`, or a
+# forged frame) would raise RecursionError in the parent. No answer nests anywhere
+# near this, so past it is the submission's runtime_error, checked once where the
+# reply comes in, the same for every comparison mode.
+_MAX_NESTING = 256
+
+
+def _nests_too_deeply(value, limit=_MAX_NESTING):
+    """Whether `value` (parsed JSON) nests lists or dicts deeper than `limit`.
+    Iterative, so it can't itself hit the recursion limit it guards."""
+    todo = [(value, 0)]
+    while todo:
+        node, depth = todo.pop()
+        if isinstance(node, (list, dict)):
+            if depth >= limit:
+                return True
+            todo.extend((child, depth + 1) for child in (node.values() if isinstance(node, dict) else node))
+    return False
+
+
 def _json_equal(a, b):
     """`a == b` with JSON's types: a bool never equals a number.
 
@@ -826,7 +847,8 @@ def compare(actual, expected, comparison):
 # is refused (a judge_error): the older `validate(..., instance=None)` form made
 # its extra calls through the live object, so an operations validator had to run
 # in the child, where `expected` was readable and the verdict forgeable. Probes
-# replaced it (ADR-0007), and seeding refuses it too.
+# replaced it (ADR-0007), and seeding refuses it wherever the source shows it's
+# the `validate` that runs.
 #
 # `args` is the test case's input
 # exactly as it was *before* the submission ran — a separate deep copy from the
@@ -1265,6 +1287,10 @@ def _finalize(tc, reply, comparison, validate_fn=None, time_limit_s=None, probes
                 "stdout": _truncate(reply["stdout"])}
 
     actual = reply.get("actual")
+    if _nests_too_deeply(actual) or _nests_too_deeply(reply.get("probe_results")):
+        return {"test_case_id": tc_id, "status": "runtime_error", "runtime_ms": reply["runtime_ms"],
+                "output": None, "stdout": _truncate(reply["stdout"]),
+                "error": "the returned value is nested too deeply to judge"}
     if validate_fn is not None:
         # The child's reply is untrusted: a submission can write its own frame. A
         # forged `probe_results` is harmless (anything it claims, the submission's
@@ -1374,12 +1400,13 @@ def run(payload):
             try:
                 result = _finalize(tc, reply, comparison, validate_fn, time_limit_s, probes)
             except RecursionError:
-                # A value nested thousands deep parses, but comparing or printing it
-                # recurses past Python's limit. It's the submission's (or a forged
-                # frame's) doing, so it's that case's runtime_error, not a crash that
-                # loses the whole report.
+                # A backstop: `_finalize` refuses a reply nested past _MAX_NESTING
+                # before anything recurses on it, so this shouldn't happen. If it
+                # does, it's that case's runtime_error, not a crash that loses the
+                # whole report.
                 result = {"test_case_id": tc.get("id", 0), "status": "runtime_error",
-                          "runtime_ms": 0, "output": None, "stdout": "",
+                          "runtime_ms": _number_or_zero(reply.get("runtime_ms")), "output": None,
+                          "stdout": _truncate(_as_text(reply.get("stdout"))),
                           "error": "the returned value is nested too deeply to judge"}
             results.append(result)
 

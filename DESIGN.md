@@ -625,15 +625,20 @@ in the **child**, where `expected` was readable and the verdict forgeable. Probe
 replaced it, and it's refused: the harness reports a validator its call
 `validate(actual=, expected=, args=, probe_results=)` can't bind to (the older form,
 or one with a leftover required parameter) as a `judge_error`, and seeding refuses
-it in every mode. Because stored problems keep whatever form they were seeded with,
+it wherever the source alone shows it's what runs (below). Because stored problems keep whatever form they were seeded with,
 the always-on accounts worker names any stored validator the judge would refuse in
 its startup log (`worker/stale_validators.py`): re-seed the converted problem set.
 A validator that is, or returns, a coroutine or generator (an `async def`, a
 generator, an async `__call__`) is a `judge_error` too, since that value is always
 truthy. Seeding refuses these, and a call that won't bind, only when it can tell
-from the source alone: when `validate` is bound once, by an undecorated `def`.
-Anything else (a decorator, a second def, an import) is left to the harness's
-load-time check.
+from the source alone: when every binding of `validate` is a top-level statement
+and the last of them is an undecorated `def` (top-level statements run in order,
+so that def is what's bound). Anything else (a decorator, a binding inside a block
+or a nested expression, a `global validate`, a star import) is left to the harness's
+load-time check, which the seed-solution tests exercise.
+A value the submission returns nested more than 256 lists or maps deep is that
+case's `runtime_error`, checked where the reply comes in and before comparing or
+validating recurses on it, in every comparison mode.
 `args` is the parent's own copy of the input (it never crossed into the child),
 separate from the one handed to the submission: validators routinely check "same
 multiset as the input", and if they read the submission's copy, a submission
