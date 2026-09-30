@@ -7,7 +7,7 @@ onto its own line, not just top-level fields — for a problem with a large
 hidden test case (an array of thousands of ints), that turns a two-field
 change into a multi-thousand-line diff. The established style instead keeps
 the top-level document indented, but renders `params`/`constraints`/`tags`
-and every `languages[]`/`test_cases[]`/`solutions[]` entry as a single compact line
+and every `languages[]`/`test_cases[]`/`solutions[]`/`wrong_solutions[]` entry as a single compact line
 regardless of its size.
 
 Usage:
@@ -22,7 +22,7 @@ import json
 import sys
 
 _COMPACT_LIST_KEYS = ("params", "constraints", "tags", "comparison")
-_COMPACT_ITEM_KEYS = ("languages", "test_cases", "solutions")
+_COMPACT_ITEM_KEYS = ("languages", "test_cases", "solutions", "wrong_solutions")
 
 
 def _compact(obj) -> str:

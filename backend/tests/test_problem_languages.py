@@ -173,3 +173,15 @@ def test_a_solution_may_cover_only_some_languages():
         solutions=[_solution({"python": "p", "rust": "r"}),
                    {**_solution({"rust": "r2"}, title="Rust only"), "ordinal": 1}]))
     assert p.solutions[1].code == {"rust": "r2"}
+
+
+def test_wrong_solution_code_follows_the_solution_rules():
+    """`wrong_solutions` (code the judge must reject) is run per language by the
+    seed tests, so its `code` is normalized and checked the same way."""
+    wrong = {"title": "Always zero", "code": "def f(x): return 0"}
+    p = ProblemFile.model_validate(_file(_variant("python"), wrong_solutions=[wrong]))
+    assert p.wrong_solutions[0].code == {"python": "def f(x): return 0"}
+    assert "wrong solution 'Always zero': give 'code' as a map" in _error(
+        _file(_variant("python"), _variant("rust"), wrong_solutions=[wrong]))
+    assert "wrong solution 'Always zero' has code for ['go']" in _error(
+        _file(_variant("python"), wrong_solutions=[{**wrong, "code": {"go": "g"}}]))

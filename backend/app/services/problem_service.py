@@ -303,7 +303,9 @@ async def upsert_problem(session: AsyncSession, data: ProblemFile) -> tuple[Prob
         The problem row and `"created"` or `"updated"`.
     """
     slug = data.slug or slugify(data.title)
-    fields = data.model_dump(exclude={"slug", "languages", "test_cases", "solutions"})
+    # `wrong_solutions` is test data for the seed tests, never stored.
+    fields = data.model_dump(
+        exclude={"slug", "languages", "test_cases", "solutions", "wrong_solutions"})
     problem = await session.scalar(select(Problem).where(Problem.slug == slug))
     if problem is None:
         problem = Problem(slug=slug, **fields)

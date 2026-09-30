@@ -16,6 +16,11 @@ repo). `rust` is the same story for a different reason: its harness compiles
 the solution with the rustc and prebuilt prelude that only
 `shikomi-judge-rust:latest` carries (judge/tests/rust_runner.py).
 
+It also runs each problem's `wrong_solutions` (known-wrong code, `WrongSolutionIn`)
+and requires the judge to reject each one with a `wrong_answer`: the reference
+solutions prove a problem accepts right answers, and only these prove a custom
+validator rejects wrong ones (docs/adr/0007-custom-validators-in-every-language.md).
+
 Point it at your own problems with `SEED_DIR=/path/to/problems` (default:
 this repo's `seed/problems/`) — it's the check to run before `app.cli seed`
 loads a problem you wrote.
@@ -102,7 +107,7 @@ def _variants(problem):
                 if k in problem}}]
 
 
-def _solution_cases():
+def _solution_cases(key="solutions"):
     # One parametrization per (solution, language it has code for), so every
     # language of every problem is proven by a real harness run. Languages judged
     # in their real sandbox image need Docker, so just those parametrizations are
@@ -112,7 +117,7 @@ def _solution_cases():
     for problem in _seed_problems():
         variants = {v["language"]: v for v in _variants(problem)}
         only = next(iter(variants))
-        for i, solution in enumerate(problem.get("solutions", [])):
+        for i, solution in enumerate(problem.get(key, [])):
             codes = solution["code"] if isinstance(solution["code"], dict) else {only: solution["code"]}
             for language, code in codes.items():
                 params.append(pytest.param(
@@ -122,8 +127,9 @@ def _solution_cases():
     return params
 
 
-@pytest.mark.parametrize("problem,variant,title,code", _solution_cases())
-def test_seed_solution_passes_its_own_test_cases(problem, variant, title, code):
+def _judge(problem, variant, code):
+    """Run `code` against every one of `problem`'s cases in `variant`'s harness, and
+    return the per-case results."""
     # The same per-language validator resolution the worker applies. Stdlib-only, so
     # it imports with only pytest installed; imported here rather than at module level
     # so backend/ joins sys.path only when a test runs, as in rust_runner.
@@ -143,7 +149,12 @@ def test_seed_solution_passes_its_own_test_cases(problem, variant, title, code):
         "params": variant.get("params", []),
         "return_type": variant.get("return_type", ""),
     }
-    results = _run_harness(payload, language=variant["language"])
+    return _run_harness(payload, language=variant["language"])
+
+
+@pytest.mark.parametrize("problem,variant,title,code", _solution_cases())
+def test_seed_solution_passes_its_own_test_cases(problem, variant, title, code):
+    results = _judge(problem, variant, code)
     failures = [r for r in results if r["status"] != "passed"]
     assert not failures, (
         f"{len(failures)}/{len(results)} case(s) failed for "
@@ -161,3 +172,21 @@ def test_seed_problem_has_at_least_one_solution(problem):
     # Not the harness's job, but the same authoring mistake this file exists to
     # catch: a problem with zero solutions has nothing here to validate it.
     assert problem.get("solutions"), f"{problem['slug']} has no solutions to validate"
+
+
+@pytest.mark.parametrize("problem,variant,title,code", _solution_cases("wrong_solutions"))
+def test_seed_wrong_solution_is_rejected(problem, variant, title, code):
+    # A `wrong_answer` on some case is the proof: the comparison (for a custom
+    # validator, the problem's own code) looked at the output and said no. Failing
+    # only by crashing or timing out proves nothing about the comparison, and a
+    # judge_error means the validator itself broke, which would pass nothing.
+    results = _judge(problem, variant, code)
+    statuses = {r["status"] for r in results}
+    detail = "\n".join(f"  case {r['test_case_id']}: {r['status']} (error={r['error']!r})"
+                       for r in results if r["status"] != "passed")
+    assert "judge_error" not in statuses, (
+        f"{problem['slug']} wrong solution '{title}' ({variant['language']}) hit a judge error:\n{detail}")
+    assert "wrong_answer" in statuses, (
+        f"{problem['slug']} wrong solution '{title}' ({variant['language']}) was never judged "
+        f"wrong_answer (statuses: {sorted(statuses)}), so nothing shows the problem rejects it"
+        + (f":\n{detail}" if detail else ""))

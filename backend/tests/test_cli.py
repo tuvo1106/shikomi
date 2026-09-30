@@ -188,13 +188,17 @@ MULTI = {
 
 
 async def test_seed_writes_every_language_and_its_solution_code(
-        session_factory, monkeypatch, tmp_path):
+        session_factory, monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(cli, "SessionLocal", session_factory)
-    (tmp_path / "demo.json").write_text(json.dumps(MULTI))
+    wrong = [{"title": "Wrong", "code": {"python": "def f(x): return 0"}}]
+    (tmp_path / "demo.json").write_text(json.dumps({**MULTI, "wrong_solutions": wrong}))
     assert await cli.seed(tmp_path) == 0
     assert await cli.seed(tmp_path) == 0  # re-seed replaces, doesn't duplicate
 
     [problem] = await _problems(session_factory)
+    # `wrong_solutions` is test data: it loads (and doesn't warn as unknown) but
+    # writes no Solution row.
+    assert "unknown keys" not in capsys.readouterr().err
     assert [(v.ordinal, v.language) for v in problem.languages] == [
         (0, "python"), (1, "js"), (2, "rust")]
     assert problem.languages[2].note_md == "Use `i64`."

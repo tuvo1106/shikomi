@@ -178,7 +178,10 @@ never both.
     `def validate(actual, expected, args, probe_results) -> bool` and the Rust one
     as `fn validate(actual: &Json, expected: &Json, args: &Json, probe_results:
     &[Json]) -> bool` (with `use shikomi_prelude::Json;`), checking the same
-    property. Give each problem a known-wrong solution to confirm both reject it.
+    property. Give the file `wrong_solutions`, known-wrong code in each language
+    (`[{"title": "Always returns index 0", "code": {"python": "…", "rust": "…"}}]`),
+    so the seed-solution tests prove both validators reject a plausible mistake:
+    each must be judged `wrong_answer` on some case, not merely crash.
     In an operations problem, when the check needs more calls than the case
     makes, give the case `probes`, extra calls the judge makes after the replay,
     whose results arrive as `probe_results`:
