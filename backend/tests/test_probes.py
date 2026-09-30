@@ -172,7 +172,7 @@ def test_a_validator_the_harness_call_cant_bind_to_is_refused():
                     "def f[validate]():\n    pass\n" + older,
                     "def f[**validate]():\n    pass\n" + older,
                     "def f[*validate]():\n    pass\n" + older,
-                    "class C[validate]:\n    pass\n" + older,
+                    "type X[validate] = int\n" + older,
                     older + "try:\n    pass\nexcept Exception as validate:\n    pass\n",
                     older + "match wrap(1):\n    case validate:\n        pass\n",
                     older + "from helpers import *\n",

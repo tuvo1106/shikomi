@@ -625,16 +625,17 @@ in the **child**, where `expected` was readable and the verdict forgeable. Probe
 replaced it, and it's refused: the harness reports a validator its call
 `validate(actual=, expected=, args=, probe_results=)` can't bind to (the older form,
 or one with a leftover required parameter) as a `judge_error`, and seeding refuses
-it wherever the source alone shows it's what runs (below). Because stored problems keep whatever form they were seeded with,
-the always-on accounts worker names any stored validator the judge would refuse in
-its startup log (`worker/stale_validators.py`): re-seed the converted problem set.
-A validator that is, or returns, a coroutine or generator (an `async def`, a
-generator, an async `__call__`) is a `judge_error` too, since that value is always
-truthy. Seeding refuses these, and a call that won't bind, when the source makes
-plain which `validate` runs, by one rule: the identifier `validate` occurs nowhere
-but as the name of top-level `def`s and as the callee of calls, so the last such def
-is what's bound. That def must also be undecorated, or seeding doesn't decide. Any
-other occurrence (an assignment, an import, a same-named local even in an unrelated
+it wherever the source alone shows it's what runs (below). Because stored problems
+keep whatever form they were seeded with, the always-on accounts worker names any
+stored validator the judge would refuse in its startup log
+(`worker/stale_validators.py`): re-seed the converted problem set. A validator that
+is, or returns, a coroutine or generator (an `async def`, a generator, an async
+`__call__`) is a `judge_error` too, since that value is always truthy. Seeding
+refuses these, and a call that won't bind, when the source makes plain which
+`validate` runs, by one rule: the identifier `validate` occurs nowhere but as the
+name of top-level `def`s and as the callee of calls, so the last such def is what's
+bound. That def must also be undecorated, or seeding doesn't decide. Any other
+occurrence (an assignment, an import, a same-named local even in an unrelated
 function, handing it to `update_wrapper`) is left to the harness's load-time check,
 which the seed-solution tests exercise: deferring on a harmless shadow is the price
 of a rule simple enough to be obviously right (a list of special-cased rebinding
@@ -643,8 +644,8 @@ written: problem authors are trusted maintainers, so it's there to catch honest
 mistakes, and rebinding `validate` by reflection at load time (`globals()`, frames)
 is out of scope. Whether the call binds is decided by `inspect.Signature.bind`
 itself, on a signature built from the def's parameter names and kinds, so the check
-matches the harness's and evaluates none of the validator's code.
-Source that doesn't compile is refused outright.
+matches the harness's and evaluates none of the validator's code. Source that doesn't
+compile is refused outright.
 In the Python judge, a returned value with anything more than 511 levels below it
 (the value itself at depth 0) is that case's `runtime_error`: the Rust prelude's
 parser stops past depth 512, and the Rust child reports the answer one level down in
