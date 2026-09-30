@@ -691,8 +691,8 @@ def _number_or_zero(x):
     return x if _is_number(x) and math.isfinite(x) else 0
 
 
-# How deep a returned value may nest: the same cap as the Rust prelude's JSON
-# parser (MAX_DEPTH). Comparing, validating and printing a
+# How deep a returned value may nest: the Rust prelude's JSON parser cap
+# (MAX_DEPTH), counted the same way (see `_nests_too_deeply`). Comparing, validating and printing a
 # value recurse on it, so one nested thousands deep (a submission's `[[[...]]]`,
 # or a forged frame) would raise RecursionError in the parent. Past this limit it's
 # the submission's runtime_error, checked once where the reply comes in, before
@@ -708,19 +708,18 @@ _PARENT_RECURSION_LIMIT = 8 * _MAX_NESTING + 1000
 
 
 def _nests_too_deeply(value, limit=_MAX_NESTING):
-    """Whether `value` (parsed JSON) nests lists or dicts deeper than `limit`.
-    Iterative, so it can't itself hit the recursion limit it guards, and it
-    visits only containers, so a long flat list costs one pass over it."""
-    if not isinstance(value, (list, dict)):
-        return False
-    todo = [(value, 1)]
+    """Whether any value inside `value` (parsed JSON) sits deeper than `limit`,
+    counting as the Rust prelude's parser does: `value` itself at depth 0, each
+    list element or map value one deeper than its container. Iterative, so it
+    can't itself hit the recursion limit it guards, and it walks only containers,
+    so a long flat list costs one pass over it."""
+    todo = [(value, 0)] if isinstance(value, (list, dict)) else []
     while todo:
         node, depth = todo.pop()
-        if depth > limit:
+        children = node.values() if isinstance(node, dict) else node
+        if depth + 1 > limit and len(children):
             return True
-        for child in node.values() if isinstance(node, dict) else node:
-            if isinstance(child, (list, dict)):
-                todo.append((child, depth + 1))
+        todo.extend((child, depth + 1) for child in children if isinstance(child, (list, dict)))
     return False
 
 
@@ -1299,7 +1298,7 @@ def _finalize(tc, reply, comparison, validate_fn=None, time_limit_s=None, probes
                 "stdout": _truncate(reply["stdout"])}
 
     actual = reply.get("actual")
-    if _nests_too_deeply(actual) or (validate_fn is not None and _nests_too_deeply(reply.get("probe_results"))):
+    if _nests_too_deeply(actual) or (probes and _nests_too_deeply(reply.get("probe_results"))):
         return {"test_case_id": tc_id, "status": "runtime_error", "runtime_ms": reply["runtime_ms"],
                 "output": None, "stdout": _truncate(reply["stdout"]),
                 "error": "the returned value is nested too deeply to judge"}

@@ -176,11 +176,17 @@ def test_a_validator_the_harness_call_cant_bind_to_is_refused():
                       "def validate(actual, expected, args, probe_results, instance):\n    return 1\n"
                     "validate.__defaults__ = (None,)\n",
                     older + "globals()['validate'] = lambda actual, expected, args, probe_results: 1\n",
-                    older + "import functools\n"):
+                    older + "import sys\nsys._getframe().f_globals['validate'] = print\n",
+                      older + "validate.__defaults__ = (None,)\n",
+                    older + "class K:\n    validate = 1\n",
+                    older + "if __name__:\n    pass\n"):
         ProblemFile.model_validate(_file(None, validator=unclear))
-    # Names bound in nested scopes, or a bare annotation, don't rebind it.
+    # Code that runs nothing at load time can't rebind it: names bound in nested
+    # scopes, a bare annotation, imports, constants, call-free annotations.
     for clear in (older + "def helper():\n    validate = 1\n",
-                  older + "class K:\n    validate = 1\n",
+                  older + "import functools\n",
+                  '"""Docstring."""\nfrom collections import Counter\nLIMIT = (1, -2)\n' + older,
+                  "def validate(actual: list[int], expected, args, instance=None) -> bool:\n    return True\n",
                   older + "validate: object\n",
                   "validate = None\n" + older):
         assert "the older `instance` form is gone" in _error(_file(None, validator=clear))
@@ -192,7 +198,8 @@ def test_a_validator_the_harness_call_cant_bind_to_is_refused():
 @pytest.mark.parametrize("source", ["x = " + "1+" * 200000 + "1\n",  # RecursionError
                                     "X = " + "[" * 300 + "]" * 300 + "\n",  # the parser's limit
                                     "return 1\n",  # only compiling finds it
-                                    "def (:\n"])
+                                    "def (:\n",
+                                    "x = 1\0\n"])  # no line number
 def test_a_validator_that_doesnt_compile_is_refused(source):
     """The harness's compile() fails on it too, so no case could be judged."""
     assert "the Python validator doesn't compile" in _error(_file(None, validator=source + PROBE_VALIDATOR))

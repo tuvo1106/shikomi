@@ -129,7 +129,7 @@ All notable changes to this project are recorded here. The format follows
 - **The accounts worker names stored problems whose custom validator the judge refuses**
   when it starts, so an upgrade that ran before the problem set was re-seeded shows up
   in the log at once.
-- **An answer nested more than 512 lists or maps deep is that case's `runtime_error`**
+- **An answer nested more than 512 levels deep is that case's `runtime_error`**
   in the Python judge, in every comparison mode, with its printed output kept. Under a
   custom validator it used to be a `judge_error` that blamed the problem's author. The
   judge now also gives comparing and custom validators room to recurse through an

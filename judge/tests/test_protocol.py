@@ -454,6 +454,23 @@ def test_an_answer_nested_within_the_limit_is_judged():
         "status"] == "passed"
 
 
+@pytest.mark.parametrize("inner, wraps, status", [
+    ("[]", 512, "passed"),           # 513 lists, the innermost (empty) at depth 512
+    ("[]", 513, "runtime_error"),    # ... at depth 513
+    ("1", 512, "passed"),            # 512 lists, the scalar at depth 512
+    ("1", 513, "runtime_error"),
+])
+def test_the_nesting_cap_counts_as_the_rust_parser_does(inner, wraps, status):
+    """Every value's depth from 0 at the top; anything past 512 is too deep. Within
+    the cap, compare() and printing the answer walk it without RecursionError."""
+    code = f"def f(s):\n    v = {inner}\n    for _ in range({wraps}):\n        v = [v]\n    return v\n"
+    expected = json.loads(inner)
+    for _ in range(wraps):
+        expected = [expected]
+    row = results(payload(code, [case(0, ["x"], expected)]))[0]
+    assert row["status"] == status, row
+
+
 def test_an_answer_nested_too_deeply_is_the_submissions_fault_under_a_validator_too():
     """Checked where the reply comes in, before any validator sees it: a runtime_error
     that keeps the case's stdout, not a judge_error blaming the problem's author."""

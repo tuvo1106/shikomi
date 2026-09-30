@@ -193,88 +193,67 @@ def _is_generator(fn: ast.FunctionDef) -> bool:
     return False
 
 
-# Names and attributes that reach a module's globals, or a function's defaults,
-# by reflection: a validator that uses any of them may reshape `validate` in ways
-# the source doesn't spell out, so seeding leaves it to the harness.
-_REFLECTIVE_NAMES = frozenset({"globals", "vars", "locals", "setattr", "delattr", "exec", "eval",
-                               "compile", "__import__", "__builtins__"})
-_REFLECTIVE_ATTRS = frozenset({"modules", "__dict__", "__globals__", "__defaults__",
-                               "__kwdefaults__", "__signature__", "__wrapped__", "__code__"})
-_REFLECTIVE_MODULES = frozenset({"__main__", "builtins", "importlib", "functools", "inspect"})
+def _runs_no_code(node: ast.AST) -> bool:
+    """Whether evaluating the expression `node` can't run any code the validator
+    wrote: it makes no call (and no walrus), so, with no class of the validator's
+    own in scope, every object it touches is a constant, a builtin, a stdlib module
+    or a function that isn't called."""
+    return not any(isinstance(n, (ast.Call, ast.NamedExpr, ast.Await, ast.Yield, ast.YieldFrom))
+                   for n in ast.walk(node))
+
+
+def _def_runs_no_code(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """Whether defining `fn` runs no code of the validator's: no decorator, and
+    defaults and annotations (evaluated at definition) that make no call."""
+    a = fn.args
+    evaluated = [*a.defaults, *(d for d in a.kw_defaults if d is not None), fn.returns,
+                 *(p.annotation for p in (*a.posonlyargs, *a.args, *a.kwonlyargs, a.vararg, a.kwarg)
+                   if p is not None)]
+    return not fn.decorator_list and all(_runs_no_code(e) for e in evaluated if e is not None)
 
 
 def _validate_def_that_runs(tree: ast.Module) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
     """The `def validate` whose signature the harness will see, or None when that
     can't be read off the source without running it.
 
-    It answers only in the plain case: the last top-level statement that binds
-    `validate` is an undecorated def (top-level statements run in order, so that
-    def is what's left bound), and nothing else could rebind or reshape it. So it
-    returns None on a `global validate`, a walrus, an `except ... as validate`, a
-    `match` capture, a star import, a binding inside a block that comes last, any
-    use of `validate` other than calling it (passing it to a function could wrap or
-    mutate it), and the usual spellings of reflection (`globals()`, `setattr`,
-    `sys.modules`, `__defaults__`, `functools`, ...). That list can't be complete
-    (reflection has endless spellings), which is why the harness's load-time
-    check, run on the real object, stays the authority.
+    An allowlist, so it's sound without chasing every spelling of reflection: only
+    code that runs while the script loads can rebind or reshape `validate`, so it
+    answers only when the script runs none of its own. Every top-level statement
+    must be an import (not `*`), an undecorated def, a docstring, or an assignment
+    to plain names, and nothing evaluated at load time may make a call. Then the
+    last of those statements to bind `validate` is what's left bound (top-level
+    statements run in order), and it must be a def. Anything else (a class, an
+    `if`, a call, a decorator, an attribute assignment) is None, and the harness,
+    which loads the real object, decides.
     """
-    called = {id(node.func) for node in ast.walk(tree) if isinstance(node, ast.Call)}
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.Global, ast.Nonlocal)) and "validate" in node.names:
-            return None
-        if isinstance(node, ast.ImportFrom) and (
-                node.module in _REFLECTIVE_MODULES or any(a.name == "*" for a in node.names)):
-            return None
-        if isinstance(node, ast.Import) and any(
-                a.name.split(".")[0] in _REFLECTIVE_MODULES for a in node.names):
-            return None
-        if isinstance(node, ast.NamedExpr) and node.target.id == "validate":
-            return None
-        if isinstance(node, ast.ExceptHandler) and node.name == "validate":
-            return None
-        if isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name == "validate":
-            return None
-        if isinstance(node, ast.MatchMapping) and node.rest == "validate":
-            return None
-        if isinstance(node, ast.Attribute) and node.attr in _REFLECTIVE_ATTRS:
-            return None
-        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and (
-                node.id in _REFLECTIVE_NAMES or node.id == "validate" and id(node) not in called):
-            return None
     last = None
     for stmt in tree.body:
-        if (isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
-                and stmt.name == "validate" or _stores_name(stmt, "validate")):
+        if isinstance(stmt, ast.Import):
+            names = [a.asname or a.name.split(".")[0] for a in stmt.names]
+        elif isinstance(stmt, ast.ImportFrom):
+            if any(a.name == "*" for a in stmt.names):
+                return None
+            names = [a.asname or a.name for a in stmt.names]
+        elif isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if not _def_runs_no_code(stmt):
+                return None
+            names = [stmt.name]
+        elif isinstance(stmt, ast.Assign):
+            targets = [n for t in stmt.targets for n in (t.elts if isinstance(t, (ast.Tuple, ast.List)) else [t])]
+            if not all(isinstance(t, ast.Name) for t in targets) or not _runs_no_code(stmt.value):
+                return None
+            names = [t.id for t in targets]
+        elif isinstance(stmt, ast.AnnAssign):
+            if not isinstance(stmt.target, ast.Name) or not _runs_no_code(stmt):
+                return None
+            names = [stmt.target.id] if stmt.value is not None else []  # a bare annotation binds nothing
+        elif isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant):
+            names = []  # a docstring
+        else:
+            return None
+        if "validate" in names:
             last = stmt
-    if (isinstance(last, (ast.FunctionDef, ast.AsyncFunctionDef)) and last.name == "validate"
-            and not last.decorator_list):
-        return last
-    return None
-
-
-def _stores_name(stmt: ast.stmt, name: str) -> bool:
-    """Whether `stmt` binds `name` in the module's own scope: a store or delete of
-    it, or a nested def, class or import of it, outside any nested function,
-    class, lambda or comprehension (those have scopes of their own)."""
-    todo = [stmt]
-    while todo:
-        node = todo.pop()
-        if node is not stmt and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            if node.name == name:
-                return True
-            continue
-        if isinstance(node, (ast.Lambda, ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
-            continue  # scopes of their own; a walrus inside is refused up front
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            continue  # `stmt` itself: its name is the caller's business
-        if isinstance(node, ast.Name) and node.id == name and isinstance(node.ctx, (ast.Store, ast.Del)):
-            return True
-        if isinstance(node, ast.alias) and (node.asname or node.name.split(".")[0]) == name:
-            return True
-        if isinstance(node, ast.AnnAssign) and node.value is None:
-            continue  # a bare annotation binds nothing
-        todo.extend(ast.iter_child_nodes(node))
-    return False
+    return last if isinstance(last, (ast.FunctionDef, ast.AsyncFunctionDef)) else None
 
 
 def validator_call_problem(validator_code: str) -> str | None:
@@ -302,7 +281,8 @@ def validator_call_problem(validator_code: str) -> str | None:
         compile(tree, "<validator>", "exec")  # errors only compiling finds, e.g. a stray `return`
         fn = _validate_def_that_runs(tree)
     except SyntaxError as exc:  # e.g. more brackets deep than the parser allows
-        return f"the Python validator doesn't compile: {exc.msg} (line {exc.lineno})"
+        where = f" (line {exc.lineno})" if exc.lineno else ""
+        return f"the Python validator doesn't compile: {exc.msg}{where}"
     except RecursionError:  # the harness's compile() fails on it the same way
         return "the Python validator doesn't compile: it's nested too deeply"
     except MemoryError as exc:

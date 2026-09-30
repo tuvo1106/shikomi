@@ -631,14 +631,17 @@ its startup log (`worker/stale_validators.py`): re-seed the converted problem se
 A validator that is, or returns, a coroutine or generator (an `async def`, a
 generator, an async `__call__`) is a `judge_error` too, since that value is always
 truthy. Seeding refuses these, and a call that won't bind, only when it can tell
-from the source alone: when the last top-level statement that binds `validate` is an
-undecorated `def` (top-level statements run in order, so that def is what's bound)
-and nothing could rebind or reshape it. Anything else (a decorator, a `global
-validate`, a walrus, passing `validate` to a function, reflection such as
-`globals()` or `__defaults__`) is left to the harness's load-time check, which the
+from the source alone: when the script runs none of its own code while it loads (every
+top-level statement is an import, an undecorated `def`, a docstring or an assignment to
+plain names, and nothing evaluated at load time makes a call), so nothing can rebind or
+reshape `validate`, and the last statement to bind it is a `def` (top-level statements
+run in order). It's an allowlist so that it stays sound without chasing every spelling
+of reflection (`globals()`, frames, `__defaults__`, ...). Anything else (a class, an
+`if`, a call, a decorator) is left to the harness's load-time check, which the
 seed-solution tests exercise. Source that doesn't compile is refused outright.
-In the Python judge, a value the submission returns nested more than 512 lists or
-maps deep (the Rust prelude's JSON parser cap) is that case's `runtime_error`,
+In the Python judge, a value the submission returns with anything deeper than 512
+levels (the Rust prelude's JSON parser cap, counted the same way: the value itself at
+depth 0) is that case's `runtime_error`,
 checked where the reply comes in, before comparing or validating recurses on it,
 in every comparison mode. The parent's recursion limit is raised so both can walk
 a value up to that depth. The JS judge has no cap yet (AGENTS.md).
