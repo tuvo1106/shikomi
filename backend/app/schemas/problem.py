@@ -21,7 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from app.comparison import validator_codes
 from app.judge_budget import fits_job_timeout, max_cases_within_job_timeout
 from app.sandbox import ALL_NODE_TYPES, profile_for, rust_method_name
-from app.schemas.solution import SolutionIn
+from app.schemas.solution import SolutionIn, WrongSolutionIn
 
 UserStatus = Literal["solved", "attempted", "unsolved"]
 Difficulty = Literal["easy", "medium", "hard"]
@@ -536,6 +536,9 @@ class ProblemFile(ProblemIn):
     # otherwise publish a problem that accepts anything.
     test_cases: list[TestCaseIn] = Field(min_length=1)
     solutions: list[SolutionIn] = Field(default_factory=list)
+    # Code the judge must reject (`WrongSolutionIn`): test data for
+    # judge/tests/test_seed_solutions.py, never written to the database.
+    wrong_solutions: list[WrongSolutionIn] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _unique_ordinals(self) -> "ProblemFile":
@@ -615,21 +618,32 @@ class ProblemFile(ProblemIn):
     def authoring_warnings(self) -> list[str]:
         """What loads but deserves the author's attention; `app.cli` prints these.
 
-        An operations validator in the older `instance` form (no `probe_results`)
-        runs in the judge's child process, next to the submission, which can then
-        read `expected` and forge that case's verdict (ADR-0007). It's a warning,
-        not an error, until the problem sets written that way are converted: the
-        harness still runs them, and refusing them would stop those sets loading.
+        * An operations validator in the older `instance` form (no `probe_results`)
+          runs in the judge's child process, next to the submission, which can then
+          read `expected` and forge that case's verdict (ADR-0007). It's a warning,
+          not an error, until the problem sets written that way are converted: the
+          harness still runs them, and refusing them would stop those sets loading.
+        * A custom validator with no wrong solution in some language: nothing proves
+          that language's validator rejects anything (`WrongSolutionIn`). A warning,
+          since a problem set adds them over time.
         """
-        if self.kind != "operations" or self.comparison.get("mode") != "custom_validator":
+        if self.comparison.get("mode") != "custom_validator":
             return []
+        warnings = []
         params = _validate_params(validator_codes(self.comparison).get("python", ""))
-        if params is None or "probe_results" in params:
-            return []
-        return ["its operations validator uses the older `instance` form, which runs next to "
+        if self.kind == "operations" and params is not None and "probe_results" not in params:
+            warnings.append(
+                "its operations validator uses the older `instance` form, which runs next to "
                 "the submission: it can read `expected`, and its verdict can be forged. Use "
                 "`validate(actual, expected, args, probe_results)`, with probes for any extra "
-                "calls (docs/adr/0007-custom-validators-in-every-language.md)"]
+                "calls (docs/adr/0007-custom-validators-in-every-language.md)")
+        covered = {lang for sol in self.wrong_solutions for lang in sol.code}
+        unproven = [v.language for v in self.languages if v.language not in covered]
+        if unproven:
+            warnings.append(
+                f"its custom validator has no wrong solution for {unproven}, so nothing proves "
+                "it rejects a wrong answer there; add one to 'wrong_solutions'")
+        return warnings
 
     @model_validator(mode="after")
     def _probes_feed_a_probe_validator(self) -> "ProblemFile":
@@ -703,20 +717,23 @@ class ProblemFile(ProblemIn):
         # A solution's `code` is a {language: code} map. A plain string is the
         # one-language shorthand (and every file written before problems had
         # several languages), so it's only unambiguous with exactly one language.
+        # A wrong solution's `code` follows the same rules, so the seed tests can
+        # run it in each language it names.
         declared = [v.language for v in self.languages]
-        for sol in self.solutions:
+        for what, sol in [("solution", s) for s in self.solutions] + [
+                ("wrong solution", s) for s in self.wrong_solutions]:
             if isinstance(sol.code, str):
                 if len(declared) != 1:
                     raise ValueError(
-                        f"solution '{sol.title}': give 'code' as a map of language to code "
+                        f"{what} '{sol.title}': give 'code' as a map of language to code "
                         "when the problem has several languages")
                 sol.code = {declared[0]: sol.code}
             if not sol.code:
-                raise ValueError(f"solution '{sol.title}' has no code")
+                raise ValueError(f"{what} '{sol.title}' has no code")
             extra = set(sol.code) - set(declared)
             if extra:
                 raise ValueError(
-                    f"solution '{sol.title}' has code for {sorted(extra)}, "
+                    f"{what} '{sol.title}' has code for {sorted(extra)}, "
                     "which the problem doesn't list in 'languages'")
         # Every language needs a reference solution, or nothing (the seed-solution
         # tests in judge/tests/) proves that language's signature and harness can

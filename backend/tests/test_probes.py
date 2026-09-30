@@ -14,6 +14,7 @@ from worker.judge import _case_payload
 
 PROBE_VALIDATOR = "def validate(actual, expected, args, probe_results):\n    return True\n"
 DECODE = {"op": "decode", "args": [None], "refs": {"0": 1}}
+WRONG = {"title": "Encodes nothing", "code": "class Codec:\n    def encode(self, s):\n        return ''\n"}
 
 
 def _file(probes, *, kind="operations", validator=PROBE_VALIDATOR, comparison=None,
@@ -148,9 +149,20 @@ def test_an_older_form_operations_validator_loads_with_a_warning():
     """It still runs (in the child), so it isn't refused until problem sets that
     use it are converted, but the author hears why it's weaker."""
     older = "def validate(actual, expected, args, instance=None):\n    return True\n"
-    warned = ProblemFile.model_validate(_file(None, validator=older)).authoring_warnings()
+    warned = ProblemFile.model_validate(
+        {**_file(None, validator=older), "wrong_solutions": [WRONG]}).authoring_warnings()
     assert len(warned) == 1 and "can read `expected`" in warned[0]
-    assert ProblemFile.model_validate(_file(None)).authoring_warnings() == []
+    assert ProblemFile.model_validate(
+        {**_file(None), "wrong_solutions": [WRONG]}).authoring_warnings() == []
+
+
+def test_a_validator_with_no_wrong_solution_warns_per_language():
+    """Only a wrong solution proves a validator rejects anything, so a language
+    without one is named."""
+    data = _file(None, languages=RUST_TOO, validator={"python": PROBE_VALIDATOR, "rust": "fn validate() {}"})
+    data["wrong_solutions"] = [{"title": "W", "code": {"python": "class Codec: ..."}}]
+    [warned] = ProblemFile.model_validate(data).authoring_warnings()
+    assert "no wrong solution for ['rust']" in warned
 
 
 def test_the_seed_cli_prints_authoring_warnings(tmp_path, capsys):

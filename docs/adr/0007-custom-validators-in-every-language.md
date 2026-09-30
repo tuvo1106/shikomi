@@ -105,4 +105,5 @@ Rust can't run a validator to use them before this) and the prelude RNG; (5) por
   `judge_error`. That is right, since it is the submission's method that raised, but the
   message must say the call was added by the judge.
 - Each language's validators must be kept in step: seed tests run every language's solutions,
-  and a known-wrong solution per problem proves each validator rejects.
+  and a known-wrong solution per problem (a problem file's `wrong_solutions`, judged by
+  `test_seed_solutions.py`, which requires a `wrong_answer`) proves each validator rejects.

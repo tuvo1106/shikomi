@@ -8,6 +8,11 @@ All notable changes to this project are recorded here. The format follows
 
 ### Added
 
+- **Known-wrong solutions in problem files.** A problem file can list `wrong_solutions`,
+  code the judge must reject. The seed-solution tests run each one and fail unless some
+  case is judged `wrong_answer`, which proves a custom validator rejects a plausible
+  mistake instead of accepting everything. They're never loaded or shown, and seeding
+  warns about a custom-validator problem with none in some language.
 - **`Json` in Rust.** A Rust submission can take or return the judge's own `Json` value
   (`Json::Int`, `Json::Arr`, `Json::Str`, `Json::Obj`, ...) wherever no single Rust type
   fits: a nested list that mixes integers and lists, an object tree, or a method that

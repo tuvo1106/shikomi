@@ -425,8 +425,7 @@ slice ships, delete its entry here.
   ([ADR-0007](docs/adr/0007-custom-validators-in-every-language.md)), in order:
   (5) port the 19 problems in the external problem set: the 13 operations validators to
   the probe form (a converter that does this mechanically, and passes all their reference
-  solutions, was proven on a copy), each with a known-wrong solution its validator
-  rejects, and add Rust variants (their random starters `use shikomi_prelude::Rng;`;
+  solutions, was proven on a copy), each with `wrong_solutions` its validator rejects, and add Rust variants (their random starters `use shikomi_prelude::Rng;`;
   encode-and-decode-strings and random-pick-with-weight were ported on a copy and pass,
   with wrong solutions rejected); (6) remove the `instance` form from `harness.py`, after which no validator
   runs in the child and the child never gets `expected`. Follow-ups found in review:
