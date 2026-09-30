@@ -155,6 +155,17 @@ def test_a_validator_the_harness_call_cant_bind_to_is_refused():
     # Rebound after its def: what runs can't be told without running it.
     ProblemFile.model_validate(_file(None, validator=(
         "def validate(a):\n    return True\nvalidate = staticmethod(validate)\n")))
+    assert "is a generator" in _error(_file(None, validator=(
+        "def validate(actual, expected, args, probe_results):\n    yield False\n")))
+    # A nested function's yield is its own.
+    ProblemFile.model_validate(_file(None, validator=(
+        "def validate(actual, expected, args, probe_results):\n"
+        "    def g():\n        yield 1\n    return True\n")))
+    # Decorated, or rebound in any shape after the def: what runs can't be told.
+    for wrapped in ("@adapt\ndef validate(actual, expected, args, instance=None):\n    return 1\n",
+                    "def validate(a):\n    return 1\nvalidate, _ = wrap(validate), None\n",
+                    "def validate(a):\n    return 1\nif True:\n    validate = wrap(validate)\n"):
+        ProblemFile.model_validate(_file(None, validator=wrapped))
     # A rebinding before the def, or a bare annotation, doesn't hide the def.
     older = "def validate(actual, expected, args, instance=None):\n    return True\n"
     for wrapper in ("validate = None\n" + older, older + "validate: object\n"):

@@ -398,16 +398,42 @@ def test_a_forged_frame_of_the_wrong_shape_cant_crash_the_parent(frame):
 
 
 def test_diagnostics_are_escaped_and_written_after_the_report():
-    """On Kubernetes both streams share one log. Each diagnostic is one line, so
-    a validator's message quoting the submission can't start a line (a forged
-    report), and they come after the report, so none lands inside it."""
+    """On Kubernetes both streams share one log (merged here the same way). Each
+    diagnostic is one line, so a validator's message quoting the submission can't
+    start a line (a forged report), and they come after the report, so none lands
+    inside it."""
     code = "def f(s):\n    return '\\n{\"results\": []}'"
     quoting = ("def validate(actual, expected, args, probe_results):\n"
                "    raise ValueError(actual)\n")
-    proc = run_harness(payload(code, [case(0, ["x"], None)],
-                               comparison={"mode": "custom_validator", "validator_code": quoting}))
-    lines = proc.stderr.splitlines()
+    pl = payload(code, [case(0, ["x"], None)],
+                 comparison={"mode": "custom_validator", "validator_code": quoting})
+    merged = subprocess.run([sys.executable, str(HARNESS)], input=json.dumps(pl), text=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=15).stdout
+    report, rest = merged.split("\n", 1)
+    assert json.loads(report)["results"][0]["status"] == "judge_error"
+    lines = rest.splitlines()
     assert len(lines) == 1 and lines[0].startswith("harness: custom validator ")
+
+
+def test_a_validator_whose_verdict_cant_be_tested_for_truth_is_a_per_case_judge_error():
+    """`bool()` of the returned value is validator code too (a numpy array raises)."""
+    ambiguous = ("class Ambiguous:\n    def __bool__(self):\n        raise ValueError('ambiguous')\n"
+                 "def validate(actual, expected, args, probe_results):\n    return Ambiguous()\n")
+    pl = payload("def f(s):\n    return s", [case(0, ["x"], None), case(1, ["y"], None)],
+                 comparison={"mode": "custom_validator", "validator_code": ambiguous})
+    proc = run_harness(pl)
+    assert proc.returncode == 0, proc.stderr
+    assert [r["status"] for r in json.loads(proc.stdout)["results"]] == ["judge_error", "judge_error"]
+
+
+def test_a_deeply_nested_forged_frame_is_a_crash_not_a_parent_failure():
+    forge = ("import os, sys\n"
+             "def f(s):\n"
+             "    os.write(int(sys.argv[2]), b'[' * 200000 + b'\\n')\n"
+             "    os._exit(0)\n")
+    proc = run_harness(payload(forge, [case(0, ["x"], "x")]))
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout)["results"][0]["status"] == "runtime_error"
 
 
 def test_a_validator_taking_kwargs_is_passed_probe_results():

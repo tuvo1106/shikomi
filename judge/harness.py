@@ -933,21 +933,23 @@ def _run_validator(validate_fn, actual, expected, args, budget_s, probe_results)
     try:
         verdict = validate_fn(actual=actual, expected=expected, args=args,
                               probe_results=probe_results)
-    except TimeLimitExceeded:
+        # A coroutine or generator is always truthy, so it would pass every case:
+        # an `async def`, a generator, or an object whose `__call__` is either.
+        # Checked on the value, since that catches every way of producing one.
+        if inspect.isawaitable(verdict) or inspect.isgenerator(verdict) or inspect.isasyncgen(verdict):
+            if hasattr(verdict, "close"):
+                verdict.close()  # no "never awaited" warning
+            raise ValidatorError("returned %s, not a verdict (is 'validate' async or a generator?)"
+                                 % type(verdict).__name__)
+        # Inside the timer and the wrapper: an object's `__bool__` is validator code
+        # too, and may raise (a numpy array) or never return.
+        return bool(verdict)
+    except (TimeLimitExceeded, ValidatorError):
         raise
     except BaseException as exc:  # noqa: BLE001 - validator may raise anything
         raise ValidatorError("raised %s: %s" % (type(exc).__name__, exc)) from exc
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
-    # A coroutine or generator is always truthy, so it would pass every case: an
-    # `async def`, an async generator, or an object whose `__call__` is either.
-    # Checked on the value, since that catches every way of producing one.
-    if inspect.isawaitable(verdict) or inspect.isgenerator(verdict) or inspect.isasyncgen(verdict):
-        if hasattr(verdict, "close"):
-            verdict.close()  # no "never awaited" warning on the harness's stderr
-        raise ValidatorError("returned %s, not a verdict (is 'validate' async or a generator?)"
-                             % type(verdict).__name__)
-    return bool(verdict)
 
 
 # --- traceback filtering ----------------------------------------------------
@@ -1176,7 +1178,7 @@ class _Child:
             return {"status": _CRASH}
         try:
             reply = json.loads(line)
-        except ValueError:  # JSONDecodeError → treat the channel as desynced
+        except (ValueError, RecursionError):  # bad or absurdly nested JSON: desynced
             return {"status": _CRASH}
         # Valid JSON that isn't an object (`[1]`) is as desynced as invalid JSON.
         return reply if isinstance(reply, dict) else {"status": _CRASH}
@@ -1257,7 +1259,7 @@ def _finalize(tc, reply, comparison, validate_fn=None, time_limit_s=None, probes
         # only to turn its own case into a judge_error, and only where probes exist.
         _diagnose("case %s:" % tc_id, reply.get("error"))
         return {**_judge_error_result(tc_id, PROBE_FAULT), "runtime_ms": reply["runtime_ms"],
-                "stdout": _truncate(str(reply.get("stdout", "")))}
+                "stdout": _truncate(reply["stdout"])}
 
     actual = reply.get("actual")
     if validate_fn is not None:
@@ -1409,7 +1411,18 @@ def main():
     if len(sys.argv) > 2 and sys.argv[1] == CHILD_FLAG:
         _child_main(int(sys.argv[2]))
         return
+    try:
+        _parent_main()
+    finally:
+        # After the report (see `_DIAGNOSTICS`), and on every way out: an early
+        # `sys.exit` or an uncaught exception still leaves the operator the reason.
+        for line in _DIAGNOSTICS:
+            sys.stderr.write(line + "\n")
+        sys.stderr.flush()
 
+
+def _parent_main():
+    """The trusted parent: read the payload, judge it (`run`), write the report."""
     # Payload channel: stdin by default (the `docker run -i` path). Under
     # Kubernetes there's no stdin pipe, so the runner mounts the payload as a file
     # and points JUDGE_PAYLOAD_FILE at it. Either way it's read and parsed here in
@@ -1439,10 +1452,10 @@ def main():
         sys.exit(2)
     _set_nondumpable()
     results = run(payload)
-    sys.stdout.write(json.dumps({"results": results}))
+    # A whole line: in a merged stream (the k8s Pod log) the diagnostics that
+    # follow must start on their own line, or they'd corrupt the report.
+    sys.stdout.write(json.dumps({"results": results}) + "\n")
     sys.stdout.flush()
-    for line in _DIAGNOSTICS:  # after the report: see `_DIAGNOSTICS`
-        sys.stderr.write(line + "\n")
 
 
 if __name__ == "__main__":

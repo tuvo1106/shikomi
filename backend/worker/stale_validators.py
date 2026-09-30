@@ -34,8 +34,8 @@ async def stale_validator_slugs(session) -> list[str]:
     for slug, comparison in rows:
         try:
             refused = validator_call_problem(validator_codes(comparison).get("python", "")) is not None
-        except ValueError:  # `validator_code` is neither a string nor a map
-            refused = True
+        except Exception:  # noqa: BLE001 - unreadable (not a string or map, or unparsable):
+            refused = True   # list it, rather than abort the scan and hide the rest
         if refused:
             stale.append(slug)
     return sorted(stale)

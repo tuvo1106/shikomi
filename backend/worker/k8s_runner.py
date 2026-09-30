@@ -249,7 +249,11 @@ def _split_log(log):
     line, the report is "" (which `parse_harness_output` refuses) and the whole
     log is diagnostics.
     """
-    lines = log.splitlines()
+    # "\n" only: `splitlines()` also breaks at U+2028/U+2029/U+0085, which the JS and
+    # Rust harnesses leave raw inside a report's strings.
+    lines = log.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
     for i in range(len(lines) - 1, -1, -1):
         try:
             doc = json.loads(lines[i])

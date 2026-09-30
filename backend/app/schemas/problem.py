@@ -181,6 +181,18 @@ def _operations_case(case_input: Any) -> tuple[list, list]:
 VALIDATOR_CALL = ("actual", "expected", "args", "probe_results")
 
 
+def _is_generator(fn: ast.FunctionDef) -> bool:
+    """Whether `fn`'s own body yields (a nested function's `yield` doesn't count)."""
+    todo = list(fn.body)
+    while todo:
+        node = todo.pop()
+        if isinstance(node, (ast.Yield, ast.YieldFrom)):
+            return True
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            todo.extend(ast.iter_child_nodes(node))
+    return False
+
+
 def validator_call_problem(validator_code: str) -> str | None:
     """Why the harness's call `validate(actual=, expected=, args=, probe_results=)`
     would fail on the validator's top-level `validate`, or None when it binds or
@@ -208,19 +220,24 @@ def validator_call_problem(validator_code: str) -> str | None:
         return None
     last, fn = defs[-1]
 
-    def rebinds(n):
-        if isinstance(n, ast.Assign):
-            return any(isinstance(t, ast.Name) and t.id == "validate" for t in n.targets)
-        if isinstance(n, (ast.AnnAssign, ast.AugAssign)):  # a bare annotation binds nothing
-            return (isinstance(n.target, ast.Name) and n.target.id == "validate"
-                    and (isinstance(n, ast.AugAssign) or n.value is not None))
-        return False
-
-    if any(rebinds(n) for n in tree.body[last + 1:]):
-        return None  # `validate = wrap(validate)`: what runs isn't this def
+    # What runs may not be this def: it's decorated, or rebound after it (in any
+    # statement, block or target shape: `validate = wrap(validate)`, `validate, _ =`,
+    # an `if` that reassigns it). A bare annotation (`validate: object`) binds nothing.
+    rebound = any(isinstance(node, ast.Name) and node.id == "validate"
+                  and isinstance(node.ctx, ast.Store)
+                  and not any(isinstance(a, ast.AnnAssign) and a.value is None and a.target is node
+                              for a in ast.walk(stmt))
+                  for stmt in tree.body[last + 1:] for node in ast.walk(stmt))
+    rebound = rebound or any(isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                             and n.name == "validate" for n in tree.body[last + 1:])
+    if fn.decorator_list or rebound:
+        return None
     if isinstance(fn, ast.AsyncFunctionDef):
         return ("the Python validator is `async def`: the judge calls it without awaiting, "
                 "and a coroutine is always truthy, so every case would pass")
+    if _is_generator(fn):
+        return ("the Python validator is a generator (it has `yield`): the judge would get a "
+                "generator, which is always truthy, so every case would pass")
     a = fn.args
     positional = a.posonlyargs + a.args
     defaulted = {p.arg for p in positional[len(positional) - len(a.defaults):]}

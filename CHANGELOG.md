@@ -122,6 +122,10 @@ All notable changes to this project are recorded here. The format follows
   and on Kubernetes it no longer turns such a run into a whole-submission
   `judge_error` (the Pod log mixes it with the verdict, which is now picked out of
   the log by its content).
+- **A custom validator that returns a coroutine or generator is a `judge_error`.**
+  Such a value is always truthy, so an `async def validate`, a generator, or an object
+  with an async `__call__` used to pass every case. Seeding refuses an `async def` or a
+  generator `validate` outright, with that reason.
 - **The accounts worker names stored problems whose custom validator the judge refuses**
   when it starts, so an upgrade that ran before the problem set was re-seeded shows up
   in the log at once.
