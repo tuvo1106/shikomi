@@ -135,11 +135,13 @@ def test_refs_and_repeat_dont_combine():
         _file([{"op": "decode", "args": [None], "refs": {"0": 1}, "repeat": 2}]))
 
 
-def test_the_last_def_validate_is_the_one_checked_as_it_is_the_one_that_runs():
+def test_two_defs_of_validate_are_left_to_the_harness():
+    """Which one runs is the harness's to see (the last); seeding decides only a
+    single, plain def, and leaves anything else to the judge's load-time check."""
     older_then_probe = "def validate(actual, expected, args, instance=None):\n    return 1\n" + PROBE_VALIDATOR
     ProblemFile.model_validate(_file([DECODE], validator=older_then_probe))
     probe_then_older = PROBE_VALIDATOR + "def validate(actual, expected, args, instance=None):\n    return 1\n"
-    assert "the older `instance` form is gone" in _error(_file([DECODE], validator=probe_then_older))
+    ProblemFile.model_validate(_file([DECODE], validator=probe_then_older))
 
 
 def test_a_validator_the_harness_call_cant_bind_to_is_refused():
@@ -161,15 +163,23 @@ def test_a_validator_the_harness_call_cant_bind_to_is_refused():
     ProblemFile.model_validate(_file(None, validator=(
         "def validate(actual, expected, args, probe_results):\n"
         "    def g():\n        yield 1\n    return True\n")))
-    # Decorated, or rebound in any shape after the def: what runs can't be told.
-    for wrapped in ("@adapt\ndef validate(actual, expected, args, instance=None):\n    return 1\n",
-                    "def validate(a):\n    return 1\nvalidate, _ = wrap(validate), None\n",
-                    "def validate(a):\n    return 1\nif True:\n    validate = wrap(validate)\n"):
-        ProblemFile.model_validate(_file(None, validator=wrapped))
-    # A rebinding before the def, or a bare annotation, doesn't hide the def.
+    # Unless `validate` is bound once, by an undecorated def, what runs can't be told
+    # without running it: seeding leaves it to the harness, which judges the real object.
     older = "def validate(actual, expected, args, instance=None):\n    return True\n"
-    for wrapper in ("validate = None\n" + older, older + "validate: object\n"):
-        assert "the older `instance` form is gone" in _error(_file(None, validator=wrapper))
+    good = "def validate(actual, expected, args, probe_results):\n    return True\n"
+    for unclear in ("@adapt\n" + older,
+                    older + "validate, _ = wrap(validate), None\n",
+                    older + "if True:\n    validate = wrap(validate)\n",
+                    older + "try:\n    " + good.replace("\n    ", "\n        ") + "finally:\n    pass\n",
+                    older + "from helpers import check as validate\n",
+                    "validate = None\n" + older):
+        ProblemFile.model_validate(_file(None, validator=unclear))
+    # Names bound in nested scopes, or a bare annotation, don't rebind it.
+    for clear in (older + "def helper():\n    validate = 1\n",
+                  older + "X = [validate for validate in range(3)]\n",
+                  older + "class K:\n    validate = 1\n",
+                  older + "validate: object\n"):
+        assert "the older `instance` form is gone" in _error(_file(None, validator=clear))
     for sig in ("actual, expected, args, probe_results, instance=None",
                 "actual, **rest", "actual, expected, args, probe_results, *extra"):
         ProblemFile.model_validate(_file(None, validator=f"def validate({sig}):\n    return True\n"))

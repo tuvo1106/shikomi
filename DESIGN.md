@@ -628,9 +628,12 @@ or one with a leftover required parameter) as a `judge_error`, and seeding refus
 it in every mode. Because stored problems keep whatever form they were seeded with,
 the always-on accounts worker names any stored validator the judge would refuse in
 its startup log (`worker/stale_validators.py`): re-seed the converted problem set.
-A validator that returns a coroutine or generator (an `async def`, an async
+A validator that is, or returns, a coroutine or generator (an `async def`, a
 generator, an async `__call__`) is a `judge_error` too, since that value is always
-truthy; seeding refuses an `async def` outright.
+truthy. Seeding refuses these, and a call that won't bind, only when it can tell
+from the source alone: when `validate` is bound once, by an undecorated `def`.
+Anything else (a decorator, a second def, an import) is left to the harness's
+load-time check.
 `args` is the parent's own copy of the input (it never crossed into the child),
 separate from the one handed to the submission: validators routinely check "same
 multiset as the input", and if they read the submission's copy, a submission

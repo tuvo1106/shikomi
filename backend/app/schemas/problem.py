@@ -193,20 +193,48 @@ def _is_generator(fn: ast.FunctionDef) -> bool:
     return False
 
 
-def validator_call_problem(validator_code: str) -> str | None:
-    """Why the harness's call `validate(actual=, expected=, args=, probe_results=)`
-    would fail on the validator's top-level `validate`, or None when it binds or
-    that can't be told without running it (it doesn't parse, `validate` is defined
-    some other way, or it's rebound after its def). Parsed, never executed: seed
-    validation runs no problem code, and the harness reports a script that doesn't
-    load anyway.
+def _module_bindings(tree: ast.Module, name: str) -> list[ast.AST]:
+    """Every statement that binds `name` at module scope: a def or class of that
+    name, an assignment, `for` or `with` target, walrus, or import, in any block
+    (`if`, `try`, ...). Nested scopes (functions, classes, lambdas,
+    comprehensions) bind their own names, so they aren't searched."""
+    found, todo = [], list(tree.body)
+    while todo:
+        node = todo.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if node.name == name:
+                found.append(node)
+            todo.extend(node.decorator_list)
+            continue  # its body is its own scope
+        if isinstance(node, (ast.Lambda, ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+            continue
+        if isinstance(node, ast.AnnAssign) and node.value is None:
+            continue  # a bare annotation (`validate: object`) binds nothing
+        if isinstance(node, ast.Name) and node.id == name and isinstance(node.ctx, ast.Store):
+            found.append(node)
+        elif isinstance(node, ast.alias) and (node.asname or node.name.split(".")[0]) == name:
+            found.append(node)
+        todo.extend(ast.iter_child_nodes(node))
+    return found
 
-    Mirrors judge/harness.py `_load_validator`: the *last* `def validate` wins, as
-    it does when the script runs; an `async def` is refused, since its coroutine
-    is always truthy and every case would pass; each of the four names needs a
-    parameter it can be passed by keyword (or a `**kwargs`); and any other
-    parameter needs a default, so a leftover `instance` next to `probe_results` is
-    refused.
+
+def validator_call_problem(validator_code: str) -> str | None:
+    """Why judge/harness.py would refuse the Python validator, or None when it
+    wouldn't, or when that can't be told without running it. Parsed, never
+    executed: seed validation runs no problem code.
+
+    It decides only the clear case: `validate` is bound once at module scope, by
+    an undecorated `def`. A decorator, a second def, an assignment or an import
+    of the name means what runs isn't simply that def, so it's None, and the
+    harness judges the real object when it loads it (so does a script that
+    doesn't parse). In the clear case it mirrors `_load_validator`:
+
+    * an `async def` or a generator is refused: the judge would get a coroutine
+      or generator, which is always truthy, so every case would pass;
+    * the call `validate(actual=, expected=, args=, probe_results=)` must bind:
+      each of the four names a parameter it can be passed by keyword (or a
+      `**kwargs`), and any other parameter a default, so a leftover `instance`
+      next to `probe_results` is refused.
     """
     if not isinstance(validator_code, str):
         return "the validator isn't source code"
@@ -214,23 +242,11 @@ def validator_call_problem(validator_code: str) -> str | None:
         tree = ast.parse(validator_code)
     except SyntaxError:
         return None
-    defs = [(i, n) for i, n in enumerate(tree.body)
-            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == "validate"]
-    if not defs:
+    bindings = _module_bindings(tree, "validate")
+    if len(bindings) != 1 or not isinstance(bindings[0], (ast.FunctionDef, ast.AsyncFunctionDef)):
         return None
-    last, fn = defs[-1]
-
-    # What runs may not be this def: it's decorated, or rebound after it (in any
-    # statement, block or target shape: `validate = wrap(validate)`, `validate, _ =`,
-    # an `if` that reassigns it). A bare annotation (`validate: object`) binds nothing.
-    rebound = any(isinstance(node, ast.Name) and node.id == "validate"
-                  and isinstance(node.ctx, ast.Store)
-                  and not any(isinstance(a, ast.AnnAssign) and a.value is None and a.target is node
-                              for a in ast.walk(stmt))
-                  for stmt in tree.body[last + 1:] for node in ast.walk(stmt))
-    rebound = rebound or any(isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
-                             and n.name == "validate" for n in tree.body[last + 1:])
-    if fn.decorator_list or rebound:
+    fn = bindings[0]
+    if fn.decorator_list:
         return None
     if isinstance(fn, ast.AsyncFunctionDef):
         return ("the Python validator is `async def`: the judge calls it without awaiting, "

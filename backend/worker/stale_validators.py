@@ -24,8 +24,10 @@ logger = logging.getLogger(__name__)
 async def stale_validator_slugs(session) -> list[str]:
     """Slugs of stored problems whose Python validator the judge would refuse.
 
-    A row whose `validator_code` can't even be read (neither a string nor a map)
-    is listed too, rather than aborting the scan and hiding the rest.
+    A row whose `validator_code` is neither a string nor a map is listed too (the
+    judge can't use it either), rather than aborting the scan and hiding the rest.
+    A row the check itself fails on is logged and skipped: the check is unsure,
+    so it doesn't claim the judge refuses it.
     """
     rows = await session.execute(
         select(Problem.slug, Problem.comparison)
@@ -33,11 +35,15 @@ async def stale_validator_slugs(session) -> list[str]:
     stale = []
     for slug, comparison in rows:
         try:
-            refused = validator_call_problem(validator_codes(comparison).get("python", "")) is not None
-        except Exception:  # noqa: BLE001 - unreadable (not a string or map, or unparsable):
-            refused = True   # list it, rather than abort the scan and hide the rest
-        if refused:
+            code = validator_codes(comparison).get("python", "")
+        except ValueError:  # neither a string nor a map
             stale.append(slug)
+            continue
+        try:
+            if validator_call_problem(code) is not None:
+                stale.append(slug)
+        except Exception:  # noqa: BLE001 - e.g. RecursionError parsing absurd source
+            logger.exception("could not check the custom validator of %s", slug)
     return sorted(stale)
 
 

@@ -887,9 +887,12 @@ def _load_validator(validator_code):
     validate_fn = namespace.get("validate")
     if not callable(validate_fn):
         raise ValidatorError("must define a 'validate' function")
-    if inspect.iscoroutinefunction(validate_fn):
-        # `bool()` of the coroutine it returns is always True: every case would pass.
-        raise ValidatorError("'validate' must be a plain function, not async")
+    if (inspect.iscoroutinefunction(validate_fn) or inspect.isgeneratorfunction(validate_fn)
+            or inspect.isasyncgenfunction(validate_fn)):
+        # `bool()` of the coroutine or generator it returns is always True: every
+        # case would pass. Refused once, here; `_run_validator` also checks each
+        # returned value, for a callable object whose `__call__` is one of these.
+        raise ValidatorError("'validate' must be a plain function, not async or a generator")
     if not _accepts_the_call(validate_fn):
         raise ValidatorError("'validate' must accept (actual, expected, args, probe_results) by "
                              "keyword; the older 'instance' form is gone "
@@ -1368,7 +1371,16 @@ def run(payload):
                 message["probes"] = probes
             child.send(message)
             reply = child.read(deadline_s)
-            result = _finalize(tc, reply, comparison, validate_fn, time_limit_s, probes)
+            try:
+                result = _finalize(tc, reply, comparison, validate_fn, time_limit_s, probes)
+            except RecursionError:
+                # A value nested thousands deep parses, but comparing or printing it
+                # recurses past Python's limit. It's the submission's (or a forged
+                # frame's) doing, so it's that case's runtime_error, not a crash that
+                # loses the whole report.
+                result = {"test_case_id": tc.get("id", 0), "status": "runtime_error",
+                          "runtime_ms": 0, "output": None, "stdout": "",
+                          "error": "the returned value is nested too deeply to judge"}
             results.append(result)
 
             if reply.get("status") in (_HANG, _CRASH, "time_limit_exceeded"):

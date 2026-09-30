@@ -426,6 +426,17 @@ def test_a_validator_whose_verdict_cant_be_tested_for_truth_is_a_per_case_judge_
     assert [r["status"] for r in json.loads(proc.stdout)["results"]] == ["judge_error", "judge_error"]
 
 
+def test_an_answer_nested_too_deeply_to_compare_is_that_cases_runtime_error():
+    """It parses, but comparing it recurses past Python's limit: the case's
+    runtime_error, and the other cases still get reported."""
+    deep = ("def f(s):\n    v = []\n    for _ in range(3000):\n        v = [v]\n"
+            "    return v if s == 'deep' else s\n")
+    proc = run_harness(payload(deep, [case(0, ["deep"], [1]), case(1, ["x"], "x")],
+                               comparison={"mode": "unordered"}))
+    assert proc.returncode == 0, proc.stderr
+    assert [r["status"] for r in json.loads(proc.stdout)["results"]] == ["runtime_error", "passed"]
+
+
 def test_a_deeply_nested_forged_frame_is_a_crash_not_a_parent_failure():
     forge = ("import os, sys\n"
              "def f(s):\n"
