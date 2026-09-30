@@ -23,14 +23,15 @@ mounts (not the ConfigMap itself, which is read-only), so the harness can read i
 via `JUDGE_PAYLOAD_FILE` and then delete it before running the submission. Verdict out:
 the harness writes its JSON report to stdout, which we read back with the Pod log
 API. That log merges stdout and stderr, and the harness can write diagnostics to
-stderr before its report (a custom validator's exception), so `_split_log` takes the
-report from the last line and passes the rest on as stderr. Only the harness's
+stderr (a custom validator's exception), so `_split_log` picks out the report line by
+its content and passes the rest on as stderr. Only the harness's
 trusted parent writes to either stream; a submission's output goes to /dev/null.
 
 The kubernetes client is synchronous, so each call hops to a thread via
 `asyncio.to_thread` to avoid blocking the worker's event loop.
 """
 import asyncio
+import json
 import logging
 import threading
 import time
@@ -240,14 +241,24 @@ def _run_sync(payload_json, image, name, memory_mb, cpus, wall_timeout_s, tmpfs_
 def _split_log(log):
     """Split a judge Pod's merged log into `(report, diagnostics)`.
 
-    Every harness writes its report as one line, last, after any stderr line, so
-    the last non-empty line is the report and everything before it is stderr. A
-    log with no report line comes back as-is, for `parse_harness_output` to refuse.
+    The report is the last line that parses as a `{"results": ...}` object; every
+    other line is stderr. Choosing it by content, not position, matters twice: the
+    container runtime copies stdout and stderr separately, so a diagnostic written
+    just before the report can land after it, and a harness that dies without a
+    report leaves only diagnostics, which must reach the log whole. With no report
+    line, the report is "" (which `parse_harness_output` refuses) and the whole
+    log is diagnostics.
     """
-    lines = log.rstrip("\n").split("\n")
-    if len(lines) < 2:
-        return log, ""
-    return lines[-1], "\n".join(lines[:-1]) + "\n"
+    lines = log.splitlines()
+    for i in range(len(lines) - 1, -1, -1):
+        try:
+            doc = json.loads(lines[i])
+        except ValueError:
+            continue
+        if isinstance(doc, dict) and "results" in doc:
+            rest = lines[:i] + lines[i + 1:]
+            return lines[i], "".join(line + "\n" for line in rest)
+    return "", log
 
 
 def _delete(v1, pod_name, cm_name):

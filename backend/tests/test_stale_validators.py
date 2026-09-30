@@ -1,4 +1,4 @@
-"""The judge worker's startup check for stored validators it would refuse
+"""The accounts worker's startup check for stored validators it would refuse
 (worker/stale_validators.py; ADR-0007 step 6)."""
 from sqlalchemy import update
 
@@ -25,14 +25,16 @@ async def test_names_only_the_problems_the_judge_would_refuse(session_factory, m
     await _set_validator(session_factory, "older", {"python": OLDER})
     await _set_validator(session_factory, "converted", {"python": PROBE})
     await _set_validator(session_factory, "rust-only", {"rust": "fn validate() {}"})
+    await make_problem(slug="unreadable")
+    await _set_validator(session_factory, "unreadable", 5)
 
     async with session_factory() as s:
-        assert await stale_validators.stale_validator_slugs(s) == ["older"]
+        assert await stale_validators.stale_validator_slugs(s) == ["older", "unreadable"]
 
     monkeypatch.setattr(stale_validators, "SessionLocal", session_factory)
     with caplog.at_level("ERROR", logger="worker.stale_validators"):
         await stale_validators.warn_about_stale_validators()
-    assert "1 problem(s)" in caplog.text and "older" in caplog.text
+    assert "2 problem(s)" in caplog.text and "older, unreadable" in caplog.text
 
 
 async def test_a_failed_check_never_stops_the_worker(monkeypatch, caplog):

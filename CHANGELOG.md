@@ -120,9 +120,9 @@ All notable changes to this project are recorded here. The format follows
   your code)", as the Rust judge already did, and its detail goes to the judge's log,
   since it could quote the expected answer. The judge worker now logs that output,
   and on Kubernetes it no longer turns such a run into a whole-submission
-  `judge_error` (the Pod log mixes it with the verdict, which is now read from the
-  log's last line).
-- **The judge worker names stored problems whose custom validator it would refuse**
+  `judge_error` (the Pod log mixes it with the verdict, which is now picked out of
+  the log by its content).
+- **The accounts worker names stored problems whose custom validator the judge refuses**
   when it starts, so an upgrade that ran before the problem set was re-seeded shows up
   in the log at once.
 

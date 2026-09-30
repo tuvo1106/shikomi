@@ -103,7 +103,7 @@ Rust can't run a validator to use them before this) and the prelude RNG; (5) por
   `runtime_ms`, which now measures the submission alone.
 - After step 6, no validator runs in the child, and the child never receives `expected`. A
   stored problem whose validator still has the older form is a `judge_error` until it's
-  converted and re-seeded; the judge worker names such problems in its startup log.
+  converted and re-seeded; the accounts worker names such problems in its startup log.
 - With probes, an exception in a probe call becomes the submission's `runtime_error`, not
   `judge_error`. That is right, since it is the submission's method that raised, but the
   message must say the call was added by the judge.

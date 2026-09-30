@@ -36,7 +36,12 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message
 async def on_startup(ctx) -> None:
     # Reap any judge sandboxes orphaned by a previous crash (§5.5).
     await runner.sweep_orphans()
+
+
+async def on_accounts_startup(ctx) -> None:
     # Name stored problems whose validator the judge now refuses (ADR-0007 step 6).
+    # Here, not in the judge worker's startup: that one runs on every KEDA scale-up,
+    # ahead of the job that woke it, and would repeat the same error each time.
     await warn_about_stale_validators()
 
 
@@ -81,6 +86,7 @@ class AccountsWorkerSettings:
         # on the judge worker so it still runs when KEDA has scaled that to zero (worker/sweeper.py).
         cron(sweep_stale, second=0, run_at_startup=False),  # top of every minute
     ]
+    on_startup = on_accounts_startup
     max_jobs = 10
     max_tries = 1
     job_timeout = 120      # backstop above the per-job EMAIL_JOB_TIMEOUT_SECONDS

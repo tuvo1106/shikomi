@@ -105,12 +105,16 @@ def test_sweep_orphans_skips_active_pods():
     assert deleted_cms == {"judge-dead"}
 
 
-def test_split_log_takes_the_report_from_the_last_line():
-    """The Pod log merges stdout and stderr, and the harness may write a
-    diagnostic (a custom validator's exception) before its one-line report."""
+def test_split_log_finds_the_report_among_diagnostics():
+    """The Pod log merges stdout and stderr, in whatever order the runtime copied
+    them, and a harness that dies leaves only diagnostics."""
     from worker.k8s_runner import _split_log
     report = '{"results": []}'
+    diag = "harness: custom validator raised ValueError: x"
     assert _split_log(report) == (report, "")
-    assert _split_log(report + "\n") == (report + "\n", "")
-    assert _split_log("harness: custom validator raised ValueError: x\n" + report + "\n") == (
-        report, "harness: custom validator raised ValueError: x\n")
+    assert _split_log(report + "\n") == (report, "")
+    assert _split_log(f"{diag}\n{report}\n") == (report, diag + "\n")
+    assert _split_log(f"{report}\n{diag}\n") == (report, diag + "\n")  # stderr copied last
+    crash = "Traceback (most recent call last):\n  ...\nKeyError: 'x'\n"
+    assert _split_log(crash) == ("", crash)  # nothing lost
+    assert _split_log('{"not": "a report"}\n') == ("", '{"not": "a report"}\n')

@@ -869,6 +869,9 @@ def _load_validator(validator_code):
     validate_fn = namespace.get("validate")
     if not callable(validate_fn):
         raise ValidatorError("must define a 'validate' function")
+    if inspect.iscoroutinefunction(validate_fn):
+        # `bool()` of the coroutine it returns is always True: every case would pass.
+        raise ValidatorError("'validate' must be a plain function, not async")
     if not _accepts_the_call(validate_fn):
         raise ValidatorError("'validate' must accept (actual, expected, args, probe_results) by "
                              "keyword; the older 'instance' form is gone "
@@ -1199,6 +1202,10 @@ def _finalize(tc, reply, comparison, validate_fn=None, time_limit_s=None, probes
     `probes` the ones this case sent the child)."""
     tc_id = tc.get("id", 0)
     status = reply.get("status")
+    # The child's reply is untrusted, and every row below carries its `runtime_ms`:
+    # a non-number (a forged frame) must not reach the report, where the worker
+    # sums it.
+    reply = {**reply, "runtime_ms": _number_or_zero(reply.get("runtime_ms"))}
     if status == _CRASH:
         # The child died without answering — os._exit, a segfault, a killed
         # subprocess. The submission's own doing, so a runtime_error for this case
@@ -1209,7 +1216,7 @@ def _finalize(tc, reply, comparison, validate_fn=None, time_limit_s=None, probes
         return {"test_case_id": tc_id, "status": "time_limit_exceeded", "runtime_ms": None,
                 "output": None, "stdout": _truncate(reply.get("stdout", "")), "error": None}
     if status == "runtime_error":
-        return {"test_case_id": tc_id, "status": "runtime_error", "runtime_ms": reply.get("runtime_ms", 0),
+        return {"test_case_id": tc_id, "status": "runtime_error", "runtime_ms": reply["runtime_ms"],
                 "output": None, "stdout": _truncate(reply.get("stdout", "")),
                 "error": _truncate(reply.get("error", ""))}
     if status == "probe_error" and probes:
@@ -1218,8 +1225,9 @@ def _finalize(tc, reply, comparison, validate_fn=None, time_limit_s=None, probes
         # failed validator, since the probe is a hidden case's data; the detail goes
         # to stderr. The frame is the child's, so a submission could forge it, but
         # only to turn its own case into a judge_error, and only where probes exist.
-        sys.stderr.write("harness: case %s: %s\n" % (tc_id, _truncate(str(reply.get("error")))))
-        return {**_judge_error_result(tc_id, PROBE_FAULT), "runtime_ms": _number_or_zero(reply.get("runtime_ms")),
+        # %r: the text is the child's, so a newline in it can't forge a log line.
+        sys.stderr.write("harness: case %s: %r\n" % (tc_id, _truncate(str(reply.get("error")))))
+        return {**_judge_error_result(tc_id, PROBE_FAULT), "runtime_ms": reply["runtime_ms"],
                 "stdout": _truncate(str(reply.get("stdout", "")))}
 
     actual = reply.get("actual")
@@ -1232,15 +1240,14 @@ def _finalize(tc, reply, comparison, validate_fn=None, time_limit_s=None, probes
         # copy of the probes, and a mismatch is the submission's runtime_error.
         probe_results = reply.get("probe_results") if probes else []
         if not isinstance(probe_results, list) or len(probe_results) != _probe_count(probes):
-            return {"test_case_id": tc_id, "status": "runtime_error", "runtime_ms": reply.get("runtime_ms", 0),
+            return {"test_case_id": tc_id, "status": "runtime_error", "runtime_ms": reply["runtime_ms"],
                     "output": None, "stdout": _truncate(reply.get("stdout", "")),
                     "error": "the submission's reply didn't account for every check the judge ran"}
         # The remaining share of the case's limit. `runtime_ms` is the child's own
-        # report, so clamp it: a lying child can't buy its validator extra time
-        # (or none at all, which setitimer would read as "disarm"), and a
-        # non-number (a forged frame) mustn't crash the parent.
-        runtime_ms = reply.get("runtime_ms")
-        runtime_s = runtime_ms / 1000.0 if _is_number(runtime_ms) and math.isfinite(runtime_ms) else 0.0
+        # report (made a number above), so clamp it: a lying child can't buy its
+        # validator extra time, or none at all, which setitimer would read as
+        # "disarm".
+        runtime_s = reply["runtime_ms"] / 1000.0
         budget_s = min(max(time_limit_s - runtime_s, 0.001), time_limit_s)
         try:
             passed = _run_validator(validate_fn, actual, tc.get("expected"),
@@ -1249,13 +1256,13 @@ def _finalize(tc, reply, comparison, validate_fn=None, time_limit_s=None, probes
             return {"test_case_id": tc_id, "status": "time_limit_exceeded", "runtime_ms": None,
                     "output": None, "stdout": _truncate(reply.get("stdout", "")), "error": None}
         except ValidatorError as exc:
-            return {**_validator_fault(tc_id, exc), "runtime_ms": reply.get("runtime_ms", 0),
+            return {**_validator_fault(tc_id, exc), "runtime_ms": reply["runtime_ms"],
                     "output": _truncate(_format_output(actual)),
                     "stdout": _truncate(reply.get("stdout", ""))}
     else:
         passed = compare(actual, tc.get("expected"), comparison)
     return {"test_case_id": tc_id, "status": "passed" if passed else "wrong_answer",
-            "runtime_ms": reply.get("runtime_ms", 0), "output": _truncate(_format_output(actual)),
+            "runtime_ms": reply["runtime_ms"], "output": _truncate(_format_output(actual)),
             "stdout": _truncate(reply.get("stdout", "")), "error": None}
 
 

@@ -188,8 +188,9 @@ def binds_validator_call(validator_code: str) -> bool | None:
     defined some other way). Parsed, never executed: seed validation runs no
     problem code, and the harness reports a script that doesn't load anyway.
 
-    Mirrors judge/harness.py `_accepts_the_call`: the *last* `def validate` wins,
-    as it does when the script runs; each of the four names needs a parameter it
+    Mirrors judge/harness.py `_load_validator`: the *last* `def validate` wins,
+    as it does when the script runs; an `async def` is refused (its coroutine is
+    always truthy, so every case would pass); each of the four names needs a parameter it
     can be passed by keyword (or a `**kwargs`); and any other parameter needs a
     default, so a leftover `instance` next to `probe_results` is refused.
     """
@@ -197,9 +198,15 @@ def binds_validator_call(validator_code: str) -> bool | None:
         tree = ast.parse(validator_code)
     except SyntaxError:
         return None
-    defs = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "validate"]
-    if not defs:
-        return None
+    defs = [n for n in tree.body
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == "validate"]
+    rebound = any(isinstance(t, ast.Name) and t.id == "validate"
+                  for n in tree.body if isinstance(n, (ast.Assign, ast.AnnAssign, ast.AugAssign))
+                  for t in (n.targets if isinstance(n, ast.Assign) else [n.target]))
+    if not defs or rebound:
+        return None  # defined some other way, or rebound (`validate = wrap(validate)`)
+    if isinstance(defs[-1], ast.AsyncFunctionDef):
+        return False  # the harness would get a coroutine, which is always truthy
     a = defs[-1].args
     positional = a.posonlyargs + a.args
     defaulted = {p.arg for p in positional[len(positional) - len(a.defaults):]}

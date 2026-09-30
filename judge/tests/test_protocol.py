@@ -348,6 +348,27 @@ def test_a_validator_the_call_cant_bind_to_is_refused_before_any_case():
     assert [r["status"] for r in json.loads(proc.stdout)["results"]] == ["judge_error"]
 
 
+def test_an_async_validator_is_refused():
+    """Its coroutine is always truthy, so it would pass every case."""
+    pl = payload("def f(s):\n    return s", [case(0, ["x"], "nope")],
+                 comparison={"mode": "custom_validator", "validator_code":
+                             "async def validate(actual, expected, args, probe_results):\n    return False\n"})
+    assert [r["status"] for r in results(pl)] == ["judge_error"]
+
+
+def test_a_forged_non_numeric_runtime_never_reaches_the_report():
+    """Every report row carries the child's `runtime_ms`, which the worker sums."""
+    forge = (
+        "import json, os, sys\n"
+        "def f(s):\n"
+        "    frame = {'status': 'ok', 'actual': 'x', 'runtime_ms': '9', 'stdout': ''}\n"
+        "    os.write(int(sys.argv[2]), (json.dumps(frame) + '\\n').encode())\n"
+        "    os._exit(0)\n"
+    )
+    res = results(payload(forge, [case(0, ["x"], "x")]))
+    assert res[0]["runtime_ms"] == 0
+
+
 def test_a_validator_taking_kwargs_is_passed_probe_results():
     """`**rest` accepts `probe_results` by keyword, so it counts (seeding agrees)."""
     kwargs = "def validate(actual, **rest):\n    return rest['probe_results'] == [] and actual == 'x'\n"

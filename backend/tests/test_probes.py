@@ -150,6 +150,11 @@ def test_a_validator_the_harness_call_cant_bind_to_is_refused():
                 "actual, expected, args, *, probe_results, instance"):
         bad = f"def validate({sig}):\n    return True\n"
         assert "the older `instance` form is gone" in _error(_file(None, validator=bad)), sig
+    assert "the older `instance` form is gone" in _error(_file(None, validator=(
+        "async def validate(actual, expected, args, probe_results):\n    return False\n")))
+    # Rebound after its def: what runs can't be told without running it.
+    ProblemFile.model_validate(_file(None, validator=(
+        "def validate(a):\n    return True\nvalidate = staticmethod(validate)\n")))
     for sig in ("actual, expected, args, probe_results, instance=None",
                 "actual, **rest", "actual, expected, args, probe_results, *extra"):
         ProblemFile.model_validate(_file(None, validator=f"def validate({sig}):\n    return True\n"))
