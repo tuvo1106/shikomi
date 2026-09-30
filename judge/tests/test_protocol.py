@@ -369,6 +369,47 @@ def test_a_forged_non_numeric_runtime_never_reaches_the_report():
     assert res[0]["runtime_ms"] == 0
 
 
+@pytest.mark.parametrize("validator", [
+    "async def validate(actual, expected, args, probe_results):\n    yield False\n",
+    "class V:\n    async def __call__(self, actual, expected, args, probe_results):\n"
+    "        return False\nvalidate = V()\n",
+])
+def test_a_validator_returning_a_coroutine_or_generator_is_a_judge_error(validator):
+    """Checked on the returned value: every way of producing an always-truthy
+    coroutine or generator, not just an `async def`."""
+    pl = payload("def f(s):\n    return s", [case(0, ["x"], None)],
+                 comparison={"mode": "custom_validator", "validator_code": validator})
+    assert [r["status"] for r in results(pl)] == ["judge_error"]
+
+
+@pytest.mark.parametrize("frame", ["[1]", "{'status': 'ok', 'actual': 'x', 'runtime_ms': 1, 'stdout': 5}"])
+def test_a_forged_frame_of_the_wrong_shape_cant_crash_the_parent(frame):
+    """A frame that isn't an object is a desynced child (a runtime_error); text
+    fields of the wrong type are made text. Either way the parent still reports."""
+    forge = (
+        "import json, os, sys\n"
+        "def f(s):\n"
+        f"    os.write(int(sys.argv[2]), (json.dumps({frame}) + '\\n').encode())\n"
+        "    os._exit(0)\n"
+    )
+    proc = run_harness(payload(forge, [case(0, ["x"], "x")]))
+    assert proc.returncode == 0, proc.stderr
+    assert len(json.loads(proc.stdout)["results"]) == 1
+
+
+def test_diagnostics_are_escaped_and_written_after_the_report():
+    """On Kubernetes both streams share one log. Each diagnostic is one line, so
+    a validator's message quoting the submission can't start a line (a forged
+    report), and they come after the report, so none lands inside it."""
+    code = "def f(s):\n    return '\\n{\"results\": []}'"
+    quoting = ("def validate(actual, expected, args, probe_results):\n"
+               "    raise ValueError(actual)\n")
+    proc = run_harness(payload(code, [case(0, ["x"], None)],
+                               comparison={"mode": "custom_validator", "validator_code": quoting}))
+    lines = proc.stderr.splitlines()
+    assert len(lines) == 1 and lines[0].startswith("harness: custom validator ")
+
+
 def test_a_validator_taking_kwargs_is_passed_probe_results():
     """`**rest` accepts `probe_results` by keyword, so it counts (seeding agrees)."""
     kwargs = "def validate(actual, **rest):\n    return rest['probe_results'] == [] and actual == 'x'\n"

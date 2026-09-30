@@ -6,13 +6,15 @@ Two worker classes, two queues, so unrelated work can't starve each other:
   validation and orphan-sandbox reaping. Needs the sandbox runner (Docker socket or
   k8s RBAC) and is what KEDA autoscales on queue depth.
 * `AccountsWorkerSettings` — the **accounts** worker (`ACCOUNTS_QUEUE`): account email, the
-  unverified-signup purge and the stale-submission sweep (it needs only Postgres/Redis, so it
+  unverified-signup purge, the stale-submission sweep, and a startup check that names
+  stored problems whose custom validator the judge refuses (`worker/stale_validators.py`) (it needs only Postgres/Redis, so it
   keeps running while the judge worker is scaled to zero). No sandbox access, so it runs from
   the lean api image.
 
 Run with:  uv run arq worker.main.WorkerSettings
            uv run arq worker.main.AccountsWorkerSettings
 """
+import asyncio
 import logging
 
 from arq import cron, func
@@ -41,8 +43,9 @@ async def on_startup(ctx) -> None:
 async def on_accounts_startup(ctx) -> None:
     # Name stored problems whose validator the judge now refuses (ADR-0007 step 6).
     # Here, not in the judge worker's startup: that one runs on every KEDA scale-up,
-    # ahead of the job that woke it, and would repeat the same error each time.
-    await warn_about_stale_validators()
+    # ahead of the job that woke it, and would repeat the same error each time. In
+    # the background, so a slow database at boot doesn't hold up account email.
+    ctx["stale_validator_check"] = asyncio.create_task(warn_about_stale_validators())
 
 
 class WorkerSettings:

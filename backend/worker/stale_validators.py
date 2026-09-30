@@ -16,7 +16,7 @@ from sqlalchemy import select
 from app.comparison import validator_codes
 from app.db import SessionLocal
 from app.models import Problem
-from app.schemas.problem import binds_validator_call
+from app.schemas.problem import validator_call_problem
 
 logger = logging.getLogger(__name__)
 
@@ -33,8 +33,8 @@ async def stale_validator_slugs(session) -> list[str]:
     stale = []
     for slug, comparison in rows:
         try:
-            refused = binds_validator_call(validator_codes(comparison).get("python", "")) is False
-        except ValueError:
+            refused = validator_call_problem(validator_codes(comparison).get("python", "")) is not None
+        except ValueError:  # `validator_code` is neither a string nor a map
             refused = True
         if refused:
             stale.append(slug)

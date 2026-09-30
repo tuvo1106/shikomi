@@ -430,7 +430,10 @@ slice ships, delete its entry here.
   that blames the problem; probe results go to a per-case file on the 32MB `/tmp`, and
   a failed write is swallowed, so a huge probe run is an unexplained `runtime_error`
   (bound `repeat` x result size at seed time, or label it); and each case deep-copies
-  its input to append the probes. The seed tests' Rust container has a fixed name
+  its input to append the probes. The Rust harness `eprintln!`s a validator fault as it
+  happens; on Kubernetes, a line landing inside a >16KB report line (the runtime's
+  partial-line split) would corrupt the report, so defer it until after the report as
+  harness.py does. The seed tests' Rust container has a fixed name
   (`judge-seed-validate-rust`), so two runs at once collide; give it a unique one.
 
 - **Auth roadmap:** revisit session strategy (currently JWT-in-memory access +

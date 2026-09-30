@@ -679,6 +679,12 @@ def _is_number(x):
     return isinstance(x, (int, float)) and not isinstance(x, bool)
 
 
+def _as_text(x):
+    """`x` if it's a string, "" if missing, else its `str()`: for a text field of
+    the child's (untrusted) reply that the parent truncates and reports."""
+    return x if isinstance(x, str) else "" if x is None else str(x)
+
+
 def _number_or_zero(x):
     """`x` if it's a finite number, else 0: for a field of the child's (untrusted)
     reply that a report row must carry as a number."""
@@ -850,9 +856,21 @@ VALIDATOR_FAULT = "the problem's custom validator failed (a problem bug, not you
 PROBE_FAULT = "a check the judge adds to this test case is malformed (a problem bug, not your code)"
 
 
+# Diagnostics for the operator (the worker logs the harness's stderr), held until
+# the report is written: on Kubernetes the Pod log merges both streams, and a
+# stderr line landing inside a long report line would corrupt it. Each is one
+# line, its text escaped with %r, so text that came from the submission (an
+# exception quoting `actual`, a child's frame) can't start a line of its own.
+_DIAGNOSTICS = []
+
+
+def _diagnose(what, detail):
+    _DIAGNOSTICS.append("harness: %s %r" % (what, _truncate(str(detail))))
+
+
 def _validator_fault(test_case_id, exc):
     """The judge_error row for a validator that failed, with its detail logged."""
-    sys.stderr.write("harness: custom validator %s\n" % exc)
+    _diagnose("custom validator", exc)
     return _judge_error_result(test_case_id, VALIDATOR_FAULT)
 
 
@@ -885,7 +903,7 @@ def _accepts_the_call(validate_fn):
     way it wouldn't: no `probe_results` (the older `instance` form), a
     positional-only parameter, or a leftover required parameter such as
     `instance` next to `probe_results`, which would fail every case.
-    `app.schemas.problem`'s `binds_validator_call` applies the same rule at seed
+    `app.schemas.problem`'s `validator_call_problem` applies the same rule at seed
     time, without running anything."""
     try:
         inspect.signature(validate_fn).bind(actual=None, expected=None, args=None, probe_results=None)
@@ -913,14 +931,23 @@ def _run_validator(validate_fn, actual, expected, args, budget_s, probe_results)
     """
     signal.setitimer(signal.ITIMER_REAL, budget_s)
     try:
-        return bool(validate_fn(actual=actual, expected=expected, args=args,
-                                probe_results=probe_results))
+        verdict = validate_fn(actual=actual, expected=expected, args=args,
+                              probe_results=probe_results)
     except TimeLimitExceeded:
         raise
     except BaseException as exc:  # noqa: BLE001 - validator may raise anything
         raise ValidatorError("raised %s: %s" % (type(exc).__name__, exc)) from exc
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
+    # A coroutine or generator is always truthy, so it would pass every case: an
+    # `async def`, an async generator, or an object whose `__call__` is either.
+    # Checked on the value, since that catches every way of producing one.
+    if inspect.isawaitable(verdict) or inspect.isgenerator(verdict) or inspect.isasyncgen(verdict):
+        if hasattr(verdict, "close"):
+            verdict.close()  # no "never awaited" warning on the harness's stderr
+        raise ValidatorError("returned %s, not a verdict (is 'validate' async or a generator?)"
+                             % type(verdict).__name__)
+    return bool(verdict)
 
 
 # --- traceback filtering ----------------------------------------------------
@@ -1148,9 +1175,11 @@ class _Child:
         if not line:
             return {"status": _CRASH}
         try:
-            return json.loads(line)
+            reply = json.loads(line)
         except ValueError:  # JSONDecodeError → treat the channel as desynced
             return {"status": _CRASH}
+        # Valid JSON that isn't an object (`[1]`) is as desynced as invalid JSON.
+        return reply if isinstance(reply, dict) else {"status": _CRASH}
 
     def kill(self):
         try:
@@ -1205,7 +1234,8 @@ def _finalize(tc, reply, comparison, validate_fn=None, time_limit_s=None, probes
     # The child's reply is untrusted, and every row below carries its `runtime_ms`:
     # a non-number (a forged frame) must not reach the report, where the worker
     # sums it.
-    reply = {**reply, "runtime_ms": _number_or_zero(reply.get("runtime_ms"))}
+    reply = {**reply, "runtime_ms": _number_or_zero(reply.get("runtime_ms")),
+             "stdout": _as_text(reply.get("stdout")), "error": _as_text(reply.get("error"))}
     if status == _CRASH:
         # The child died without answering — os._exit, a segfault, a killed
         # subprocess. The submission's own doing, so a runtime_error for this case
@@ -1225,8 +1255,7 @@ def _finalize(tc, reply, comparison, validate_fn=None, time_limit_s=None, probes
         # failed validator, since the probe is a hidden case's data; the detail goes
         # to stderr. The frame is the child's, so a submission could forge it, but
         # only to turn its own case into a judge_error, and only where probes exist.
-        # %r: the text is the child's, so a newline in it can't forge a log line.
-        sys.stderr.write("harness: case %s: %r\n" % (tc_id, _truncate(str(reply.get("error")))))
+        _diagnose("case %s:" % tc_id, reply.get("error"))
         return {**_judge_error_result(tc_id, PROBE_FAULT), "runtime_ms": reply["runtime_ms"],
                 "stdout": _truncate(str(reply.get("stdout", "")))}
 
@@ -1399,7 +1428,7 @@ def main():
             # (a judge-side fault, no report) rather than grade with it readable.
             # The k8s emptyDir is world-writable and we own the file, so this never
             # fires in practice; it guards against a future misconfiguration.
-            sys.stderr.write("harness: could not remove payload file: %s\n" % exc)
+            _diagnose("could not remove payload file:", exc)
             sys.exit(3)
     else:
         raw = sys.stdin.read()
@@ -1412,6 +1441,8 @@ def main():
     results = run(payload)
     sys.stdout.write(json.dumps({"results": results}))
     sys.stdout.flush()
+    for line in _DIAGNOSTICS:  # after the report: see `_DIAGNOSTICS`
+        sys.stderr.write(line + "\n")
 
 
 if __name__ == "__main__":

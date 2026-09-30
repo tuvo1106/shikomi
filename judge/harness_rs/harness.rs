@@ -1074,7 +1074,10 @@ fn run_validator(validator: &fs::File, request: &Json, budget: Duration, memory_
         Some(code) => format!("exited (code {}){}", code, stderr_suffix(&stderr)),
         None => format!("was killed (signal {})", status.signal().unwrap_or(0)),
     };
-    eprintln!("harness: custom validator {}", detail);
+    // `{:?}` escapes it onto one line: the validator's stderr can quote the
+    // submission's answer, which mustn't be able to start a line of the merged
+    // Pod log on Kubernetes (backend/worker/k8s_runner.py `_split_log`).
+    eprintln!("harness: custom validator {:?}", detail);
     Verdict::Fault("the problem's custom validator failed (a problem bug, not your code)".into())
 }
 
@@ -1491,7 +1494,7 @@ fn run(payload: &Json) -> Vec<CaseResult> {
                 Err(e) => {
                     // The author's code, not the user's: its diagnostics go only to
                     // the harness's stderr, and the user sees only that it failed.
-                    eprintln!("harness: custom validator failed to compile: {}", e.message());
+                    eprintln!("harness: custom validator failed to compile: {:?}", e.message());
                     return vec![CaseResult::judge_error_row(
                         first_id,
                         "the problem's custom validator failed to compile (a problem bug, not your code)".into(),

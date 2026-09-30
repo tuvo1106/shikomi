@@ -181,42 +181,59 @@ def _operations_case(case_input: Any) -> tuple[list, list]:
 VALIDATOR_CALL = ("actual", "expected", "args", "probe_results")
 
 
-def binds_validator_call(validator_code: str) -> bool | None:
-    """Whether the harness's call `validate(actual=, expected=, args=,
-    probe_results=)` binds to the validator's top-level `validate`, or None when
-    that can't be told without running it (it doesn't parse, or `validate` is
-    defined some other way). Parsed, never executed: seed validation runs no
-    problem code, and the harness reports a script that doesn't load anyway.
+def validator_call_problem(validator_code: str) -> str | None:
+    """Why the harness's call `validate(actual=, expected=, args=, probe_results=)`
+    would fail on the validator's top-level `validate`, or None when it binds or
+    that can't be told without running it (it doesn't parse, `validate` is defined
+    some other way, or it's rebound after its def). Parsed, never executed: seed
+    validation runs no problem code, and the harness reports a script that doesn't
+    load anyway.
 
-    Mirrors judge/harness.py `_load_validator`: the *last* `def validate` wins,
-    as it does when the script runs; an `async def` is refused (its coroutine is
-    always truthy, so every case would pass); each of the four names needs a parameter it
-    can be passed by keyword (or a `**kwargs`); and any other parameter needs a
-    default, so a leftover `instance` next to `probe_results` is refused.
+    Mirrors judge/harness.py `_load_validator`: the *last* `def validate` wins, as
+    it does when the script runs; an `async def` is refused, since its coroutine
+    is always truthy and every case would pass; each of the four names needs a
+    parameter it can be passed by keyword (or a `**kwargs`); and any other
+    parameter needs a default, so a leftover `instance` next to `probe_results` is
+    refused.
     """
+    if not isinstance(validator_code, str):
+        return "the validator isn't source code"
     try:
         tree = ast.parse(validator_code)
     except SyntaxError:
         return None
-    defs = [n for n in tree.body
+    defs = [(i, n) for i, n in enumerate(tree.body)
             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == "validate"]
-    rebound = any(isinstance(t, ast.Name) and t.id == "validate"
-                  for n in tree.body if isinstance(n, (ast.Assign, ast.AnnAssign, ast.AugAssign))
-                  for t in (n.targets if isinstance(n, ast.Assign) else [n.target]))
-    if not defs or rebound:
-        return None  # defined some other way, or rebound (`validate = wrap(validate)`)
-    if isinstance(defs[-1], ast.AsyncFunctionDef):
-        return False  # the harness would get a coroutine, which is always truthy
-    a = defs[-1].args
+    if not defs:
+        return None
+    last, fn = defs[-1]
+
+    def rebinds(n):
+        if isinstance(n, ast.Assign):
+            return any(isinstance(t, ast.Name) and t.id == "validate" for t in n.targets)
+        if isinstance(n, (ast.AnnAssign, ast.AugAssign)):  # a bare annotation binds nothing
+            return (isinstance(n.target, ast.Name) and n.target.id == "validate"
+                    and (isinstance(n, ast.AugAssign) or n.value is not None))
+        return False
+
+    if any(rebinds(n) for n in tree.body[last + 1:]):
+        return None  # `validate = wrap(validate)`: what runs isn't this def
+    if isinstance(fn, ast.AsyncFunctionDef):
+        return ("the Python validator is `async def`: the judge calls it without awaiting, "
+                "and a coroutine is always truthy, so every case would pass")
+    a = fn.args
     positional = a.posonlyargs + a.args
     defaulted = {p.arg for p in positional[len(positional) - len(a.defaults):]}
     defaulted |= {p.arg for p, d in zip(a.kwonlyargs, a.kw_defaults) if d is not None}
     by_keyword = {p.arg for p in a.args + a.kwonlyargs}
-    if any(p.arg not in defaulted for p in a.posonlyargs):
-        return False
-    if any(name not in by_keyword for name in VALIDATOR_CALL) and not a.kwarg:
-        return False
-    return all(p.arg in VALIDATOR_CALL or p.arg in defaulted for p in a.args + a.kwonlyargs)
+    if (any(p.arg not in defaulted for p in a.posonlyargs)
+            or (any(name not in by_keyword for name in VALIDATOR_CALL) and not a.kwarg)
+            or not all(p.arg in VALIDATOR_CALL or p.arg in defaulted for p in a.args + a.kwonlyargs)):
+        return ("the Python validator must be `def validate(actual, expected, args, "
+                "probe_results)`, callable with just those four by keyword: the older "
+                "`instance` form is gone, and extra calls on an operations instance are the "
+                "cases' probes (docs/adr/0007-custom-validators-in-every-language.md)")
+    return None
 
 
 def _operations_ctor_args(case_input: Any) -> list:
@@ -466,12 +483,9 @@ class ProblemIn(BaseModel):
         # where it could be read and forged (ADR-0007). A validator whose
         # parameters can't be read without running it is left to the harness,
         # which reports it on load.
-        if binds_validator_call(code.get("python", "")) is False:
-            raise ValueError(
-                "the Python validator must be `def validate(actual, expected, args, "
-                "probe_results)`, callable with just those four by keyword: the older "
-                "`instance` form is gone, and extra calls on an operations instance are the "
-                "cases' probes (docs/adr/0007-custom-validators-in-every-language.md)")
+        problem = validator_call_problem(code.get("python", ""))
+        if problem:
+            raise ValueError(problem)
         self.comparison = {**self.comparison, "validator_code": code}
         return self
 
