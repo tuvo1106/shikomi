@@ -159,9 +159,7 @@ def test_an_older_form_operations_validator_loads_with_a_warning():
 def test_a_validator_with_no_wrong_solution_warns_per_language():
     """Only a wrong solution proves a validator rejects anything, so a language
     without one is named."""
-    languages = [{"language": "python", "class_name": "Codec", "starter_code": "c", "params": []},
-                 {"language": "rust", "class_name": "Codec", "starter_code": "c", "params": []}]
-    data = _file(None, languages=languages, validator={"python": PROBE_VALIDATOR, "rust": "fn validate() {}"})
+    data = _file(None, languages=RUST_TOO, validator={"python": PROBE_VALIDATOR, "rust": "fn validate() {}"})
     data["wrong_solutions"] = [{"title": "W", "code": {"python": "class Codec: ..."}}]
     [warned] = ProblemFile.model_validate(data).authoring_warnings()
     assert "no wrong solution for ['rust']" in warned

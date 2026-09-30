@@ -149,7 +149,10 @@ def _judge(problem, variant, code):
         "params": variant.get("params", []),
         "return_type": variant.get("return_type", ""),
     }
-    return _run_harness(payload, language=variant["language"])
+    # The harness runs cases one after another, so a solution that times out on
+    # every case (likeliest in a wrong one) needs the whole run's worth of limits.
+    timeout = 15 + len(payload["test_cases"]) * payload["time_limit_ms"] / 1000
+    return _run_harness(payload, language=variant["language"], timeout=timeout)
 
 
 @pytest.mark.parametrize("problem,variant,title,code", _solution_cases())
@@ -190,3 +193,18 @@ def test_seed_wrong_solution_is_rejected(problem, variant, title, code):
         f"{problem['slug']} wrong solution '{title}' ({variant['language']}) was never judged "
         f"wrong_answer (statuses: {sorted(statuses)}), so nothing shows the problem rejects it"
         + (f":\n{detail}" if detail else ""))
+
+
+def test_the_wrong_solution_check_needs_a_wrong_answer():
+    """The bundled seeds have no `wrong_solutions`, so the check above is exercised
+    here on an inline problem: a wrong answer passes it, and code that only
+    crashes doesn't, since a crash proves nothing about the comparison."""
+    problem = {"slug": "double", "comparison": {"mode": "exact"},
+               "test_cases": [{"ordinal": 0, "input": [2], "expected": 4},
+                              {"ordinal": 1, "input": [0], "expected": 0}]}
+    variant = {"language": "python", "function_name": "double",
+               "params": [{"name": "x", "type": "int"}]}
+    test_seed_wrong_solution_is_rejected(problem, variant, "Returns x", "def double(x):\n    return x\n")
+    with pytest.raises(AssertionError, match="never judged wrong_answer"):
+        test_seed_wrong_solution_is_rejected(problem, variant, "Crashes", "def double(x):\n    raise ValueError\n")
+

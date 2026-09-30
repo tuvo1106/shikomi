@@ -98,7 +98,8 @@ problems wherever you like; a separate git repo works well.
 # 1. Check the files against every loading rule (no database needed)
 (cd backend && uv run python -m app.cli validate --dir ~/my-problems/problems)
 
-# 2. Check every reference solution passes every test case, using the real harness
+# 2. Check every reference solution passes every test case, and every `wrong_solutions`
+#    entry is judged wrong_answer somewhere, using the real harness
 SEED_DIR=~/my-problems/problems .venv/bin/pytest judge/tests/test_seed_solutions.py -v
 
 # 3. Load them (an idempotent upsert keyed on slug, so re-run after every edit)
