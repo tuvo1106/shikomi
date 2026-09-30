@@ -147,7 +147,7 @@ def test_a_validator_the_harness_call_cant_bind_to_is_refused():
         assert "the older `instance` form is gone" in _error(_file(None, validator=bad)), sig
     assert "is `async def`" in _error(_file(None, validator=(
         "async def validate(actual, expected, args, probe_results):\n    return False\n")))
-    # Rebound after its def: what runs can't be told without running it.
+    # Rebound after its def by a plain assignment: left to the harness.
     ProblemFile.model_validate(_file(None, validator=(
         "def validate(a):\n    return True\nvalidate = staticmethod(validate)\n")))
     assert "is a generator" in _error(_file(None, validator=(
@@ -172,12 +172,14 @@ def test_a_validator_the_harness_call_cant_bind_to_is_refused():
                     older + "match wrap(validate):\n    case validate:\n        pass\n",
                     older + "from helpers import *\n",
                     "def validate(actual, expected, args, probe_results, instance):\n    return 1\n"
-                    "validate.__defaults__ = (None,)\n"):
+                    "validate.__defaults__ = (None,)\n",
+                    "import functools\n" + older + "functools.update_wrapper(validate, print)\n",
+                    older + "setattr(validate, '__signature__', None)\n",
+                    older + "X = [validate for validate in range(3)]\n"):
         ProblemFile.model_validate(_file(None, validator=unclear))
     # Otherwise the last def is what's judged: names bound in nested scopes, a bare
     # annotation, and ordinary load-time code don't rebind it.
     for clear in (older + "def helper():\n    validate = 1\n",
-                  older + "X = [validate for validate in range(3)]\n",
                   older + "class K:\n    validate = 1\n",
                   "import sys\nsys.setrecursionlimit(10000)\nINF = float('inf')\n" + older,
                   "KEY = lambda x: abs(x)\n" + older + "if __name__:\n    pass\n",
@@ -205,10 +207,13 @@ def test_a_validator_that_doesnt_compile_is_refused(source):
 
 
 def test_checking_the_signature_runs_none_of_the_validators_code(capsys):
-    """The call is bound against a stub: defaults become None, so they never run."""
+    """The signature is built from the parameters' names and kinds: defaults are
+    never evaluated, however they're written."""
     ran = "def validate(actual, expected, args, probe_results=print('ran'), instance=print('ran')):\n    pass\n"
     ProblemFile.model_validate(_file(None, validator=ran))
     assert capsys.readouterr().out == ""
+    deep = "def validate(actual, expected, args, probe_results, x=" + "1+" * 400 + "1) -> " + "int|" * 400 + "int:\n    pass\n"
+    ProblemFile.model_validate(_file(None, validator=deep))
 
 
 def test_a_positional_only_probe_results_doesnt_count():

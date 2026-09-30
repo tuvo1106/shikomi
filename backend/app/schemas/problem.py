@@ -13,7 +13,6 @@ set, so an invalid value is rejected at the boundary and shows up as an enum in
 the OpenAPI docs.
 """
 import ast
-import copy
 import inspect
 import uuid
 from typing import Any, Literal
@@ -206,11 +205,14 @@ def _validate_def_that_runs(tree: ast.Module) -> ast.FunctionDef | ast.AsyncFunc
     top-level statements run in order), and names it only when that's an
     undecorated def. It returns None where the plain spellings stop being plain:
     a `global validate`, a walrus, an `except ... as validate`, a `match` capture,
-    a star import, or an attribute set on `validate` (`validate.__defaults__ =`).
+    a star import, an attribute set on `validate` (`validate.__defaults__ =`), or
+    any use of `validate` other than calling it (`update_wrapper(validate, f)` or
+    `setattr(validate, ...)` could reshape it).
     Rebinding through reflection at load time (`globals()`, frames, ...) is out of
     scope: seeding would judge the def as written, and the harness, which loads
     the real object, stays the authority.
     """
+    called = set()  # ast.walk yields a Call before its func, so this is filled in time
     for node in ast.walk(tree):
         if isinstance(node, (ast.Global, ast.Nonlocal)) and "validate" in node.names:
             return None
@@ -224,6 +226,11 @@ def _validate_def_that_runs(tree: ast.Module) -> ast.FunctionDef | ast.AsyncFunc
             return None
         if isinstance(node, ast.MatchMapping) and node.rest == "validate":
             return None
+        if isinstance(node, ast.Call):
+            called.add(id(node.func))
+        if (isinstance(node, ast.Name) and node.id == "validate" and isinstance(node.ctx, ast.Load)
+                and id(node) not in called):
+            return None  # handed to something that could wrap or reshape it
         if (isinstance(node, ast.Attribute) and isinstance(node.ctx, (ast.Store, ast.Del))
                 and isinstance(node.value, ast.Name) and node.value.id == "validate"):
             return None
@@ -266,22 +273,23 @@ def _accepts_the_call(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
     """Whether the harness's call `validate(actual=, expected=, args=,
     probe_results=)` binds to `fn`'s parameters, decided by Python's own
     `inspect.Signature.bind`, as the harness decides it, rather than by a copy of
-    its rules. It runs a stub with `fn`'s parameters and nothing else (every
-    default None, no annotations, a `pass` body), so none of the validator's code
-    runs."""
-    params = copy.deepcopy(fn.args)
-    params.defaults = [ast.Constant(None) for _ in params.defaults]
-    params.kw_defaults = [None if d is None else ast.Constant(None) for d in params.kw_defaults]
-    for p in (*params.posonlyargs, *params.args, *params.kwonlyargs, params.vararg, params.kwarg):
-        if p is not None:
-            p.annotation = None
-    stub = ast.fix_missing_locations(ast.Module(body=[ast.FunctionDef(
-        name="validate", args=params, body=[ast.Pass()], decorator_list=[], returns=None,
-        type_params=[])], type_ignores=[]))
-    namespace: dict = {}
-    exec(compile(stub, "<validator signature>", "exec"), {"__builtins__": {}}, namespace)  # noqa: S102 - a bare def
+    its rules. The signature is built from the parameters' names and kinds (a
+    default is a placeholder: only whether there is one matters), so nothing of
+    the validator's runs or is even evaluated."""
+    P = inspect.Parameter
+    a = fn.args
+    positional = [(p, P.POSITIONAL_ONLY) for p in a.posonlyargs] + [(p, P.POSITIONAL_OR_KEYWORD) for p in a.args]
+    first_default = len(positional) - len(a.defaults)
+    params = [P(p.arg, kind, default=None if i >= first_default else P.empty)
+              for i, (p, kind) in enumerate(positional)]
+    if a.vararg:
+        params.append(P(a.vararg.arg, P.VAR_POSITIONAL))
+    params += [P(p.arg, P.KEYWORD_ONLY, default=P.empty if d is None else None)
+               for p, d in zip(a.kwonlyargs, a.kw_defaults)]
+    if a.kwarg:
+        params.append(P(a.kwarg.arg, P.VAR_KEYWORD))
     try:
-        inspect.signature(namespace["validate"]).bind(**dict.fromkeys(VALIDATOR_CALL))
+        inspect.Signature(params).bind(**dict.fromkeys(VALIDATOR_CALL))
     except TypeError:
         return False
     return True
@@ -579,9 +587,9 @@ class ProblemIn(BaseModel):
                 f"'languages' doesn't list")
         # The harness refuses a Python validator its call can't bind to, which
         # includes the older `instance` form: that ran next to the submission,
-        # where it could be read and forged (ADR-0007). A validator whose
-        # parameters can't be read without running it is left to the harness,
-        # which reports it on load.
+        # where it could be read and forged (ADR-0007). Where the source doesn't
+        # make plain which `validate` runs, it's left to the harness, which
+        # reports it on load (see `_validate_def_that_runs` for the scope).
         problem = validator_call_problem(code.get("python", ""))
         if problem:
             raise ValueError(problem)

@@ -696,7 +696,9 @@ def _number_or_zero(x):
 # prelude's JSON parser caps depth at 512, and the Rust harness's child reports the
 # answer and its probe results one level down in its result object
 # (`{"ok": v, "probe_results": [...]}`), so this is what the Rust judge can carry:
-# the two refuse the same answers. Comparing, validating and printing a value
+# the two refuse the same returned answers. (A case's `expected` sits deeper in the
+# Rust payload, so there it can nest only 509 levels; problems keep far shallower.)
+# Comparing, validating and printing a value
 # recurse on it, so one nested thousands deep (a submission's `[[[...]]]`, or a
 # forged frame) would raise RecursionError in the parent. Past this limit it's the
 # submission's runtime_error, checked once where the reply comes in, before
@@ -943,8 +945,9 @@ def _accepts_the_call(validate_fn):
     way it wouldn't: no `probe_results` (the older `instance` form), a
     positional-only parameter, or a leftover required parameter such as
     `instance` next to `probe_results`, which would fail every case.
-    `app.schemas.problem`'s `validator_call_problem` applies the same rule at seed
-    time, without running anything."""
+    `app.schemas.problem`'s `validator_call_problem` applies the same
+    `Signature.bind` at seed time, to a signature it builds from the parsed def,
+    running none of the validator's code."""
     try:
         inspect.signature(validate_fn).bind(actual=None, expected=None, args=None, probe_results=None)
     except (TypeError, ValueError):  # doesn't bind, or no introspectable signature
