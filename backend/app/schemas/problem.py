@@ -13,6 +13,8 @@ set, so an invalid value is rejected at the boundary and shows up as an enum in
 the OpenAPI docs.
 """
 import ast
+import copy
+import inspect
 import uuid
 from typing import Any, Literal
 
@@ -193,86 +195,114 @@ def _is_generator(fn: ast.FunctionDef) -> bool:
     return False
 
 
-def _runs_no_code(node: ast.AST) -> bool:
-    """Whether evaluating the expression `node` can't run any code the validator
-    wrote: it makes no call (and no walrus), so, with no class of the validator's
-    own in scope, every object it touches is a constant, a builtin, a stdlib module
-    or a function that isn't called."""
-    return not any(isinstance(n, (ast.Call, ast.NamedExpr, ast.Await, ast.Yield, ast.YieldFrom))
-                   for n in ast.walk(node))
-
-
-def _def_runs_no_code(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
-    """Whether defining `fn` runs no code of the validator's: no decorator, and
-    defaults and annotations (evaluated at definition) that make no call."""
-    a = fn.args
-    evaluated = [*a.defaults, *(d for d in a.kw_defaults if d is not None), fn.returns,
-                 *(p.annotation for p in (*a.posonlyargs, *a.args, *a.kwonlyargs, a.vararg, a.kwarg)
-                   if p is not None)]
-    return not fn.decorator_list and all(_runs_no_code(e) for e in evaluated if e is not None)
-
-
 def _validate_def_that_runs(tree: ast.Module) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
-    """The `def validate` whose signature the harness will see, or None when that
-    can't be read off the source without running it.
+    """The `def validate` that the script leaves bound, or None when the source
+    doesn't make that plain.
 
-    An allowlist, so it's sound without chasing every spelling of reflection: only
-    code that runs while the script loads can rebind or reshape `validate`, so it
-    answers only when the script runs none of its own. Every top-level statement
-    must be an import (not `*`), an undecorated def, a docstring, or an assignment
-    to plain names, and nothing evaluated at load time may make a call. Then the
-    last of those statements to bind `validate` is what's left bound (top-level
-    statements run in order), and it must be a def. Anything else (a class, an
-    `if`, a call, a decorator, an attribute assignment) is None, and the harness,
-    which loads the real object, decides.
+    Scope: problem authors are trusted maintainers, so this reads the script as
+    written, to catch honest mistakes (a leftover older form), not adversarial
+    source. It takes the last top-level statement that binds `validate` by a
+    plain spelling (a def, class, assignment, import, `for`, `with`, `del`, ...;
+    top-level statements run in order), and names it only when that's an
+    undecorated def. It returns None where the plain spellings stop being plain:
+    a `global validate`, a walrus, an `except ... as validate`, a `match` capture,
+    a star import, or an attribute set on `validate` (`validate.__defaults__ =`).
+    Rebinding through reflection at load time (`globals()`, frames, ...) is out of
+    scope: seeding would judge the def as written, and the harness, which loads
+    the real object, stays the authority.
     """
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Global, ast.Nonlocal)) and "validate" in node.names:
+            return None
+        if isinstance(node, ast.ImportFrom) and any(a.name == "*" for a in node.names):
+            return None
+        if isinstance(node, ast.NamedExpr) and node.target.id == "validate":
+            return None
+        if isinstance(node, ast.ExceptHandler) and node.name == "validate":
+            return None
+        if isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name == "validate":
+            return None
+        if isinstance(node, ast.MatchMapping) and node.rest == "validate":
+            return None
+        if (isinstance(node, ast.Attribute) and isinstance(node.ctx, (ast.Store, ast.Del))
+                and isinstance(node.value, ast.Name) and node.value.id == "validate"):
+            return None
     last = None
     for stmt in tree.body:
-        if isinstance(stmt, ast.Import):
-            names = [a.asname or a.name.split(".")[0] for a in stmt.names]
-        elif isinstance(stmt, ast.ImportFrom):
-            if any(a.name == "*" for a in stmt.names):
-                return None
-            names = [a.asname or a.name for a in stmt.names]
-        elif isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            if not _def_runs_no_code(stmt):
-                return None
-            names = [stmt.name]
-        elif isinstance(stmt, ast.Assign):
-            targets = [n for t in stmt.targets for n in (t.elts if isinstance(t, (ast.Tuple, ast.List)) else [t])]
-            if not all(isinstance(t, ast.Name) for t in targets) or not _runs_no_code(stmt.value):
-                return None
-            names = [t.id for t in targets]
-        elif isinstance(stmt, ast.AnnAssign):
-            if not isinstance(stmt.target, ast.Name) or not _runs_no_code(stmt):
-                return None
-            names = [stmt.target.id] if stmt.value is not None else []  # a bare annotation binds nothing
-        elif isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant):
-            names = []  # a docstring
-        else:
-            return None
-        if "validate" in names:
+        if (isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and stmt.name == "validate"
+                or _stores_name(stmt, "validate")):
             last = stmt
-    return last if isinstance(last, (ast.FunctionDef, ast.AsyncFunctionDef)) else None
+    if isinstance(last, (ast.FunctionDef, ast.AsyncFunctionDef)) and not last.decorator_list:
+        return last
+    return None
+
+
+def _stores_name(stmt: ast.stmt, name: str) -> bool:
+    """Whether `stmt` binds `name` in the module's own scope: a store or delete of
+    it, or a nested def, class or import of it, outside any nested function,
+    class, lambda or comprehension (those have scopes of their own)."""
+    todo = [stmt]
+    while todo:
+        node = todo.pop()
+        if node is not stmt and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if node.name == name:
+                return True
+            continue
+        if isinstance(node, (ast.Lambda, ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+            continue  # scopes of their own; a walrus inside is refused up front
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue  # `stmt` itself: its name is the caller's business
+        if isinstance(node, ast.Name) and node.id == name and isinstance(node.ctx, (ast.Store, ast.Del)):
+            return True
+        if isinstance(node, ast.alias) and (node.asname or node.name.split(".")[0]) == name:
+            return True
+        if isinstance(node, ast.AnnAssign) and node.value is None:
+            continue  # a bare annotation binds nothing
+        todo.extend(ast.iter_child_nodes(node))
+    return False
+
+
+def _accepts_the_call(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """Whether the harness's call `validate(actual=, expected=, args=,
+    probe_results=)` binds to `fn`'s parameters, decided by Python's own
+    `inspect.Signature.bind`, as the harness decides it, rather than by a copy of
+    its rules. It runs a stub with `fn`'s parameters and nothing else (every
+    default None, no annotations, a `pass` body), so none of the validator's code
+    runs."""
+    params = copy.deepcopy(fn.args)
+    params.defaults = [ast.Constant(None) for _ in params.defaults]
+    params.kw_defaults = [None if d is None else ast.Constant(None) for d in params.kw_defaults]
+    for p in (*params.posonlyargs, *params.args, *params.kwonlyargs, params.vararg, params.kwarg):
+        if p is not None:
+            p.annotation = None
+    stub = ast.fix_missing_locations(ast.Module(body=[ast.FunctionDef(
+        name="validate", args=params, body=[ast.Pass()], decorator_list=[], returns=None,
+        type_params=[])], type_ignores=[]))
+    namespace: dict = {}
+    exec(compile(stub, "<validator signature>", "exec"), {"__builtins__": {}}, namespace)  # noqa: S102 - a bare def
+    try:
+        inspect.signature(namespace["validate"]).bind(**dict.fromkeys(VALIDATOR_CALL))
+    except TypeError:
+        return False
+    return True
 
 
 def validator_call_problem(validator_code: str) -> str | None:
     """Why judge/harness.py would refuse the Python validator, or None when it
-    wouldn't, or when that can't be told without running it. Parsed, never
-    executed: seed validation runs no problem code.
+    wouldn't, or when the source doesn't make that plain. The validator's own code
+    never runs: seeding parses and compiles it, and runs only a stub of its
+    signature.
 
-    Best-effort by design: it decides only when `_validate_def_that_runs` can name
-    the def the harness will load, and otherwise leaves it to the harness's
-    load-time check, which the seed-solution tests exercise with every reference
-    solution. Source that doesn't compile is refused, as the harness refuses it
-    (compiling runs nothing). For the def that runs it mirrors `_load_validator`:
+    Best-effort by design: it decides only for the def `_validate_def_that_runs`
+    names (see its scope), and otherwise leaves it to the harness's load-time
+    check, which the seed-solution tests exercise with every reference solution.
+    Source that doesn't compile is refused, as the harness refuses it. For the def
+    that runs it mirrors `_load_validator`:
 
     * an `async def` or a generator is refused: the judge would get a coroutine
       or generator, which is always truthy, so every case would pass;
-    * the call `validate(actual=, expected=, args=, probe_results=)` must bind:
-      each of the four names a parameter it can be passed by keyword (or a
-      `**kwargs`), and any other parameter a default, so a leftover `instance`
-      next to `probe_results` is refused.
+    * the call `validate(actual=, expected=, args=, probe_results=)` must bind
+      (`_accepts_the_call`), so a leftover required `instance` is refused.
     """
     if not isinstance(validator_code, str):
         return "the validator isn't source code"
@@ -297,14 +327,7 @@ def validator_call_problem(validator_code: str) -> str | None:
     if _is_generator(fn):
         return ("the Python validator is a generator (it has `yield`): the judge would get a "
                 "generator, which is always truthy, so every case would pass")
-    a = fn.args
-    positional = a.posonlyargs + a.args
-    defaulted = {p.arg for p in positional[len(positional) - len(a.defaults):]}
-    defaulted |= {p.arg for p, d in zip(a.kwonlyargs, a.kw_defaults) if d is not None}
-    by_keyword = {p.arg for p in a.args + a.kwonlyargs}
-    if (any(p.arg not in defaulted for p in a.posonlyargs)
-            or (any(name not in by_keyword for name in VALIDATOR_CALL) and not a.kwarg)
-            or not all(p.arg in VALIDATOR_CALL or p.arg in defaulted for p in a.args + a.kwonlyargs)):
+    if not _accepts_the_call(fn):
         return ("the Python validator must be `def validate(actual, expected, args, "
                 "probe_results)`, callable with just those four by keyword: the older "
                 "`instance` form is gone, and extra calls on an operations instance are the "

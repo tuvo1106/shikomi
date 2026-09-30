@@ -156,9 +156,8 @@ def test_a_validator_the_harness_call_cant_bind_to_is_refused():
     ProblemFile.model_validate(_file(None, validator=(
         "def validate(actual, expected, args, probe_results):\n"
         "    def g():\n        yield 1\n    return True\n")))
-    # Unless every binding of `validate` is a top-level statement and the last is an
-    # undecorated def, what runs can't be told without running it: seeding leaves it
-    # to the harness, which judges the real object.
+    # Where a plain spelling rebinds or reshapes `validate` after its def, or the last
+    # def is decorated, seeding leaves it to the harness, which judges the real object.
     older = "def validate(actual, expected, args, instance=None):\n    return True\n"
     good = "def validate(actual, expected, args, probe_results):\n    return True\n"
     for unclear in ("@adapt\n" + older,
@@ -172,23 +171,23 @@ def test_a_validator_the_harness_call_cant_bind_to_is_refused():
                     older + "try:\n    pass\nexcept Exception as validate:\n    pass\n",
                     older + "match wrap(validate):\n    case validate:\n        pass\n",
                     older + "from helpers import *\n",
-                    older + "X = [validate for validate in range(3)]\n",
-                      "def validate(actual, expected, args, probe_results, instance):\n    return 1\n"
-                    "validate.__defaults__ = (None,)\n",
-                    older + "globals()['validate'] = lambda actual, expected, args, probe_results: 1\n",
-                    older + "import sys\nsys._getframe().f_globals['validate'] = print\n",
-                      older + "validate.__defaults__ = (None,)\n",
-                    older + "class K:\n    validate = 1\n",
-                    older + "if __name__:\n    pass\n"):
+                    "def validate(actual, expected, args, probe_results, instance):\n    return 1\n"
+                    "validate.__defaults__ = (None,)\n"):
         ProblemFile.model_validate(_file(None, validator=unclear))
-    # Code that runs nothing at load time can't rebind it: names bound in nested
-    # scopes, a bare annotation, imports, constants, call-free annotations.
+    # Otherwise the last def is what's judged: names bound in nested scopes, a bare
+    # annotation, and ordinary load-time code don't rebind it.
     for clear in (older + "def helper():\n    validate = 1\n",
-                  older + "import functools\n",
+                  older + "X = [validate for validate in range(3)]\n",
+                  older + "class K:\n    validate = 1\n",
+                  "import sys\nsys.setrecursionlimit(10000)\nINF = float('inf')\n" + older,
+                  "KEY = lambda x: abs(x)\n" + older + "if __name__:\n    pass\n",
                   '"""Docstring."""\nfrom collections import Counter\nLIMIT = (1, -2)\n' + older,
                   "def validate(actual: list[int], expected, args, instance=None) -> bool:\n    return True\n",
                   older + "validate: object\n",
-                  "validate = None\n" + older):
+                  "validate = None\n" + older,
+                  # Rebinding by reflection is out of scope (authors are trusted): the
+                  # def is judged as written.
+                  older + "import sys\nsys._getframe().f_globals['validate'] = print\n"):
         assert "the older `instance` form is gone" in _error(_file(None, validator=clear))
     for sig in ("actual, expected, args, probe_results, instance=None",
                 "actual, **rest", "actual, expected, args, probe_results, *extra"):
@@ -203,6 +202,13 @@ def test_a_validator_the_harness_call_cant_bind_to_is_refused():
 def test_a_validator_that_doesnt_compile_is_refused(source):
     """The harness's compile() fails on it too, so no case could be judged."""
     assert "the Python validator doesn't compile" in _error(_file(None, validator=source + PROBE_VALIDATOR))
+
+
+def test_checking_the_signature_runs_none_of_the_validators_code(capsys):
+    """The call is bound against a stub: defaults become None, so they never run."""
+    ran = "def validate(actual, expected, args, probe_results=print('ran'), instance=print('ran')):\n    pass\n"
+    ProblemFile.model_validate(_file(None, validator=ran))
+    assert capsys.readouterr().out == ""
 
 
 def test_a_positional_only_probe_results_doesnt_count():

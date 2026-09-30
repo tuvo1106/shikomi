@@ -455,14 +455,15 @@ def test_an_answer_nested_within_the_limit_is_judged():
 
 
 @pytest.mark.parametrize("inner, wraps, status", [
-    ("[]", 512, "passed"),           # 513 lists, the innermost (empty) at depth 512
-    ("[]", 513, "runtime_error"),    # ... at depth 513
-    ("1", 512, "passed"),            # 512 lists, the scalar at depth 512
-    ("1", 513, "runtime_error"),
+    ("[]", 511, "passed"),           # 512 lists, the innermost (empty) at depth 511
+    ("[]", 512, "runtime_error"),    # ... at depth 512
+    ("1", 511, "passed"),            # 511 lists, the scalar at depth 511
+    ("1", 512, "runtime_error"),
 ])
-def test_the_nesting_cap_counts_as_the_rust_parser_does(inner, wraps, status):
-    """Every value's depth from 0 at the top; anything past 512 is too deep. Within
-    the cap, compare() and printing the answer walk it without RecursionError."""
+def test_the_nesting_cap_matches_what_the_rust_judge_can_carry(inner, wraps, status):
+    """The answer at depth 0, anything past 511 too deep: the Rust child's result
+    object adds a level above the answer, and its parser stops past 512. Within the
+    cap, compare() and printing the answer walk it without RecursionError."""
     code = f"def f(s):\n    v = {inner}\n    for _ in range({wraps}):\n        v = [v]\n    return v\n"
     expected = json.loads(inner)
     for _ in range(wraps):

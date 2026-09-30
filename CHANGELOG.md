@@ -125,12 +125,13 @@ All notable changes to this project are recorded here. The format follows
 - **A custom validator that returns a coroutine or generator is a `judge_error`.**
   Such a value is always truthy, so an `async def validate`, a generator, or an object
   with an async `__call__` used to pass every case. Seeding refuses an `async def` or a
-  generator `validate` outright, with that reason.
+  generator `validate`, with that reason, wherever the source makes plain which
+  `validate` runs.
 - **The accounts worker names stored problems whose custom validator the judge refuses**
-  when it starts, so an upgrade that ran before the problem set was re-seeded shows up
+  (as far as seeding's check can tell from the source) when it starts, so an upgrade that ran before the problem set was re-seeded shows up
   in the log at once.
-- **An answer nested more than 512 levels deep is that case's `runtime_error`**
-  in the Python judge, in every comparison mode, with its printed output kept. Under a
+- **An answer nested more than 511 levels deep is that case's `runtime_error`**
+  in the Python judge (the depth the Rust judge can carry), in every comparison mode, with its printed output kept. Under a
   custom validator it used to be a `judge_error` that blamed the problem's author. The
   judge now also gives comparing and custom validators room to recurse through an
   answer up to that depth.

@@ -630,21 +630,27 @@ the always-on accounts worker names any stored validator the judge would refuse 
 its startup log (`worker/stale_validators.py`): re-seed the converted problem set.
 A validator that is, or returns, a coroutine or generator (an `async def`, a
 generator, an async `__call__`) is a `judge_error` too, since that value is always
-truthy. Seeding refuses these, and a call that won't bind, only when it can tell
-from the source alone: when the script runs none of its own code while it loads (every
-top-level statement is an import, an undecorated `def`, a docstring or an assignment to
-plain names, and nothing evaluated at load time makes a call), so nothing can rebind or
-reshape `validate`, and the last statement to bind it is a `def` (top-level statements
-run in order). It's an allowlist so that it stays sound without chasing every spelling
-of reflection (`globals()`, frames, `__defaults__`, ...). Anything else (a class, an
-`if`, a call, a decorator) is left to the harness's load-time check, which the
-seed-solution tests exercise. Source that doesn't compile is refused outright.
-In the Python judge, a value the submission returns with anything deeper than 512
-levels (the Rust prelude's JSON parser cap, counted the same way: the value itself at
-depth 0) is that case's `runtime_error`,
-checked where the reply comes in, before comparing or validating recurses on it,
-in every comparison mode. The parent's recursion limit is raised so both can walk
-a value up to that depth. The JS judge has no cap yet (AGENTS.md).
+truthy. Seeding refuses these, and a call that won't bind, when the source makes
+plain which `validate` runs: the last top-level statement that binds it by a plain
+spelling (a def, assignment, import, ...; top-level statements run in order) is an
+undecorated `def`, and nothing rebinds it by a `global`, a walrus, an `except ... as`,
+a `match` capture, a star import, or an attribute set on it. Anything else is left to
+the harness's load-time check, which the seed-solution tests exercise. It reads the
+script as written: problem authors are trusted maintainers, so it's there to catch
+honest mistakes, and rebinding `validate` by reflection at load time (`globals()`,
+frames) is out of scope (an earlier allowlist that refused to decide whenever any
+load-time code ran was sound against that, but stopped checking ordinary validators
+that call `sys.setrecursionlimit`). Whether the call binds is decided by
+`inspect.Signature.bind` itself, on a stub with the def's parameters (defaults None,
+no body), so the check matches the harness's and runs none of the validator's code.
+Source that doesn't compile is refused outright.
+In the Python judge, a returned value with anything more than 511 levels below it
+(the value itself at depth 0) is that case's `runtime_error`: the Rust prelude's
+parser stops past depth 512, and the Rust child reports the answer one level down in
+its result object, so both judges carry the same answers. It's checked where the
+reply comes in, before comparing or validating recurses on it, in every comparison
+mode, and the parent's recursion limit is raised so both can walk a value up to that
+depth. The JS judge has no cap yet (AGENTS.md).
 `args` is the parent's own copy of the input (it never crossed into the child),
 separate from the one handed to the submission: validators routinely check "same
 multiset as the input", and if they read the submission's copy, a submission

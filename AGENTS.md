@@ -435,10 +435,12 @@ slice ships, delete its entry here.
   partial-line split) would corrupt the report, so defer it until after the report as
   harness.py does. The seed tests' Rust container has a fixed name
   (`judge-seed-validate-rust`), so two runs at once collide; give it a unique one.
-  Answer nesting: the Python judge refuses an answer nested past 512 levels (the Rust
-  prelude parser's cap), but the JS judge has no cap (a deep answer overflows its
-  recursive `deepEqual`), and the Rust harness never checks its own return values;
-  give all three the same limit and the same `runtime_error`.
+  Answer nesting: the Python judge refuses an answer nested past 511 levels (what the
+  Rust judge can carry: its parser stops past 512, and the answer sits a level down in
+  the child's result), but the JS judge has no cap (a deep answer overflows its
+  recursive `deepEqual`), and in Rust a too-deep answer is only a failed parse of the
+  child's result, not a clear message; give all three the same limit and the same
+  `runtime_error`.
 
 - **Auth roadmap:** revisit session strategy (currently JWT-in-memory access +
   httpOnly refresh cookie — consider server-side sessions / cookie-based access

@@ -691,14 +691,18 @@ def _number_or_zero(x):
     return x if _is_number(x) and math.isfinite(x) else 0
 
 
-# How deep a returned value may nest: the Rust prelude's JSON parser cap
-# (MAX_DEPTH), counted the same way (see `_nests_too_deeply`). Comparing, validating and printing a
-# value recurse on it, so one nested thousands deep (a submission's `[[[...]]]`,
-# or a forged frame) would raise RecursionError in the parent. Past this limit it's
-# the submission's runtime_error, checked once where the reply comes in, before
-# anything recurses on it. Problems must keep their answers shallower (a tree
-# answer nests two levels per tree level: a map and its children's list).
-_MAX_NESTING = 512
+# How deep inside a returned value (or the probe results list) anything may sit,
+# counting the value itself as depth 0 (see `_nests_too_deeply`). The Rust
+# prelude's JSON parser caps depth at 512, and the Rust harness's child reports the
+# answer and its probe results one level down in its result object
+# (`{"ok": v, "probe_results": [...]}`), so this is what the Rust judge can carry:
+# the two refuse the same answers. Comparing, validating and printing a value
+# recurse on it, so one nested thousands deep (a submission's `[[[...]]]`, or a
+# forged frame) would raise RecursionError in the parent. Past this limit it's the
+# submission's runtime_error, checked once where the reply comes in, before
+# anything recurses on it. Problems must keep their answers shallower (a
+# `{"val", "children"}` tree nests two levels per tree level).
+_MAX_NESTING = 511
 
 # The parent's recursion limit: room for compare() or a custom validator to recurse
 # through a value _MAX_NESTING deep at several frames per level (Python's default
@@ -708,9 +712,9 @@ _PARENT_RECURSION_LIMIT = 8 * _MAX_NESTING + 1000
 
 
 def _nests_too_deeply(value, limit=_MAX_NESTING):
-    """Whether any value inside `value` (parsed JSON) sits deeper than `limit`,
-    counting as the Rust prelude's parser does: `value` itself at depth 0, each
-    list element or map value one deeper than its container. Iterative, so it
+    """Whether any value inside `value` (parsed JSON) sits deeper than `limit`:
+    `value` itself at depth 0, each list element or map value one deeper than its
+    container. Iterative, so it
     can't itself hit the recursion limit it guards, and it walks only containers,
     so a long flat list costs one pass over it."""
     todo = [(value, 0)] if isinstance(value, (list, dict)) else []
