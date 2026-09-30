@@ -691,24 +691,36 @@ def _number_or_zero(x):
     return x if _is_number(x) and math.isfinite(x) else 0
 
 
-# How deep a returned value may nest. Comparing, validating and printing a value
-# recurse on it, so one nested thousands deep (a submission's `[[[...]]]`, or a
-# forged frame) would raise RecursionError in the parent. No answer nests anywhere
-# near this, so past it is the submission's runtime_error, checked once where the
-# reply comes in, the same for every comparison mode.
-_MAX_NESTING = 256
+# How deep a returned value may nest: the same cap as the Rust prelude's JSON
+# parser (MAX_DEPTH). Comparing, validating and printing a
+# value recurse on it, so one nested thousands deep (a submission's `[[[...]]]`,
+# or a forged frame) would raise RecursionError in the parent. Past this limit it's
+# the submission's runtime_error, checked once where the reply comes in, before
+# anything recurses on it. Problems must keep their answers shallower (a tree
+# answer nests two levels per tree level: a map and its children's list).
+_MAX_NESTING = 512
+
+# The parent's recursion limit: room for compare() or a custom validator to recurse
+# through a value _MAX_NESTING deep at several frames per level (Python's default
+# of 1000 is under two). Python-to-Python calls don't use the C stack in 3.11+, so
+# this costs nothing until it's used.
+_PARENT_RECURSION_LIMIT = 8 * _MAX_NESTING + 1000
 
 
 def _nests_too_deeply(value, limit=_MAX_NESTING):
     """Whether `value` (parsed JSON) nests lists or dicts deeper than `limit`.
-    Iterative, so it can't itself hit the recursion limit it guards."""
-    todo = [(value, 0)]
+    Iterative, so it can't itself hit the recursion limit it guards, and it
+    visits only containers, so a long flat list costs one pass over it."""
+    if not isinstance(value, (list, dict)):
+        return False
+    todo = [(value, 1)]
     while todo:
         node, depth = todo.pop()
-        if isinstance(node, (list, dict)):
-            if depth >= limit:
-                return True
-            todo.extend((child, depth + 1) for child in (node.values() if isinstance(node, dict) else node))
+        if depth > limit:
+            return True
+        for child in node.values() if isinstance(node, dict) else node:
+            if isinstance(child, (list, dict)):
+                todo.append((child, depth + 1))
     return False
 
 
@@ -1287,7 +1299,7 @@ def _finalize(tc, reply, comparison, validate_fn=None, time_limit_s=None, probes
                 "stdout": _truncate(reply["stdout"])}
 
     actual = reply.get("actual")
-    if _nests_too_deeply(actual) or _nests_too_deeply(reply.get("probe_results")):
+    if _nests_too_deeply(actual) or (validate_fn is not None and _nests_too_deeply(reply.get("probe_results"))):
         return {"test_case_id": tc_id, "status": "runtime_error", "runtime_ms": reply["runtime_ms"],
                 "output": None, "stdout": _truncate(reply["stdout"]),
                 "error": "the returned value is nested too deeply to judge"}
@@ -1462,6 +1474,7 @@ def main():
 
 def _parent_main():
     """The trusted parent: read the payload, judge it (`run`), write the report."""
+    sys.setrecursionlimit(max(sys.getrecursionlimit(), _PARENT_RECURSION_LIMIT))
     # Payload channel: stdin by default (the `docker run -i` path). Under
     # Kubernetes there's no stdin pipe, so the runner mounts the payload as a file
     # and points JUDGE_PAYLOAD_FILE at it. Either way it's read and parsed here in

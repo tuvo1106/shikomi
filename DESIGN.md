@@ -631,14 +631,17 @@ its startup log (`worker/stale_validators.py`): re-seed the converted problem se
 A validator that is, or returns, a coroutine or generator (an `async def`, a
 generator, an async `__call__`) is a `judge_error` too, since that value is always
 truthy. Seeding refuses these, and a call that won't bind, only when it can tell
-from the source alone: when every binding of `validate` is a top-level statement
-and the last of them is an undecorated `def` (top-level statements run in order,
-so that def is what's bound). Anything else (a decorator, a binding inside a block
-or a nested expression, a `global validate`, a star import) is left to the harness's
-load-time check, which the seed-solution tests exercise.
-A value the submission returns nested more than 256 lists or maps deep is that
-case's `runtime_error`, checked where the reply comes in and before comparing or
-validating recurses on it, in every comparison mode.
+from the source alone: when the last top-level statement that binds `validate` is an
+undecorated `def` (top-level statements run in order, so that def is what's bound)
+and nothing could rebind or reshape it. Anything else (a decorator, a `global
+validate`, a walrus, passing `validate` to a function, reflection such as
+`globals()` or `__defaults__`) is left to the harness's load-time check, which the
+seed-solution tests exercise. Source that doesn't compile is refused outright.
+In the Python judge, a value the submission returns nested more than 512 lists or
+maps deep (the Rust prelude's JSON parser cap) is that case's `runtime_error`,
+checked where the reply comes in, before comparing or validating recurses on it,
+in every comparison mode. The parent's recursion limit is raised so both can walk
+a value up to that depth. The JS judge has no cap yet (AGENTS.md).
 `args` is the parent's own copy of the input (it never crossed into the child),
 separate from the one handed to the submission: validators routinely check "same
 multiset as the input", and if they read the submission's copy, a submission

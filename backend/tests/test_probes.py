@@ -66,12 +66,6 @@ def test_the_older_instance_form_is_refused_in_every_mode():
         _file(None, kind="function", languages=function, validator=older))
 
 
-def test_a_validator_that_cant_be_parsed_is_left_to_the_harness():
-    """Parsed, never run, and a script that doesn't load is the harness's to
-    report (a judge_error on every submission, which the seed tests catch)."""
-    ProblemFile.model_validate(_file([DECODE], validator="def validate(:\n"))
-
-
 def test_a_ref_must_fill_a_real_argument():
     assert "refs names argument 1, but it has 1" in _error(
         _file([{"op": "decode", "args": [None], "refs": {"1": 1}}]))
@@ -177,11 +171,15 @@ def test_a_validator_the_harness_call_cant_bind_to_is_refused():
                     older + "def g(h=(validate := wrap(validate))):\n    pass\n",
                     older + "try:\n    pass\nexcept Exception as validate:\n    pass\n",
                     older + "match wrap(validate):\n    case validate:\n        pass\n",
-                    older + "from helpers import *\n"):
+                    older + "from helpers import *\n",
+                    older + "X = [validate for validate in range(3)]\n",
+                      "def validate(actual, expected, args, probe_results, instance):\n    return 1\n"
+                    "validate.__defaults__ = (None,)\n",
+                    older + "globals()['validate'] = lambda actual, expected, args, probe_results: 1\n",
+                    older + "import functools\n"):
         ProblemFile.model_validate(_file(None, validator=unclear))
     # Names bound in nested scopes, or a bare annotation, don't rebind it.
     for clear in (older + "def helper():\n    validate = 1\n",
-                  older + "X = [validate for validate in range(3)]\n",
                   older + "class K:\n    validate = 1\n",
                   older + "validate: object\n",
                   "validate = None\n" + older):
@@ -191,10 +189,13 @@ def test_a_validator_the_harness_call_cant_bind_to_is_refused():
         ProblemFile.model_validate(_file(None, validator=f"def validate({sig}):\n    return True\n"))
 
 
-def test_a_validator_too_complex_to_compile_is_refused():
+@pytest.mark.parametrize("source", ["x = " + "1+" * 200000 + "1\n",  # RecursionError
+                                    "X = " + "[" * 300 + "]" * 300 + "\n",  # the parser's limit
+                                    "return 1\n",  # only compiling finds it
+                                    "def (:\n"])
+def test_a_validator_that_doesnt_compile_is_refused(source):
     """The harness's compile() fails on it too, so no case could be judged."""
-    deep = "x = " + "1+" * 200000 + "1\n" + PROBE_VALIDATOR
-    assert "too complex" in _error(_file(None, validator=deep))
+    assert "the Python validator doesn't compile" in _error(_file(None, validator=source + PROBE_VALIDATOR))
 
 
 def test_a_positional_only_probe_results_doesnt_count():

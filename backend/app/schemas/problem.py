@@ -193,22 +193,40 @@ def _is_generator(fn: ast.FunctionDef) -> bool:
     return False
 
 
-def _validate_def_that_runs(tree: ast.Module) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
-    """The `def validate` that the script leaves bound when it runs, or None when
-    that can't be read off the source without running it.
+# Names and attributes that reach a module's globals, or a function's defaults,
+# by reflection: a validator that uses any of them may reshape `validate` in ways
+# the source doesn't spell out, so seeding leaves it to the harness.
+_REFLECTIVE_NAMES = frozenset({"globals", "vars", "locals", "setattr", "delattr", "exec", "eval",
+                               "compile", "__import__", "__builtins__"})
+_REFLECTIVE_ATTRS = frozenset({"modules", "__dict__", "__globals__", "__defaults__",
+                               "__kwdefaults__", "__signature__", "__wrapped__", "__code__"})
+_REFLECTIVE_MODULES = frozenset({"__main__", "builtins", "importlib", "functools", "inspect"})
 
-    Sound by construction, not complete: it answers only when every binding of
-    the name is a top-level statement of the module (a def, a class, an
-    assignment, an import, ...) and the last of them is an undecorated def. Top-level
-    statements run in order, so that def is what's left bound. Anything subtler (a
-    `global validate` in a function, a walrus, an `except ... as validate`, a
-    `match` capture, a star import, a binding inside an `if` or `try` block, a
-    decorator) is None, and the harness judges the real object when it loads it.
+
+def _validate_def_that_runs(tree: ast.Module) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+    """The `def validate` whose signature the harness will see, or None when that
+    can't be read off the source without running it.
+
+    It answers only in the plain case: the last top-level statement that binds
+    `validate` is an undecorated def (top-level statements run in order, so that
+    def is what's left bound), and nothing else could rebind or reshape it. So it
+    returns None on a `global validate`, a walrus, an `except ... as validate`, a
+    `match` capture, a star import, a binding inside a block that comes last, any
+    use of `validate` other than calling it (passing it to a function could wrap or
+    mutate it), and the usual spellings of reflection (`globals()`, `setattr`,
+    `sys.modules`, `__defaults__`, `functools`, ...). That list can't be complete
+    (reflection has endless spellings), which is why the harness's load-time
+    check, run on the real object, stays the authority.
     """
+    called = {id(node.func) for node in ast.walk(tree) if isinstance(node, ast.Call)}
     for node in ast.walk(tree):
         if isinstance(node, (ast.Global, ast.Nonlocal)) and "validate" in node.names:
             return None
-        if isinstance(node, ast.ImportFrom) and any(a.name == "*" for a in node.names):
+        if isinstance(node, ast.ImportFrom) and (
+                node.module in _REFLECTIVE_MODULES or any(a.name == "*" for a in node.names)):
+            return None
+        if isinstance(node, ast.Import) and any(
+                a.name.split(".")[0] in _REFLECTIVE_MODULES for a in node.names):
             return None
         if isinstance(node, ast.NamedExpr) and node.target.id == "validate":
             return None
@@ -218,20 +236,18 @@ def _validate_def_that_runs(tree: ast.Module) -> ast.FunctionDef | ast.AsyncFunc
             return None
         if isinstance(node, ast.MatchMapping) and node.rest == "validate":
             return None
+        if isinstance(node, ast.Attribute) and node.attr in _REFLECTIVE_ATTRS:
+            return None
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and (
+                node.id in _REFLECTIVE_NAMES or node.id == "validate" and id(node) not in called):
+            return None
     last = None
     for stmt in tree.body:
-        binds_directly = (
-            isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and stmt.name == "validate"
-            or isinstance(stmt, (ast.Import, ast.ImportFrom))
-            and any((a.asname or a.name.split(".")[0]) == "validate" for a in stmt.names)
-            or isinstance(stmt, (ast.Assign, ast.AugAssign, ast.AnnAssign, ast.For, ast.AsyncFor,
-                                 ast.With, ast.AsyncWith, ast.Delete))
-            and _stores_name(stmt, "validate"))
-        if binds_directly:
+        if (isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                and stmt.name == "validate" or _stores_name(stmt, "validate")):
             last = stmt
-        elif _stores_name(stmt, "validate"):
-            return None  # bound inside a block (`if`, `try`, `while`, ...)
-    if isinstance(last, (ast.FunctionDef, ast.AsyncFunctionDef)) and not last.decorator_list:
+    if (isinstance(last, (ast.FunctionDef, ast.AsyncFunctionDef)) and last.name == "validate"
+            and not last.decorator_list):
         return last
     return None
 
@@ -267,10 +283,10 @@ def validator_call_problem(validator_code: str) -> str | None:
     executed: seed validation runs no problem code.
 
     Best-effort by design: it decides only when `_validate_def_that_runs` can name
-    the def that runs, and otherwise leaves it to the harness's load-time check,
-    which the seed-solution tests exercise with every reference solution. It never
-    refuses a validator the harness would accept. For that def it mirrors
-    `_load_validator`:
+    the def the harness will load, and otherwise leaves it to the harness's
+    load-time check, which the seed-solution tests exercise with every reference
+    solution. Source that doesn't compile is refused, as the harness refuses it
+    (compiling runs nothing). For the def that runs it mirrors `_load_validator`:
 
     * an `async def` or a generator is refused: the judge would get a coroutine
       or generator, which is always truthy, so every case would pass;
@@ -283,11 +299,16 @@ def validator_call_problem(validator_code: str) -> str | None:
         return "the validator isn't source code"
     try:
         tree = ast.parse(validator_code)
+        compile(tree, "<validator>", "exec")  # errors only compiling finds, e.g. a stray `return`
         fn = _validate_def_that_runs(tree)
-    except SyntaxError:
-        return None
-    except (RecursionError, MemoryError):  # the harness's compile() fails on it the same way
-        return "the Python validator is too complex (nested too deeply) to compile"
+    except SyntaxError as exc:  # e.g. more brackets deep than the parser allows
+        return f"the Python validator doesn't compile: {exc.msg} (line {exc.lineno})"
+    except RecursionError:  # the harness's compile() fails on it the same way
+        return "the Python validator doesn't compile: it's nested too deeply"
+    except MemoryError as exc:
+        if "too complex" not in str(exc):  # only the parser's own limit is the source's fault
+            raise
+        return "the Python validator doesn't compile: it's too complex to parse"
     if fn is None:
         return None
     if isinstance(fn, ast.AsyncFunctionDef):

@@ -437,6 +437,23 @@ def test_an_answer_nested_too_deeply_to_compare_is_that_cases_runtime_error():
     assert [r["status"] for r in json.loads(proc.stdout)["results"]] == ["runtime_error", "passed"]
 
 
+def test_an_answer_nested_within_the_limit_is_judged():
+    """A tree answer nests two levels per tree level; 500 deep is within the cap, and
+    the parent's raised recursion limit lets compare() and a recursive validator
+    walk it."""
+    deep = ("def f(s):\n    v = []\n    for _ in range(500):\n        v = [v]\n    return v\n")
+    expected = []
+    for _ in range(500):
+        expected = [expected]
+    assert results(payload(deep, [case(0, ["x"], expected)], comparison={"mode": "unordered"}))[0][
+        "status"] == "passed"
+    recursive = ("def depth(v):\n    return 1 + max((depth(x) for x in v), default=0) if isinstance(v, list) else 0\n"
+                 "def validate(actual, expected, args, probe_results):\n    return depth(actual) == 501\n")
+    assert results(payload(deep, [case(0, ["x"], None)],
+                           comparison={"mode": "custom_validator", "validator_code": recursive}))[0][
+        "status"] == "passed"
+
+
 def test_an_answer_nested_too_deeply_is_the_submissions_fault_under_a_validator_too():
     """Checked where the reply comes in, before any validator sees it: a runtime_error
     that keeps the case's stdout, not a judge_error blaming the problem's author."""

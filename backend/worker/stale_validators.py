@@ -42,7 +42,7 @@ async def stale_validator_slugs(session) -> list[str]:
         try:
             if validator_call_problem(code) is not None:
                 stale.append(slug)
-        except Exception:  # noqa: BLE001 - e.g. RecursionError parsing absurd source
+        except Exception:  # noqa: BLE001 - a bug in the check, never fatal
             logger.exception("could not check the custom validator of %s", slug)
     return sorted(stale)
 
