@@ -198,75 +198,44 @@ def _validate_def_that_runs(tree: ast.Module) -> ast.FunctionDef | ast.AsyncFunc
     """The `def validate` that the script leaves bound, or None when the source
     doesn't make that plain.
 
+    One rule, an allowlist: it decides only when the identifier `validate` occurs
+    nowhere but as the name of top-level defs and as the callee of calls. Then
+    nothing else binds, rebinds or hands it anywhere, the last of those defs is
+    what's bound (top-level statements run in order), and it must be undecorated.
+    Any other occurrence (an assignment, an import, a parameter or local of the
+    same name even in an unrelated function, `validate.__name__`, passing it to
+    `update_wrapper`, a `global` or star import) defers to the harness, which loads
+    the real object; the seed-solution tests exercise that. Deferring on a
+    harmless shadow is the price of a rule simple enough to be obviously right.
+
     Scope: problem authors are trusted maintainers, so this reads the script as
     written, to catch honest mistakes (a leftover older form), not adversarial
-    source. It takes the last top-level statement that binds `validate` by a
-    plain spelling (a def, class, assignment, import, `for`, `with`, `del`, ...;
-    top-level statements run in order), and names it only when that's an
-    undecorated def. It returns None where the plain spellings stop being plain:
-    a `global validate`, a walrus, an `except ... as validate`, a `match` capture,
-    a star import, an attribute set on `validate` (`validate.__defaults__ =`), or
-    any use of `validate` other than calling it (`update_wrapper(validate, f)` or
-    `setattr(validate, ...)` could reshape it).
-    Rebinding through reflection at load time (`globals()`, frames, ...) is out of
-    scope: seeding would judge the def as written, and the harness, which loads
-    the real object, stays the authority.
+    source. Rebinding through reflection at load time (`globals()["validate"]`,
+    frames, ...) is out of scope.
     """
-    called = set()  # ast.walk yields a Call before its func, so this is filled in time
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.Global, ast.Nonlocal)) and "validate" in node.names:
-            return None
-        if isinstance(node, ast.ImportFrom) and any(a.name == "*" for a in node.names):
-            return None
-        if isinstance(node, ast.NamedExpr) and node.target.id == "validate":
-            return None
-        if isinstance(node, ast.ExceptHandler) and node.name == "validate":
-            return None
-        if isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name == "validate":
-            return None
-        if isinstance(node, ast.MatchMapping) and node.rest == "validate":
-            return None
-        if isinstance(node, ast.Call):
-            called.add(id(node.func))
-        if (isinstance(node, ast.Name) and node.id == "validate" and isinstance(node.ctx, ast.Load)
-                and id(node) not in called):
-            return None  # handed to something that could wrap or reshape it
-        if (isinstance(node, ast.Attribute) and isinstance(node.ctx, (ast.Store, ast.Del))
-                and isinstance(node.value, ast.Name) and node.value.id == "validate"):
-            return None
-    last = None
-    for stmt in tree.body:
-        if (isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and stmt.name == "validate"
-                or _stores_name(stmt, "validate")):
-            last = stmt
-    if isinstance(last, (ast.FunctionDef, ast.AsyncFunctionDef)) and not last.decorator_list:
-        return last
-    return None
-
-
-def _stores_name(stmt: ast.stmt, name: str) -> bool:
-    """Whether `stmt` binds `name` in the module's own scope: a store or delete of
-    it, or a nested def, class or import of it, outside any nested function,
-    class, lambda or comprehension (those have scopes of their own)."""
-    todo = [stmt]
-    while todo:
-        node = todo.pop()
-        if node is not stmt and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            if node.name == name:
-                return True
+    top_defs = [s for s in tree.body
+                if isinstance(s, (ast.FunctionDef, ast.AsyncFunctionDef)) and s.name == "validate"]
+    if not top_defs:
+        return None
+    allowed = {id(fn) for fn in top_defs}
+    allowed |= {id(n.func) for n in ast.walk(tree) if isinstance(n, ast.Call)}  # callees
+    for n in ast.walk(tree):
+        if id(n) in allowed:
             continue
-        if isinstance(node, (ast.Lambda, ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
-            continue  # scopes of their own; a walrus inside is refused up front
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            continue  # `stmt` itself: its name is the caller's business
-        if isinstance(node, ast.Name) and node.id == name and isinstance(node.ctx, (ast.Store, ast.Del)):
-            return True
-        if isinstance(node, ast.alias) and (node.asname or node.name.split(".")[0]) == name:
-            return True
-        if isinstance(node, ast.AnnAssign) and node.value is None:
-            continue  # a bare annotation binds nothing
-        todo.extend(ast.iter_child_nodes(node))
-    return False
+        if isinstance(n, ast.ImportFrom) and any(a.name == "*" for a in n.names):
+            return None  # could bind anything
+        named = (n.id if isinstance(n, ast.Name)
+                 else n.name if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef,
+                                               ast.ExceptHandler, ast.MatchAs, ast.MatchStar))
+                 else n.arg if isinstance(n, ast.arg)
+                 else n.rest if isinstance(n, ast.MatchMapping)
+                 else (n.asname or n.name.split(".")[0]) if isinstance(n, ast.alias)
+                 else "validate" if isinstance(n, (ast.Global, ast.Nonlocal)) and "validate" in n.names
+                 else None)
+        if named == "validate":
+            return None
+    fn = top_defs[-1]
+    return None if fn.decorator_list else fn
 
 
 def _accepts_the_call(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
@@ -298,8 +267,8 @@ def _accepts_the_call(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
 def validator_call_problem(validator_code: str) -> str | None:
     """Why judge/harness.py would refuse the Python validator, or None when it
     wouldn't, or when the source doesn't make that plain. The validator's own code
-    never runs: seeding parses and compiles it, and runs only a stub of its
-    signature.
+    never runs: seeding parses and compiles it, and reads its signature off the
+    parsed def.
 
     Best-effort by design: it decides only for the def `_validate_def_that_runs`
     names (see its scope), and otherwise leaves it to the harness's load-time

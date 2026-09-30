@@ -156,8 +156,9 @@ def test_a_validator_the_harness_call_cant_bind_to_is_refused():
     ProblemFile.model_validate(_file(None, validator=(
         "def validate(actual, expected, args, probe_results):\n"
         "    def g():\n        yield 1\n    return True\n")))
-    # Where a plain spelling rebinds or reshapes `validate` after its def, or the last
-    # def is decorated, seeding leaves it to the harness, which judges the real object.
+    # Seeding decides only when `validate` occurs nowhere but as the name of
+    # top-level defs and as a callee; any other occurrence defers to the harness,
+    # which judges the real object, even a harmless shadow.
     older = "def validate(actual, expected, args, instance=None):\n    return True\n"
     good = "def validate(actual, expected, args, probe_results):\n    return True\n"
     for unclear in ("@adapt\n" + older,
@@ -167,26 +168,27 @@ def test_a_validator_the_harness_call_cant_bind_to_is_refused():
                     older + "from helpers import check as validate\n",
                     older + "def rebind():\n    global validate\n    validate = wrap(validate)\nrebind()\n",
                     older + "X = [(validate := wrap(f)) for f in [validate]]\n",
-                    older + "def g(h=(validate := wrap(validate))):\n    pass\n",
                     older + "try:\n    pass\nexcept Exception as validate:\n    pass\n",
-                    older + "match wrap(validate):\n    case validate:\n        pass\n",
+                    older + "match wrap(1):\n    case validate:\n        pass\n",
                     older + "from helpers import *\n",
                     "def validate(actual, expected, args, probe_results, instance):\n    return 1\n"
                     "validate.__defaults__ = (None,)\n",
                     "import functools\n" + older + "functools.update_wrapper(validate, print)\n",
                     older + "setattr(validate, '__signature__', None)\n",
-                    older + "X = [validate for validate in range(3)]\n"):
+                    older + "X = [validate for validate in range(3)]\n",
+                    "def helper(validate):\n    return validate\n" + older,
+                    older + "def helper():\n    validate = 1\n",
+                    older + "class K:\n    validate = 1\n",
+                    older + "validate: object\n",
+                    "validate = None\n" + older):
         ProblemFile.model_validate(_file(None, validator=unclear))
-    # Otherwise the last def is what's judged: names bound in nested scopes, a bare
-    # annotation, and ordinary load-time code don't rebind it.
-    for clear in (older + "def helper():\n    validate = 1\n",
-                  older + "class K:\n    validate = 1\n",
-                  "import sys\nsys.setrecursionlimit(10000)\nINF = float('inf')\n" + older,
+    # Otherwise the last top-level def is what's judged, whatever else runs at load.
+    for clear in ("import sys\nsys.setrecursionlimit(10000)\nINF = float('inf')\n" + older,
                   "KEY = lambda x: abs(x)\n" + older + "if __name__:\n    pass\n",
                   '"""Docstring."""\nfrom collections import Counter\nLIMIT = (1, -2)\n' + older,
                   "def validate(actual: list[int], expected, args, instance=None) -> bool:\n    return True\n",
-                  older + "validate: object\n",
-                  "validate = None\n" + older,
+                  "def validate(actual, expected, args, instance=None):\n    return validate(actual, expected, args)\n",
+                  good + older,
                   # Rebinding by reflection is out of scope (authors are trusted): the
                   # def is judged as written.
                   older + "import sys\nsys._getframe().f_globals['validate'] = print\n"):
@@ -212,8 +214,11 @@ def test_checking_the_signature_runs_none_of_the_validators_code(capsys):
     ran = "def validate(actual, expected, args, probe_results=print('ran'), instance=print('ran')):\n    pass\n"
     ProblemFile.model_validate(_file(None, validator=ran))
     assert capsys.readouterr().out == ""
-    deep = "def validate(actual, expected, args, probe_results, x=" + "1+" * 400 + "1) -> " + "int|" * 400 + "int:\n    pass\n"
-    ProblemFile.model_validate(_file(None, validator=deep))
+    deep = "1+" * 400 + "1"
+    ProblemFile.model_validate(_file(None, validator=(
+        f"def validate(actual, expected, args, probe_results, x={deep}) -> {'int|' * 400}int:\n    pass\n")))
+    assert "the older `instance` form is gone" in _error(_file(None, validator=(
+        f"def validate(actual, expected, args, instance={deep}):\n    pass\n")))
 
 
 def test_a_positional_only_probe_results_doesnt_count():

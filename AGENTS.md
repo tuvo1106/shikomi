@@ -440,7 +440,9 @@ slice ships, delete its entry here.
   the child's result), but the JS judge has no cap (a deep answer overflows its
   recursive `deepEqual`), and in Rust a too-deep answer is only a failed parse of the
   child's result, not a clear message; give all three the same limit and the same
-  `runtime_error`.
+  `runtime_error`. Nothing checks the depth of a case's `input` or `expected` either:
+  the Rust payload puts them three levels down, so one nested past 509 fails the whole
+  Rust run as "invalid payload JSON"; refuse it at seed time.
 
 - **Auth roadmap:** revisit session strategy (currently JWT-in-memory access +
   httpOnly refresh cookie — consider server-side sessions / cookie-based access

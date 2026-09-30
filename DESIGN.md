@@ -631,17 +631,16 @@ its startup log (`worker/stale_validators.py`): re-seed the converted problem se
 A validator that is, or returns, a coroutine or generator (an `async def`, a
 generator, an async `__call__`) is a `judge_error` too, since that value is always
 truthy. Seeding refuses these, and a call that won't bind, when the source makes
-plain which `validate` runs: the last top-level statement that binds it by a plain
-spelling (a def, assignment, import, ...; top-level statements run in order) is an
-undecorated `def`, and nothing rebinds it by a `global`, a walrus, an `except ... as`,
-a `match` capture, a star import, an attribute set on it, or any use of it other
-than calling it (`update_wrapper(validate, f)`). Anything else is left to
-the harness's load-time check, which the seed-solution tests exercise. It reads the
+plain which `validate` runs, by one rule: the identifier `validate` occurs nowhere
+but as the name of top-level `def`s and as the callee of calls, so the last such def
+is what's bound, and it's undecorated. Any other occurrence (an assignment, an import,
+a same-named local even in an unrelated function, handing it to `update_wrapper`)
+is left to the harness's load-time check, which the seed-solution tests exercise:
+deferring on a harmless shadow is the price of a rule simple enough to be obviously
+right (ten review rounds of special-cased spellings preceded it). It reads the
 script as written: problem authors are trusted maintainers, so it's there to catch
 honest mistakes, and rebinding `validate` by reflection at load time (`globals()`,
-frames) is out of scope (an earlier allowlist that refused to decide whenever any
-load-time code ran was sound against that, but stopped checking ordinary validators
-that call `sys.setrecursionlimit`). Whether the call binds is decided by
+frames) is out of scope. Whether the call binds is decided by
 `inspect.Signature.bind` itself, on a signature built from the def's parameter names
 and kinds, so the check matches the harness's and evaluates none of the validator's
 code.
@@ -650,7 +649,8 @@ In the Python judge, a returned value with anything more than 511 levels below i
 (the value itself at depth 0) is that case's `runtime_error`: the Rust prelude's
 parser stops past depth 512, and the Rust child reports the answer one level down in
 its result object, so both judges carry the same returned answers (an author's
-`expected` sits three levels down in the Rust payload, so it's capped at 509 there). It's checked where the
+`expected` sits three levels down in the Rust payload, so it can nest only 509
+levels there, which nothing checks yet: AGENTS.md). It's checked where the
 reply comes in, before comparing or validating recurses on it, in every comparison
 mode, and the parent's recursion limit is raised so both can walk a value up to that
 depth. The JS judge has no cap yet (AGENTS.md).
