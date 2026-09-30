@@ -177,6 +177,26 @@ async def test_run_judgement_python_language_keeps_existing_defaults(monkeypatch
     assert captured["wall_timeout_s"] == pytest.approx(2 + 10)
 
 
+async def test_run_judgement_logs_the_harness_stderr(monkeypatch, caplog):
+    """A custom validator's exception is shown to the user as a fixed line (its
+    detail could quote `expected`); the harness writes the detail to stderr, and
+    this log is where the problem's author finds it."""
+    from worker import judging as judging_mod
+
+    async def fake_run_in_container(payload, **kwargs):
+        return ContainerResult(
+            stdout='{"results": []}', stderr="harness: custom validator raised KeyError: 'x'\n",
+            exit_code=0, timed_out=False, stdout_truncated=False)
+
+    monkeypatch.setattr(judging_mod.runner, "run_in_container", fake_run_in_container)
+    with caplog.at_level("WARNING", logger="worker.judging"):
+        await judging_mod.run_judgement(
+            code="def f(x): return x", comparison={"mode": "exact"}, time_limit_ms=2000,
+            memory_limit_mb=256, test_cases=[], container_name="judge-test-log",
+            function_name="f", language="python")
+    assert "judge-test-log" in caplog.text and "raised KeyError" in caplog.text
+
+
 async def test_run_judgement_dispatches_rust_to_its_image_with_an_exec_tmpfs(monkeypatch):
     """language="rust" needs its own image, a 32MB tmpfs mounted `exec` (the
     harness runs the binary it compiles there), the compile timeout in its wall

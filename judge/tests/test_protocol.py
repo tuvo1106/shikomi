@@ -9,6 +9,18 @@ import sys
 import pytest
 
 HARNESS = pathlib.Path(__file__).resolve().parents[1] / "harness.py"
+
+
+def _harness_module():
+    """harness.py as a module, for its constants (its `main()` is guarded)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("harness_under_test", HARNESS)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+VALIDATOR_FAULT = _harness_module().VALIDATOR_FAULT
 TRUNC_MAX = 4096 + len("…(truncated)")
 
 
@@ -243,7 +255,7 @@ def test_bools_and_numbers_still_match_their_own_kind(comparison, returned, expe
 # other comparison mode would leave it unused if the check doesn't need it.
 
 SAME_MULTISET = (
-    "def validate(actual, expected, args, instance=None):\n"
+    "def validate(actual, expected, args, probe_results):\n"
     "    return sorted(actual) == sorted(args[0])\n"
 )
 
@@ -283,14 +295,18 @@ def test_custom_validator_that_raises_is_judge_error_not_runtime_error():
     distinct status from a submission's own runtime_error (AGENTS.md)."""
     code = "def f(s):\n    return s"
     broken_validator = (
-        "def validate(actual, expected, args, instance=None):\n"
+        "def validate(actual, expected, args, probe_results):\n"
         "    raise ValueError('validator bug')\n"
     )
     pl = payload(code, [case(0, ["x"], None)],
                  comparison={"mode": "custom_validator", "validator_code": broken_validator})
-    res = results(pl)
+    proc = run_harness(pl)
+    res = json.loads(proc.stdout)["results"]
     assert res[0]["status"] == "judge_error"
-    assert "validator bug" in res[0]["error"]
+    # The user sees a fixed line: the exception's message is the author's code
+    # talking and could quote `expected`. The detail goes to the judge's log.
+    assert res[0]["error"] == VALIDATOR_FAULT
+    assert "raised ValueError: validator bug" in proc.stderr
 
 
 def test_custom_validator_missing_validate_function_fails_fast():
@@ -299,10 +315,192 @@ def test_custom_validator_missing_validate_function_fails_fast():
     code = "def f(s):\n    return s"
     pl = payload(code, [case(0, ["x"], None), case(1, ["y"], None)],
                  comparison={"mode": "custom_validator", "validator_code": "x = 1\n"})
-    res = results(pl)
+    proc = run_harness(pl)
+    res = json.loads(proc.stdout)["results"]
     assert len(res) == 1
     assert res[0]["status"] == "judge_error"
-    assert "validate" in res[0]["error"]
+    assert res[0]["error"] == VALIDATOR_FAULT
+    assert "must define a 'validate' function" in proc.stderr
+
+
+def test_the_older_instance_form_is_refused():
+    """A validator without `probe_results` is the older form, which ran next to
+    the submission in operations mode (ADR-0007). It's gone: refused once, for
+    the whole payload, even in function mode where it would have been harmless,
+    so a problem set can't keep a form that only works in one mode."""
+    older = "def validate(actual, expected, args, instance=None):\n    return True\n"
+    pl = payload("def f(s):\n    return s", [case(0, ["x"], None), case(1, ["y"], None)],
+                 comparison={"mode": "custom_validator", "validator_code": older})
+    proc = run_harness(pl)
+    res = json.loads(proc.stdout)["results"]
+    assert [r["status"] for r in res] == ["judge_error"]
+    assert "must accept (actual, expected, args, probe_results)" in proc.stderr
+
+
+def test_a_validator_the_call_cant_bind_to_is_refused_before_any_case():
+    """A half-converted validator (`instance` left in, as a required parameter,
+    next to `probe_results`) would raise TypeError on every case; it's refused
+    once, up front, like the older form."""
+    half = "def validate(actual, expected, args, instance, probe_results):\n    return True\n"
+    pl = payload("def f(s):\n    return s", [case(0, ["x"], None), case(1, ["y"], None)],
+                 comparison={"mode": "custom_validator", "validator_code": half})
+    proc = run_harness(pl)
+    assert [r["status"] for r in json.loads(proc.stdout)["results"]] == ["judge_error"]
+
+
+def test_an_async_validator_is_refused():
+    """Its coroutine is always truthy, so it would pass every case."""
+    pl = payload("def f(s):\n    return s", [case(0, ["x"], "nope")],
+                 comparison={"mode": "custom_validator", "validator_code":
+                             "async def validate(actual, expected, args, probe_results):\n    return False\n"})
+    assert [r["status"] for r in results(pl)] == ["judge_error"]
+
+
+def test_a_forged_non_numeric_runtime_never_reaches_the_report():
+    """Every report row carries the child's `runtime_ms`, which the worker sums."""
+    forge = (
+        "import json, os, sys\n"
+        "def f(s):\n"
+        "    frame = {'status': 'ok', 'actual': 'x', 'runtime_ms': '9', 'stdout': ''}\n"
+        "    os.write(int(sys.argv[2]), (json.dumps(frame) + '\\n').encode())\n"
+        "    os._exit(0)\n"
+    )
+    res = results(payload(forge, [case(0, ["x"], "x")]))
+    assert res[0]["runtime_ms"] == 0
+
+
+@pytest.mark.parametrize("validator", [
+    "async def validate(actual, expected, args, probe_results):\n    yield False\n",
+    "class V:\n    async def __call__(self, actual, expected, args, probe_results):\n"
+    "        return False\nvalidate = V()\n",
+])
+def test_a_validator_returning_a_coroutine_or_generator_is_a_judge_error(validator):
+    """Checked on the returned value: every way of producing an always-truthy
+    coroutine or generator, not just an `async def`."""
+    pl = payload("def f(s):\n    return s", [case(0, ["x"], None)],
+                 comparison={"mode": "custom_validator", "validator_code": validator})
+    assert [r["status"] for r in results(pl)] == ["judge_error"]
+
+
+@pytest.mark.parametrize("frame", ["[1]", "{'status': 'ok', 'actual': 'x', 'runtime_ms': 1, 'stdout': 5}"])
+def test_a_forged_frame_of_the_wrong_shape_cant_crash_the_parent(frame):
+    """A frame that isn't an object is a desynced child (a runtime_error); text
+    fields of the wrong type are made text. Either way the parent still reports."""
+    forge = (
+        "import json, os, sys\n"
+        "def f(s):\n"
+        f"    os.write(int(sys.argv[2]), (json.dumps({frame}) + '\\n').encode())\n"
+        "    os._exit(0)\n"
+    )
+    proc = run_harness(payload(forge, [case(0, ["x"], "x")]))
+    assert proc.returncode == 0, proc.stderr
+    assert len(json.loads(proc.stdout)["results"]) == 1
+
+
+def test_diagnostics_are_escaped_and_written_after_the_report():
+    """On Kubernetes both streams share one log (merged here the same way). Each
+    diagnostic is one line, so a validator's message quoting the submission can't
+    start a line (a forged report), and they come after the report, so none lands
+    inside it."""
+    code = "def f(s):\n    return '\\n{\"results\": []}'"
+    quoting = ("def validate(actual, expected, args, probe_results):\n"
+               "    raise ValueError(actual)\n")
+    pl = payload(code, [case(0, ["x"], None)],
+                 comparison={"mode": "custom_validator", "validator_code": quoting})
+    merged = subprocess.run([sys.executable, str(HARNESS)], input=json.dumps(pl), text=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=15).stdout
+    report, rest = merged.split("\n", 1)
+    assert json.loads(report)["results"][0]["status"] == "judge_error"
+    lines = rest.splitlines()
+    assert len(lines) == 1 and lines[0].startswith("harness: custom validator ")
+
+
+def test_a_validator_whose_verdict_cant_be_tested_for_truth_is_a_per_case_judge_error():
+    """`bool()` of the returned value is validator code too (a numpy array raises)."""
+    ambiguous = ("class Ambiguous:\n    def __bool__(self):\n        raise ValueError('ambiguous')\n"
+                 "def validate(actual, expected, args, probe_results):\n    return Ambiguous()\n")
+    pl = payload("def f(s):\n    return s", [case(0, ["x"], None), case(1, ["y"], None)],
+                 comparison={"mode": "custom_validator", "validator_code": ambiguous})
+    proc = run_harness(pl)
+    assert proc.returncode == 0, proc.stderr
+    assert [r["status"] for r in json.loads(proc.stdout)["results"]] == ["judge_error", "judge_error"]
+
+
+def test_an_answer_nested_too_deeply_to_compare_is_that_cases_runtime_error():
+    """It parses, but comparing it recurses past Python's limit: the case's
+    runtime_error, and the other cases still get reported."""
+    deep = ("def f(s):\n    v = []\n    for _ in range(3000):\n        v = [v]\n"
+            "    return v if s == 'deep' else s\n")
+    proc = run_harness(payload(deep, [case(0, ["deep"], [1]), case(1, ["x"], "x")],
+                               comparison={"mode": "unordered"}))
+    assert proc.returncode == 0, proc.stderr
+    assert [r["status"] for r in json.loads(proc.stdout)["results"]] == ["runtime_error", "passed"]
+
+
+def test_an_answer_nested_within_the_limit_is_judged():
+    """A tree answer nests two levels per tree level; 500 deep is within the cap, and
+    the parent's raised recursion limit lets compare() and a recursive validator
+    walk it."""
+    deep = ("def f(s):\n    v = []\n    for _ in range(500):\n        v = [v]\n    return v\n")
+    expected = []
+    for _ in range(500):
+        expected = [expected]
+    assert results(payload(deep, [case(0, ["x"], expected)], comparison={"mode": "unordered"}))[0][
+        "status"] == "passed"
+    recursive = ("def depth(v):\n    return 1 + max((depth(x) for x in v), default=0) if isinstance(v, list) else 0\n"
+                 "def validate(actual, expected, args, probe_results):\n    return depth(actual) == 501\n")
+    assert results(payload(deep, [case(0, ["x"], None)],
+                           comparison={"mode": "custom_validator", "validator_code": recursive}))[0][
+        "status"] == "passed"
+
+
+@pytest.mark.parametrize("inner, wraps, status", [
+    ("[]", 511, "passed"),           # 512 lists, the innermost (empty) at depth 511
+    ("[]", 512, "runtime_error"),    # ... at depth 512
+    ("1", 511, "passed"),            # 511 lists, the scalar at depth 511
+    ("1", 512, "runtime_error"),
+])
+def test_the_nesting_cap_matches_what_the_rust_judge_can_carry(inner, wraps, status):
+    """The answer at depth 0, anything past 511 too deep: the Rust child's result
+    object adds a level above the answer, and its parser stops past 512. Within the
+    cap, compare() and printing the answer walk it without RecursionError."""
+    code = f"def f(s):\n    v = {inner}\n    for _ in range({wraps}):\n        v = [v]\n    return v\n"
+    expected = json.loads(inner)
+    for _ in range(wraps):
+        expected = [expected]
+    row = results(payload(code, [case(0, ["x"], expected)]))[0]
+    assert row["status"] == status, row
+
+
+def test_an_answer_nested_too_deeply_is_the_submissions_fault_under_a_validator_too():
+    """Checked where the reply comes in, before any validator sees it: a runtime_error
+    that keeps the case's stdout, not a judge_error blaming the problem's author."""
+    deep = ("def f(s):\n    print('hi')\n    v = []\n    for _ in range(3000):\n        v = [v]\n"
+            "    return v\n")
+    validator = "def validate(actual, expected, args, probe_results):\n    return actual == []\n"
+    row = results(payload(deep, [case(0, ["x"], None)],
+                          comparison={"mode": "custom_validator", "validator_code": validator}))[0]
+    assert row["status"] == "runtime_error"
+    assert row["error"] == "the returned value is nested too deeply to judge"
+    assert row["stdout"] == "hi\n" and isinstance(row["runtime_ms"], (int, float))
+
+
+def test_a_deeply_nested_forged_frame_is_a_crash_not_a_parent_failure():
+    forge = ("import os, sys\n"
+             "def f(s):\n"
+             "    os.write(int(sys.argv[2]), b'[' * 200000 + b'\\n')\n"
+             "    os._exit(0)\n")
+    proc = run_harness(payload(forge, [case(0, ["x"], "x")]))
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout)["results"][0]["status"] == "runtime_error"
+
+
+def test_a_validator_taking_kwargs_is_passed_probe_results():
+    """`**rest` accepts `probe_results` by keyword, so it counts (seeding agrees)."""
+    kwargs = "def validate(actual, **rest):\n    return rest['probe_results'] == [] and actual == 'x'\n"
+    pl = payload("def f(s):\n    return s", [case(0, ["x"], None)],
+                 comparison={"mode": "custom_validator", "validator_code": kwargs})
+    assert results(pl)[0]["status"] == "passed"
 
 
 def test_custom_validator_syntax_error_fails_fast():
@@ -320,7 +518,7 @@ def test_custom_validator_hang_is_time_limit_exceeded():
     for the other four modes, which stays untimed."""
     code = "def f(s):\n    return s"
     hanging_validator = (
-        "def validate(actual, expected, args, instance=None):\n"
+        "def validate(actual, expected, args, probe_results):\n"
         "    while True:\n"
         "        pass\n"
     )
@@ -332,8 +530,8 @@ def test_custom_validator_hang_is_time_limit_exceeded():
 
 
 def test_custom_validator_verdict_cannot_be_forged_through_the_result_pipe():
-    """A function-mode validator runs in the parent, so the child never sends a
-    verdict the parent trusts. The child's result pipe is reachable from the
+    """A validator runs in the parent, so the child never sends a verdict the
+    parent trusts. The child's result pipe is reachable from the
     submission (its fd is on the child's argv): this one writes a frame claiming
     `passed: true` for a wrong answer and exits. The parent must judge the
     `actual` in that frame itself, and find it wrong."""
@@ -351,8 +549,8 @@ def test_custom_validator_verdict_cannot_be_forged_through_the_result_pipe():
 
 
 def test_custom_validator_expected_is_not_sent_to_the_child():
-    """With a function-mode validator the child receives only the input, as for
-    every fixed-answer mode. The submission walks its caller frames for the
+    """With a custom validator the child receives only the input, as for every
+    fixed-answer mode. The submission walks its caller frames for the
     harness's `message` and reports whether `expected` was in it."""
     peek = (
         "import sys\n"
@@ -365,7 +563,7 @@ def test_custom_validator_expected_is_not_sent_to_the_child():
         "        frame = frame.f_back\n"
         "    return 'no message found'\n"
     )
-    accept_any = "def validate(actual, expected, args, instance=None):\n    return True\n"
+    accept_any = "def validate(actual, expected, args, probe_results):\n    return True\n"
     pl = payload(peek, [case(0, ["x"], "the secret answer")],
                  comparison={"mode": "custom_validator", "validator_code": accept_any})
     assert results(pl)[0]["output"] == '"hidden"'
@@ -377,7 +575,7 @@ def test_custom_validator_shares_the_case_time_limit_with_the_submission():
     code = "import time\ndef f(s):\n    time.sleep(0.15)\n    return s"
     slow_validator = (
         "import time\n"
-        "def validate(actual, expected, args, instance=None):\n"
+        "def validate(actual, expected, args, probe_results):\n"
         "    time.sleep(0.15)\n"
         "    return True\n"
     )

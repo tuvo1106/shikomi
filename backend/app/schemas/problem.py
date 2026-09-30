@@ -13,6 +13,7 @@ set, so an invalid value is rejected at the boundary and shows up as an enum in
 the OpenAPI docs.
 """
 import ast
+import inspect
 import uuid
 from typing import Any, Literal
 
@@ -177,25 +178,140 @@ def _operations_case(case_input: Any) -> tuple[list, list]:
     return [], []
 
 
-def _validate_params(validator_code: str) -> set[str] | None:
-    """The names a Python validator's top-level `validate` can be passed by keyword,
-    or None when that can't be told without running it (it doesn't parse, or
-    `validate` is defined some other way). Parsed, never executed: seed validation
-    runs no problem code, and the harness reports a script that doesn't load anyway.
+# The keyword call judge/harness.py makes to a Python validator (`_run_validator`).
+VALIDATOR_CALL = ("actual", "expected", "args", "probe_results")
 
-    Mirrors how judge/harness.py sees it (`_takes_probe_results`): the *last*
-    `def validate` wins, as it does when the script runs, and a positional-only
-    parameter doesn't count, since the harness passes every argument by keyword.
+
+def _is_generator(fn: ast.FunctionDef) -> bool:
+    """Whether `fn`'s own body yields (a nested function's `yield` doesn't count)."""
+    todo = list(fn.body)
+    while todo:
+        node = todo.pop()
+        if isinstance(node, (ast.Yield, ast.YieldFrom)):
+            return True
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            todo.extend(ast.iter_child_nodes(node))
+    return False
+
+
+def _validate_def_that_runs(tree: ast.Module) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+    """The `def validate` that the script leaves bound, or None when the source
+    doesn't make that plain.
+
+    One rule, an allowlist: it decides only when the identifier `validate` occurs
+    nowhere but as the name of top-level defs and as the callee of calls. Then
+    nothing else binds, rebinds or hands it anywhere, the last of those defs is
+    what's bound (top-level statements run in order), and it must be undecorated.
+    Any other occurrence (an assignment, an import, a parameter or local of the
+    same name even in an unrelated function, `validate.__name__`, passing it to
+    `update_wrapper`, a `global` or star import) defers to the harness, which loads
+    the real object; the seed-solution tests exercise that. Deferring on a
+    harmless shadow is the price of a rule simple enough to be obviously right.
+
+    Scope: problem authors are trusted maintainers, so this reads the script as
+    written, to catch honest mistakes (a leftover older form), not adversarial
+    source. Rebinding through reflection at load time (`globals()["validate"]`,
+    frames, ...) is out of scope.
     """
+    top_defs = [s for s in tree.body
+                if isinstance(s, (ast.FunctionDef, ast.AsyncFunctionDef)) and s.name == "validate"]
+    if not top_defs:
+        return None
+    allowed = {id(fn) for fn in top_defs}
+    allowed |= {id(n.func) for n in ast.walk(tree)  # `validate(...)`: a call, not a use
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "validate"}
+    for n in ast.walk(tree):
+        if id(n) in allowed:
+            continue
+        match n:
+            case ast.ImportFrom(names=aliases) if any(a.name == "*" for a in aliases):
+                return None  # could bind anything
+            case ast.Global(names=names) | ast.Nonlocal(names=names) if "validate" in names:
+                return None
+            case (ast.Name(id=name) | ast.arg(arg=name) | ast.MatchMapping(rest=name)
+                  | ast.FunctionDef(name=name) | ast.AsyncFunctionDef(name=name) | ast.ClassDef(name=name)
+                  | ast.ExceptHandler(name=name) | ast.MatchAs(name=name) | ast.MatchStar(name=name)
+                  | ast.TypeVar(name=name) | ast.ParamSpec(name=name) | ast.TypeVarTuple(name=name)
+                  ) if name == "validate":
+                return None
+            case ast.alias(name=name, asname=asname) if (asname or name.split(".")[0]) == "validate":
+                return None
+    fn = top_defs[-1]
+    return None if fn.decorator_list else fn
+
+
+def _accepts_the_call(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """Whether the harness's call `validate(actual=, expected=, args=,
+    probe_results=)` binds to `fn`'s parameters, decided by Python's own
+    `inspect.Signature.bind`, as the harness decides it, rather than by a copy of
+    its rules. The signature is built from the parameters' names and kinds (a
+    default is a placeholder: only whether there is one matters), so nothing of
+    the validator's runs or is even evaluated."""
+    P = inspect.Parameter
+    a = fn.args
+    positional = [(p, P.POSITIONAL_ONLY) for p in a.posonlyargs] + [(p, P.POSITIONAL_OR_KEYWORD) for p in a.args]
+    first_default = len(positional) - len(a.defaults)
+    params = [P(p.arg, kind, default=None if i >= first_default else P.empty)
+              for i, (p, kind) in enumerate(positional)]
+    if a.vararg:
+        params.append(P(a.vararg.arg, P.VAR_POSITIONAL))
+    params += [P(p.arg, P.KEYWORD_ONLY, default=P.empty if d is None else None)
+               for p, d in zip(a.kwonlyargs, a.kw_defaults)]
+    if a.kwarg:
+        params.append(P(a.kwarg.arg, P.VAR_KEYWORD))
+    try:
+        inspect.Signature(params).bind(**dict.fromkeys(VALIDATOR_CALL))
+    except TypeError:
+        return False
+    return True
+
+
+def validator_call_problem(validator_code: str) -> str | None:
+    """Why judge/harness.py would refuse the Python validator, or None when it
+    wouldn't, or when the source doesn't make that plain. The validator's own code
+    never runs: seeding parses and compiles it, and reads its signature off the
+    parsed def.
+
+    Best-effort by design: it decides only for the def `_validate_def_that_runs`
+    names (see its scope), and otherwise leaves it to the harness's load-time
+    check, which the seed-solution tests exercise with every reference solution.
+    Source that doesn't compile is refused, as the harness refuses it. For the def
+    that runs it mirrors `_load_validator`:
+
+    * an `async def` or a generator is refused: the judge would get a coroutine
+      or generator, which is always truthy, so every case would pass;
+    * the call `validate(actual=, expected=, args=, probe_results=)` must bind
+      (`_accepts_the_call`), so a leftover required `instance` is refused.
+    """
+    if not isinstance(validator_code, str):
+        return "the validator isn't source code"
     try:
         tree = ast.parse(validator_code)
-    except SyntaxError:
+        compile(tree, "<validator>", "exec")  # errors only compiling finds, e.g. a stray `return`
+        fn = _validate_def_that_runs(tree)
+    except SyntaxError as exc:  # e.g. more brackets deep than the parser allows
+        where = f" (line {exc.lineno})" if exc.lineno else ""
+        return f"the Python validator doesn't compile: {exc.msg}{where}"
+    except RecursionError:  # the harness's compile() fails on it the same way
+        return "the Python validator doesn't compile: it's nested too deeply"
+    except MemoryError as exc:
+        if "too complex" not in str(exc):  # only the parser's own limit is the source's fault
+            raise
+        return "the Python validator doesn't compile: it's too complex to parse"
+    if fn is None:
         return None
-    defs = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "validate"]
-    if not defs:
-        return None
-    a = defs[-1].args
-    return {p.arg for p in a.args + a.kwonlyargs}
+    if isinstance(fn, ast.AsyncFunctionDef):
+        return ("the Python validator is `async def`: the judge calls it without awaiting, "
+                "and a coroutine is always truthy, so every case would pass")
+    if _is_generator(fn):
+        return ("the Python validator is a generator (it has `yield`): the judge would get a "
+                "generator, which is always truthy, so every case would pass")
+    if not _accepts_the_call(fn):
+        return ("the Python validator must be `def validate(actual, expected, args, "
+                "probe_results)`, callable with just those four by keyword: the older "
+                "`instance` form is gone, and extra calls on an operations instance are the "
+                "cases' probes (docs/adr/0007-custom-validators-in-every-language.md)")
+    return None
 
 
 def _operations_ctor_args(case_input: Any) -> list:
@@ -440,6 +556,14 @@ class ProblemIn(BaseModel):
             raise ValueError(
                 f"'validator_code' has a validator for {extra}, which the problem's "
                 f"'languages' doesn't list")
+        # The harness refuses a Python validator its call can't bind to, which
+        # includes the older `instance` form: that ran next to the submission,
+        # where it could be read and forged (ADR-0007). Where the source doesn't
+        # make plain which `validate` runs, it's left to the harness, which
+        # reports it on load (see `_validate_def_that_runs` for the scope).
+        problem = validator_call_problem(code.get("python", ""))
+        if problem:
+            raise ValueError(problem)
         self.comparison = {**self.comparison, "validator_code": code}
         return self
 
@@ -618,25 +742,13 @@ class ProblemFile(ProblemIn):
     def authoring_warnings(self) -> list[str]:
         """What loads but deserves the author's attention; `app.cli` prints these.
 
-        * An operations validator in the older `instance` form (no `probe_results`)
-          runs in the judge's child process, next to the submission, which can then
-          read `expected` and forge that case's verdict (ADR-0007). It's a warning,
-          not an error, until the problem sets written that way are converted: the
-          harness still runs them, and refusing them would stop those sets loading.
-        * A custom validator with no wrong solution in some language: nothing proves
-          that language's validator rejects anything (`WrongSolutionIn`). A warning,
-          since a problem set adds them over time.
+        A custom validator with no wrong solution in some language: nothing proves
+        that language's validator rejects anything (`WrongSolutionIn`). A warning,
+        since a problem set adds them over time.
         """
         if self.comparison.get("mode") != "custom_validator":
             return []
         warnings = []
-        params = _validate_params(validator_codes(self.comparison).get("python", ""))
-        if self.kind == "operations" and params is not None and "probe_results" not in params:
-            warnings.append(
-                "its operations validator uses the older `instance` form, which runs next to "
-                "the submission: it can read `expected`, and its verdict can be forged. Use "
-                "`validate(actual, expected, args, probe_results)`, with probes for any extra "
-                "calls (docs/adr/0007-custom-validators-in-every-language.md)")
         covered = {lang for sol in self.wrong_solutions for lang in sol.code}
         unproven = [v.language for v in self.languages if v.language not in covered]
         if unproven:
@@ -649,8 +761,8 @@ class ProblemFile(ProblemIn):
     def _probes_feed_a_probe_validator(self) -> "ProblemFile":
         # Probes (`ProbeIn`) exist only to give a custom validator more results to
         # check, so each misuse would otherwise be silent: judge/harness.py sends a
-        # case's probes only to a probe-form validator (one taking `probe_results`)
-        # on an operations instance, and drops them anywhere else. A ref must name
+        # case's probes only to a custom validator on an operations instance, and
+        # drops them anywhere else. A ref must name
         # one of the case's own ops (1..len-1; 0 is the constructor, which returns
         # nothing), or the harness reports a judge_error on every submission.
         cases = [tc for tc in self.test_cases if tc.probes]
@@ -660,11 +772,6 @@ class ProblemFile(ProblemIn):
             raise ValueError("test case probes need kind 'operations' (they call the instance)")
         if self.comparison.get("mode") != "custom_validator":
             raise ValueError("test case probes need comparison mode 'custom_validator' to check them")
-        params = _validate_params(validator_codes(self.comparison).get("python", ""))
-        if params is not None and "probe_results" not in params:
-            raise ValueError(
-                "test case probes need the Python validator to take 'probe_results': "
-                "`def validate(actual, expected, args, probe_results)`")
         for tc in cases:
             ops, _ = _operations_case(tc.input)
             for probe in tc.probes:

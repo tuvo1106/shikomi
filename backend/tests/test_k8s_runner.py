@@ -103,3 +103,18 @@ def test_sweep_orphans_skips_active_pods():
     deleted_cms = {c.args[0] for c in fake_v1.delete_namespaced_config_map.call_args_list}
     assert deleted_pods == {"judge-dead"}
     assert deleted_cms == {"judge-dead"}
+
+
+def test_split_log_finds_the_report_among_diagnostics():
+    """The Pod log merges stdout and stderr, in whatever order the runtime copied
+    them, and a harness that dies leaves only diagnostics."""
+    from worker.k8s_runner import _split_log
+    report = '{"results": []}'
+    diag = "harness: custom validator raised ValueError: x"
+    assert _split_log(report) == (report, "")
+    assert _split_log(report + "\n") == (report, "")
+    assert _split_log(f"{diag}\n{report}\n") == (report, diag + "\n")
+    assert _split_log(f"{report}\n{diag}\n") == (report, diag + "\n")  # stderr copied last
+    crash = "Traceback (most recent call last):\n  ...\nKeyError: 'x'\n"
+    assert _split_log(crash) == ("", crash)  # nothing lost
+    assert _split_log('{"not": "a report"}\n') == ("", '{"not": "a report"}\n')

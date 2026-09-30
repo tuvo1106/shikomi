@@ -56,17 +56,14 @@ def test_probes_need_a_custom_validator():
         _file([DECODE], comparison={"mode": "exact"}))
 
 
-def test_probes_need_a_validator_that_takes_probe_results():
-    """The harness sends probes only to the probe form, so an older-form validator
-    would never see them."""
+def test_the_older_instance_form_is_refused_in_every_mode():
+    """It ran next to the submission in operations mode (ADR-0007), and the
+    harness now refuses it, so seeding does too, in function mode as well."""
     older = "def validate(actual, expected, args, instance=None):\n    return True\n"
-    assert "take 'probe_results'" in _error(_file([DECODE], validator=older))
-
-
-def test_a_validator_that_cant_be_parsed_is_left_to_the_harness():
-    """Parsed, never run, and a script that doesn't load is the harness's to
-    report (a judge_error on every submission, which the seed tests catch)."""
-    ProblemFile.model_validate(_file([DECODE], validator="def validate(:\n"))
+    assert "the older `instance` form is gone" in _error(_file(None, validator=older))
+    function = [{"language": "python", "function_name": "f", "starter_code": "c", "params": []}]
+    assert "the older `instance` form is gone" in _error(
+        _file(None, kind="function", languages=function, validator=older))
 
 
 def test_a_ref_must_fill_a_real_argument():
@@ -132,26 +129,110 @@ def test_refs_and_repeat_dont_combine():
         _file([{"op": "decode", "args": [None], "refs": {"0": 1}, "repeat": 2}]))
 
 
-def test_the_last_def_validate_is_the_one_checked_as_it_is_the_one_that_runs():
+def test_of_two_top_level_defs_of_validate_the_last_is_checked():
+    """Top-level statements run in order, so the last def is what the harness loads."""
     older_then_probe = "def validate(actual, expected, args, instance=None):\n    return 1\n" + PROBE_VALIDATOR
     ProblemFile.model_validate(_file([DECODE], validator=older_then_probe))
     probe_then_older = PROBE_VALIDATOR + "def validate(actual, expected, args, instance=None):\n    return 1\n"
-    assert "take 'probe_results'" in _error(_file([DECODE], validator=probe_then_older))
+    assert "the older `instance` form is gone" in _error(_file([DECODE], validator=probe_then_older))
+
+
+def test_a_validator_the_harness_call_cant_bind_to_is_refused():
+    """The harness calls `validate(actual=, expected=, args=, probe_results=)`;
+    a leftover required `instance` would fail that on every case."""
+    for sig in ("actual, expected, args, instance, probe_results",
+                "actual, expected, args, probe_results, instance",
+                "actual, expected, args, *, probe_results, instance"):
+        bad = f"def validate({sig}):\n    return True\n"
+        assert "the older `instance` form is gone" in _error(_file(None, validator=bad)), sig
+    assert "is `async def`" in _error(_file(None, validator=(
+        "async def validate(actual, expected, args, probe_results):\n    return False\n")))
+    # Rebound after its def by a plain assignment: left to the harness.
+    ProblemFile.model_validate(_file(None, validator=(
+        "def validate(a):\n    return True\nvalidate = staticmethod(validate)\n")))
+    assert "is a generator" in _error(_file(None, validator=(
+        "def validate(actual, expected, args, probe_results):\n    yield False\n")))
+    # A nested function's yield is its own.
+    ProblemFile.model_validate(_file(None, validator=(
+        "def validate(actual, expected, args, probe_results):\n"
+        "    def g():\n        yield 1\n    return True\n")))
+    # Seeding decides only when `validate` occurs nowhere but as the name of
+    # top-level defs and as a callee; any other occurrence defers to the harness,
+    # which judges the real object, even a harmless shadow.
+    older = "def validate(actual, expected, args, instance=None):\n    return True\n"
+    good = "def validate(actual, expected, args, probe_results):\n    return True\n"
+    for unclear in ("@adapt\n" + older,
+                    older + "validate, _ = wrap(validate), None\n",
+                    older + "if True:\n    validate = wrap(validate)\n",
+                    older + "try:\n    " + good.replace("\n    ", "\n        ") + "finally:\n    pass\n",
+                    older + "from helpers import check as validate\n",
+                    older + "def rebind():\n    global validate\n    validate = wrap(validate)\nrebind()\n",
+                    older + "X = [(validate := wrap(f)) for f in [validate]]\n",
+                    older + "def g(h=(validate := wrap(validate))):\n    pass\n",
+                    "def f[validate]():\n    pass\n" + older,
+                    "def f[**validate]():\n    pass\n" + older,
+                    "def f[*validate]():\n    pass\n" + older,
+                    "type X[validate] = int\n" + older,
+                    older + "try:\n    pass\nexcept Exception as validate:\n    pass\n",
+                    older + "match wrap(1):\n    case validate:\n        pass\n",
+                    older + "from helpers import *\n",
+                    "def validate(actual, expected, args, probe_results, instance):\n    return 1\n"
+                    "validate.__defaults__ = (None,)\n",
+                    "import functools\n" + older + "functools.update_wrapper(validate, print)\n",
+                    older + "setattr(validate, '__signature__', None)\n",
+                    older + "X = [validate for validate in range(3)]\n",
+                    "def helper(validate):\n    return validate\n" + older,
+                    older + "def helper():\n    validate = 1\n",
+                    older + "class K:\n    validate = 1\n",
+                    older + "validate: object\n",
+                    "validate = None\n" + older):
+        ProblemFile.model_validate(_file(None, validator=unclear))
+    # Otherwise the last top-level def is what's judged, whatever else runs at load.
+    for clear in ("import sys\nsys.setrecursionlimit(10000)\nINF = float('inf')\n" + older,
+                  "KEY = lambda x: abs(x)\n" + older + "if __name__:\n    pass\n",
+                  '"""Docstring."""\nfrom collections import Counter\nLIMIT = (1, -2)\n' + older,
+                  "def validate(actual: list[int], expected, args, instance=None) -> bool:\n    return True\n",
+                  "def validate(actual, expected, args, instance=None):\n    return validate(actual, expected, args)\n",
+                  good + older,
+                  # Rebinding by reflection is out of scope (authors are trusted): the
+                  # def is judged as written.
+                  older + "import sys\nsys._getframe().f_globals['validate'] = print\n"):
+        assert "the older `instance` form is gone" in _error(_file(None, validator=clear))
+    for sig in ("actual, expected, args, probe_results, instance=None",
+                "actual, **rest", "actual, expected, args, probe_results, *extra"):
+        ProblemFile.model_validate(_file(None, validator=f"def validate({sig}):\n    return True\n"))
+
+
+@pytest.mark.parametrize("source", ["x = " + "1+" * 200000 + "1\n",  # RecursionError
+                                    "X = " + "[" * 300 + "]" * 300 + "\n",  # the parser's limit
+                                    "return 1\n",  # only compiling finds it
+                                    "def (:\n",
+                                    "x = 1\0\n"])  # no line number
+def test_a_validator_that_doesnt_compile_is_refused(source):
+    """The harness's compile() fails on it too, so no case could be judged."""
+    assert "the Python validator doesn't compile" in _error(_file(None, validator=source + PROBE_VALIDATOR))
+
+
+def test_checking_the_signature_runs_none_of_the_validators_code(capsys):
+    """The signature is built from the parameters' names and kinds: defaults are
+    never evaluated, however they're written."""
+    ran = "def validate(actual, expected, args, probe_results=print('ran'), instance=print('ran')):\n    pass\n"
+    ProblemFile.model_validate(_file(None, validator=ran))
+    assert capsys.readouterr().out == ""
+    deep = "1+" * 400 + "1"
+    ProblemFile.model_validate(_file(None, validator=(
+        f"def validate(actual, expected, args, probe_results, x={deep}) -> {'int|' * 400}int:\n    pass\n")))
+    assert "the older `instance` form is gone" in _error(_file(None, validator=(
+        f"def validate(actual, expected, args, instance={deep}):\n    pass\n")))
 
 
 def test_a_positional_only_probe_results_doesnt_count():
     """The harness passes it by keyword, which a positional-only parameter refuses."""
     positional = "def validate(actual, expected, args, probe_results, /):\n    return True\n"
-    assert "take 'probe_results'" in _error(_file([DECODE], validator=positional))
+    assert "the older `instance` form is gone" in _error(_file([DECODE], validator=positional))
 
 
-def test_an_older_form_operations_validator_loads_with_a_warning():
-    """It still runs (in the child), so it isn't refused until problem sets that
-    use it are converted, but the author hears why it's weaker."""
-    older = "def validate(actual, expected, args, instance=None):\n    return True\n"
-    warned = ProblemFile.model_validate(
-        {**_file(None, validator=older), "wrong_solutions": [WRONG]}).authoring_warnings()
-    assert len(warned) == 1 and "can read `expected`" in warned[0]
+def test_a_validator_with_a_wrong_solution_has_no_warnings():
     assert ProblemFile.model_validate(
         {**_file(None), "wrong_solutions": [WRONG]}).authoring_warnings() == []
 
@@ -167,7 +248,6 @@ def test_a_validator_with_no_wrong_solution_warns_per_language():
 
 def test_the_seed_cli_prints_authoring_warnings(tmp_path, capsys):
     from app.cli import validate
-    older = "def validate(actual, expected, args, instance=None):\n    return True\n"
-    (tmp_path / "p.json").write_text(json.dumps(_file(None, validator=older)))
+    (tmp_path / "p.json").write_text(json.dumps(_file(None)))
     assert validate(tmp_path) == 0
-    assert "p.json: its operations validator uses the older `instance` form" in capsys.readouterr().err
+    assert "p.json: its custom validator has no wrong solution for ['python']" in capsys.readouterr().err

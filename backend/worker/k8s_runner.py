@@ -22,13 +22,16 @@ An init container copies it into a writable in-memory emptyDir the judge contain
 mounts (not the ConfigMap itself, which is read-only), so the harness can read it
 via `JUDGE_PAYLOAD_FILE` and then delete it before running the submission. Verdict out:
 the harness writes its JSON report to stdout, which we read back with the Pod log
-API (clean JSON on every real verdict — per-case errors are captured *into* that
-JSON, not onto stderr).
+API. That log merges stdout and stderr, and the harness can write diagnostics to
+stderr (a custom validator's exception), so `_split_log` picks out the report line by
+its content and passes the rest on as stderr. Only the harness's
+trusted parent writes to either stream; a submission's output goes to /dev/null.
 
 The kubernetes client is synchronous, so each call hops to a thread via
 `asyncio.to_thread` to avoid blocking the worker's event loop.
 """
 import asyncio
+import json
 import logging
 import threading
 import time
@@ -223,15 +226,43 @@ def _run_sync(payload_json, image, name, memory_mb, cpus, wall_timeout_s, tmpfs_
     finally:
         _delete(v1, name, cm_name)
 
+    stdout, stderr = _split_log(stdout)
     encoded = stdout.encode("utf-8", "replace")
     truncated = len(encoded) > MAX_STDOUT_BYTES
     return ContainerResult(
         stdout=encoded[:MAX_STDOUT_BYTES].decode("utf-8", "replace"),
-        stderr="",   # pod logs merge streams; real verdicts keep stdout clean
+        stderr=stderr,
         exit_code=exit_code,
         timed_out=timed_out,
         stdout_truncated=truncated,
     )
+
+
+def _split_log(log):
+    """Split a judge Pod's merged log into `(report, diagnostics)`.
+
+    The report is the last line that parses as a `{"results": ...}` object; every
+    other line is stderr. Choosing it by content, not position, matters twice: the
+    container runtime copies stdout and stderr separately, so a diagnostic written
+    just before the report can land after it, and a harness that dies without a
+    report leaves only diagnostics, which must reach the log whole. With no report
+    line, the report is "" (which `parse_harness_output` refuses) and the whole
+    log is diagnostics.
+    """
+    # "\n" only: `splitlines()` also breaks at U+2028/U+2029/U+0085, which the JS and
+    # Rust harnesses leave raw inside a report's strings.
+    lines = log.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    for i in range(len(lines) - 1, -1, -1):
+        try:
+            doc = json.loads(lines[i])
+        except ValueError:
+            continue
+        if isinstance(doc, dict) and "results" in doc:
+            rest = lines[:i] + lines[i + 1:]
+            return lines[i], "".join(line + "\n" for line in rest)
+    return "", log
 
 
 def _delete(v1, pod_name, cm_name):

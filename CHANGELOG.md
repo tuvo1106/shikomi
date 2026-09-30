@@ -113,6 +113,39 @@ All notable changes to this project are recorded here. The format follows
   Tree*) are now offered in Rust too, and a new one, *Design a Sorted Tree Cursor*
   (the Iterator pattern), takes a `TreeNode` in its constructor, in Python and Rust.
 
+### Changed
+
+- **A custom validator's error no longer reaches the user.** A validator that fails
+  to load or raises shows "the problem's custom validator failed (a problem bug, not
+  your code)", as the Rust judge already did, and its detail goes to the judge's log,
+  since it could quote the expected answer. The judge worker now logs that output,
+  and on Kubernetes it no longer turns such a run into a whole-submission
+  `judge_error` (the Pod log mixes it with the verdict, which is now picked out of
+  the log by its content).
+- **A custom validator that returns a coroutine or generator is a `judge_error`.**
+  Such a value is always truthy, so an `async def validate`, a generator, or an object
+  with an async `__call__` used to pass every case. Seeding refuses an `async def` or a
+  generator `validate`, with that reason, wherever the source makes plain which
+  `validate` runs.
+- **The accounts worker names stored problems whose custom validator the judge refuses**
+  (as far as seeding's check can tell from the source) when it starts, so an upgrade that ran before the problem set was re-seeded shows up
+  in the log at once.
+- **An answer nested more than 511 levels deep is that case's `runtime_error`**
+  in the Python judge (the depth the Rust judge can carry), in every comparison mode, with its printed output kept. Under a
+  custom validator it used to be a `judge_error` that blamed the problem's author. The
+  judge now also gives comparing and custom validators room to recurse through an
+  answer up to that depth.
+
+### Removed
+
+- **The older custom-validator form.** `def validate(actual, expected, args,
+  instance=None)` is refused: the judge reports it as a `judge_error`, and seeding
+  refuses the file, as it does any validator that can't be called with exactly those
+  four arguments by keyword, wherever the source shows which `validate` runs (the
+  last top-level `def`; anything subtler is left to the judge). Write `def validate(actual, expected, args, probe_results)`, with
+  the cases' probes for any extra calls on an operations instance (ADR-0007). Convert
+  and re-seed any problem that still uses it before upgrading.
+
 ### Security
 
 - **The judge now runs a submission in a separate process from the grader.** The Python

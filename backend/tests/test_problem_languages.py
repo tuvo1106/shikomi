@@ -96,8 +96,9 @@ def _validator(code):
 def test_a_validator_string_is_pythons_and_is_stored_as_a_map():
     """Every existing file's form: one Python source string. It's lifted, so a
     stored row always holds the per-language map (ADR-0007)."""
-    p = ProblemFile.model_validate(_file(comparison=_validator("def validate(): ...")))
-    assert p.comparison["validator_code"] == {"python": "def validate(): ..."}
+    v = "def validate(actual, expected, args, probe_results): ..."
+    p = ProblemFile.model_validate(_file(comparison=_validator(v)))
+    assert p.comparison["validator_code"] == {"python": v}
 
 
 def test_a_validator_map_loads_unchanged():

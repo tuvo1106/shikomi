@@ -4,8 +4,9 @@
   `judge/harness.py`, step 2 (the per-language `validator_code` map) in `app/comparison.py`
   and `ProblemIn`, step 3 (probes) in `harness.py`, `ProbeIn` and `test_cases.probes`,
   step 4a (Rust validators, sealed in memory) in `harness_rs/`, step 4b (probes in the Rust
-  harness, and the prelude's `Rng`) in `harness_rs/` and `ProblemFile`; steps 5–6 are open work
-  (AGENTS.md TODO)
+  harness, and the prelude's `Rng`) in `harness_rs/` and `ProblemFile`, step 5 (the external
+  problem set ported, with `wrong_solutions`) in that repo, and step 6 (the `instance` form
+  refused by `harness.py` and `ProblemIn`); follow-ups are in the AGENTS.md TODO
 - **Date:** 2026-09-28
 
 ## Context
@@ -100,7 +101,9 @@ Rust can't run a validator to use them before this) and the prelude RNG; (5) por
 - A function-mode validator sees `actual` after the result pipe's JSON round trip (a tuple
   arrives as a list), the same value `compare()` judges. Its time is no longer counted in
   `runtime_ms`, which now measures the submission alone.
-- Until step 3, operations validators still run in the child (DESIGN.md §5.3).
+- After step 6, no validator runs in the child, and the child never receives `expected`. A
+  stored problem whose validator still has the older form is a `judge_error` until it's
+  converted and re-seeded; the accounts worker names such problems in its startup log.
 - With probes, an exception in a probe call becomes the submission's `runtime_error`, not
   `judge_error`. That is right, since it is the submission's method that raised, but the
   message must say the call was added by the judge.
