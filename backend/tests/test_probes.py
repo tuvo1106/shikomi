@@ -168,6 +168,8 @@ def test_a_validator_the_harness_call_cant_bind_to_is_refused():
                     older + "from helpers import check as validate\n",
                     older + "def rebind():\n    global validate\n    validate = wrap(validate)\nrebind()\n",
                     older + "X = [(validate := wrap(f)) for f in [validate]]\n",
+                    older + "def g(h=(validate := wrap(validate))):\n    pass\n",
+                    "def f[validate]():\n    pass\n" + older,
                     older + "try:\n    pass\nexcept Exception as validate:\n    pass\n",
                     older + "match wrap(1):\n    case validate:\n        pass\n",
                     older + "from helpers import *\n",

@@ -696,8 +696,9 @@ def _number_or_zero(x):
 # prelude's JSON parser caps depth at 512, and the Rust harness's child reports the
 # answer and its probe results one level down in its result object
 # (`{"ok": v, "probe_results": [...]}`), so this is what the Rust judge can carry:
-# the two refuse the same returned answers. (A case's `expected` sits deeper in the
-# Rust payload, so there it can nest only 509 levels; problems keep far shallower.)
+# the two refuse the same returned answers. (A case's `expected` and `input` sit
+# deeper in the Rust payload, so there they can nest only 509 levels, which nothing
+# checks yet: see AGENTS.md.)
 # Comparing, validating and printing a value
 # recurse on it, so one nested thousands deep (a submission's `[[[...]]]`, or a
 # forged frame) would raise RecursionError in the parent. Past this limit it's the

@@ -218,22 +218,24 @@ def _validate_def_that_runs(tree: ast.Module) -> ast.FunctionDef | ast.AsyncFunc
     if not top_defs:
         return None
     allowed = {id(fn) for fn in top_defs}
-    allowed |= {id(n.func) for n in ast.walk(tree) if isinstance(n, ast.Call)}  # callees
+    allowed |= {id(n.func) for n in ast.walk(tree)  # `validate(...)`: a call, not a use
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "validate"}
     for n in ast.walk(tree):
         if id(n) in allowed:
             continue
-        if isinstance(n, ast.ImportFrom) and any(a.name == "*" for a in n.names):
-            return None  # could bind anything
-        named = (n.id if isinstance(n, ast.Name)
-                 else n.name if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef,
-                                               ast.ExceptHandler, ast.MatchAs, ast.MatchStar))
-                 else n.arg if isinstance(n, ast.arg)
-                 else n.rest if isinstance(n, ast.MatchMapping)
-                 else (n.asname or n.name.split(".")[0]) if isinstance(n, ast.alias)
-                 else "validate" if isinstance(n, (ast.Global, ast.Nonlocal)) and "validate" in n.names
-                 else None)
-        if named == "validate":
-            return None
+        match n:
+            case ast.ImportFrom(names=aliases) if any(a.name == "*" for a in aliases):
+                return None  # could bind anything
+            case ast.Global(names=names) | ast.Nonlocal(names=names) if "validate" in names:
+                return None
+            case (ast.Name(id=name) | ast.arg(arg=name) | ast.MatchMapping(rest=name)
+                  | ast.FunctionDef(name=name) | ast.AsyncFunctionDef(name=name) | ast.ClassDef(name=name)
+                  | ast.ExceptHandler(name=name) | ast.MatchAs(name=name) | ast.MatchStar(name=name)
+                  | ast.TypeVar(name=name) | ast.ParamSpec(name=name) | ast.TypeVarTuple(name=name)
+                  ) if name == "validate":
+                return None
+            case ast.alias(name=name, asname=asname) if (asname or name.split(".")[0]) == "validate":
+                return None
     fn = top_defs[-1]
     return None if fn.decorator_list else fn
 

@@ -633,11 +633,12 @@ generator, an async `__call__`) is a `judge_error` too, since that value is alwa
 truthy. Seeding refuses these, and a call that won't bind, when the source makes
 plain which `validate` runs, by one rule: the identifier `validate` occurs nowhere
 but as the name of top-level `def`s and as the callee of calls, so the last such def
-is what's bound, and it's undecorated. Any other occurrence (an assignment, an import,
+is what's bound. That def must also be undecorated, or seeding doesn't decide. Any other occurrence (an assignment, an import,
 a same-named local even in an unrelated function, handing it to `update_wrapper`)
 is left to the harness's load-time check, which the seed-solution tests exercise:
 deferring on a harmless shadow is the price of a rule simple enough to be obviously
-right (ten review rounds of special-cased spellings preceded it). It reads the
+right (a list of special-cased rebinding spellings, the rejected alternative, kept
+missing one). It reads the
 script as written: problem authors are trusted maintainers, so it's there to catch
 honest mistakes, and rebinding `validate` by reflection at load time (`globals()`,
 frames) is out of scope. Whether the call binds is decided by
