@@ -177,16 +177,21 @@ def _operations_case(case_input: Any) -> tuple[list, list]:
     return [], []
 
 
-def _validate_params(validator_code: str) -> set[str] | None:
-    """The names a Python validator's top-level `validate` can be passed by keyword,
-    or None when that can't be told without running it (it doesn't parse,
-    `validate` is defined some other way, or it takes `**kwargs`, which accepts any
-    name). Parsed, never executed: seed validation
-    runs no problem code, and the harness reports a script that doesn't load anyway.
+# The keyword call judge/harness.py makes to a Python validator (`_run_validator`).
+VALIDATOR_CALL = ("actual", "expected", "args", "probe_results")
 
-    Mirrors how judge/harness.py sees it (`_takes_probe_results`): the *last*
-    `def validate` wins, as it does when the script runs, and a positional-only
-    parameter doesn't count, since the harness passes every argument by keyword.
+
+def binds_validator_call(validator_code: str) -> bool | None:
+    """Whether the harness's call `validate(actual=, expected=, args=,
+    probe_results=)` binds to the validator's top-level `validate`, or None when
+    that can't be told without running it (it doesn't parse, or `validate` is
+    defined some other way). Parsed, never executed: seed validation runs no
+    problem code, and the harness reports a script that doesn't load anyway.
+
+    Mirrors judge/harness.py `_accepts_the_call`: the *last* `def validate` wins,
+    as it does when the script runs; each of the four names needs a parameter it
+    can be passed by keyword (or a `**kwargs`); and any other parameter needs a
+    default, so a leftover `instance` next to `probe_results` is refused.
     """
     try:
         tree = ast.parse(validator_code)
@@ -196,9 +201,15 @@ def _validate_params(validator_code: str) -> set[str] | None:
     if not defs:
         return None
     a = defs[-1].args
-    if a.kwarg:
-        return None
-    return {p.arg for p in a.args + a.kwonlyargs}
+    positional = a.posonlyargs + a.args
+    defaulted = {p.arg for p in positional[len(positional) - len(a.defaults):]}
+    defaulted |= {p.arg for p, d in zip(a.kwonlyargs, a.kw_defaults) if d is not None}
+    by_keyword = {p.arg for p in a.args + a.kwonlyargs}
+    if any(p.arg not in defaulted for p in a.posonlyargs):
+        return False
+    if any(name not in by_keyword for name in VALIDATOR_CALL) and not a.kwarg:
+        return False
+    return all(p.arg in VALIDATOR_CALL or p.arg in defaulted for p in a.args + a.kwonlyargs)
 
 
 def _operations_ctor_args(case_input: Any) -> list:
@@ -443,17 +454,17 @@ class ProblemIn(BaseModel):
             raise ValueError(
                 f"'validator_code' has a validator for {extra}, which the problem's "
                 f"'languages' doesn't list")
-        # The harness refuses a Python validator with no `probe_results` parameter:
-        # the older `instance` form ran next to the submission, where it could be
-        # read and forged (ADR-0007). A validator whose parameters can't be read
-        # without running it is left to the harness, which reports it on load.
-        params = _validate_params(code.get("python", ""))
-        if params is not None and "probe_results" not in params:
+        # The harness refuses a Python validator its call can't bind to, which
+        # includes the older `instance` form: that ran next to the submission,
+        # where it could be read and forged (ADR-0007). A validator whose
+        # parameters can't be read without running it is left to the harness,
+        # which reports it on load.
+        if binds_validator_call(code.get("python", "")) is False:
             raise ValueError(
                 "the Python validator must be `def validate(actual, expected, args, "
-                "probe_results)`: the older `instance` form is gone, and extra calls on an "
-                "operations instance are the cases' probes "
-                "(docs/adr/0007-custom-validators-in-every-language.md)")
+                "probe_results)`, callable with just those four by keyword: the older "
+                "`instance` form is gone, and extra calls on an operations instance are the "
+                "cases' probes (docs/adr/0007-custom-validators-in-every-language.md)")
         self.comparison = {**self.comparison, "validator_code": code}
         return self
 

@@ -8,9 +8,19 @@ import sys
 
 import pytest
 
-VALIDATOR_FAULT = "the problem's custom validator failed (a problem bug, not your code)"
-
 HARNESS = pathlib.Path(__file__).resolve().parents[1] / "harness.py"
+
+
+def _harness_module():
+    """harness.py as a module, for its constants (its `main()` is guarded)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("harness_under_test", HARNESS)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+VALIDATOR_FAULT = _harness_module().VALIDATOR_FAULT
 TRUNC_MAX = 4096 + len("…(truncated)")
 
 
@@ -324,7 +334,18 @@ def test_the_older_instance_form_is_refused():
     proc = run_harness(pl)
     res = json.loads(proc.stdout)["results"]
     assert [r["status"] for r in res] == ["judge_error"]
-    assert "must take 'probe_results'" in proc.stderr
+    assert "must accept (actual, expected, args, probe_results)" in proc.stderr
+
+
+def test_a_validator_the_call_cant_bind_to_is_refused_before_any_case():
+    """A half-converted validator (`instance` left in, as a required parameter,
+    next to `probe_results`) would raise TypeError on every case; it's refused
+    once, up front, like the older form."""
+    half = "def validate(actual, expected, args, instance, probe_results):\n    return True\n"
+    pl = payload("def f(s):\n    return s", [case(0, ["x"], None), case(1, ["y"], None)],
+                 comparison={"mode": "custom_validator", "validator_code": half})
+    proc = run_harness(pl)
+    assert [r["status"] for r in json.loads(proc.stdout)["results"]] == ["judge_error"]
 
 
 def test_a_validator_taking_kwargs_is_passed_probe_results():

@@ -4,12 +4,18 @@ Called by the worker's `judge_submission` job (worker/judge.py) for both Run
 and Submit, so the two always judge identically. See DESIGN.md §5.2, §5.3.
 """
 import json
+import logging
 
 from app.config import get_settings
 from app.judge_budget import wall_budget_s
 from app.sandbox import RUST_COMPILE_TIMEOUT_S, profile_for
 from worker import runner
 from worker.aggregate import Verdict, aggregate, parse_harness_output
+
+logger = logging.getLogger(__name__)
+
+# How much of a harness's stderr reaches the worker log per run.
+MAX_LOGGED_STDERR = 4000
 
 settings = get_settings()
 
@@ -88,6 +94,13 @@ async def run_judgement(*, code, comparison, time_limit_ms, memory_limit_mb,
         memory_mb=memory_limit_mb, cpus=CPUS, pids_limit=PIDS_LIMIT,
         tmpfs_size_mb=profile.tmpfs_size_mb, tmpfs_exec=profile.tmpfs_exec,
         wall_timeout_s=wall_timeout)
+    if result.stderr.strip():
+        # The harness's own diagnostics (the trusted parent's stderr; a submission's
+        # goes to /dev/null): a custom validator's exception, a bad payload. The user
+        # sees only a fixed line for those, since the detail could quote `expected`,
+        # so this log is where the problem's author finds it.
+        logger.warning("judge harness stderr (%s): %s", container_name,
+                       result.stderr[:MAX_LOGGED_STDERR])
     case_ids = [tc["id"] for tc in test_cases]
     return aggregate(result, parse_harness_output(result.stdout, case_ids), total_cases=len(test_cases))
 

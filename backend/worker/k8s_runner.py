@@ -22,8 +22,10 @@ An init container copies it into a writable in-memory emptyDir the judge contain
 mounts (not the ConfigMap itself, which is read-only), so the harness can read it
 via `JUDGE_PAYLOAD_FILE` and then delete it before running the submission. Verdict out:
 the harness writes its JSON report to stdout, which we read back with the Pod log
-API (clean JSON on every real verdict — per-case errors are captured *into* that
-JSON, not onto stderr).
+API. That log merges stdout and stderr, and the harness can write diagnostics to
+stderr before its report (a custom validator's exception), so `_split_log` takes the
+report from the last line and passes the rest on as stderr. Only the harness's
+trusted parent writes to either stream; a submission's output goes to /dev/null.
 
 The kubernetes client is synchronous, so each call hops to a thread via
 `asyncio.to_thread` to avoid blocking the worker's event loop.
@@ -223,15 +225,29 @@ def _run_sync(payload_json, image, name, memory_mb, cpus, wall_timeout_s, tmpfs_
     finally:
         _delete(v1, name, cm_name)
 
+    stdout, stderr = _split_log(stdout)
     encoded = stdout.encode("utf-8", "replace")
     truncated = len(encoded) > MAX_STDOUT_BYTES
     return ContainerResult(
         stdout=encoded[:MAX_STDOUT_BYTES].decode("utf-8", "replace"),
-        stderr="",   # pod logs merge streams; real verdicts keep stdout clean
+        stderr=stderr,
         exit_code=exit_code,
         timed_out=timed_out,
         stdout_truncated=truncated,
     )
+
+
+def _split_log(log):
+    """Split a judge Pod's merged log into `(report, diagnostics)`.
+
+    Every harness writes its report as one line, last, after any stderr line, so
+    the last non-empty line is the report and everything before it is stderr. A
+    log with no report line comes back as-is, for `parse_harness_output` to refuse.
+    """
+    lines = log.rstrip("\n").split("\n")
+    if len(lines) < 2:
+        return log, ""
+    return lines[-1], "\n".join(lines[:-1]) + "\n"
 
 
 def _delete(v1, pod_name, cm_name):

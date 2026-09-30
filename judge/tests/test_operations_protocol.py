@@ -440,7 +440,25 @@ def test_a_malformed_probe_is_a_judge_error():
                                              [{"op": "decode", "args": [None], "refs": {"0": 9}}])],
                           class_name="Codec", comparison=_validator(PROBE_ROUND_TRIP)))
     assert res[0]["status"] == "judge_error"
-    assert "malformed probe" in res[0]["error"]
+    # A fixed line: the probe is a hidden case's data. The detail is in stderr.
+    assert res[0]["error"].startswith("a check the judge adds to this test case is malformed")
+
+
+def test_a_forged_probe_error_frame_cant_turn_a_case_without_probes_into_a_judge_error():
+    """The child's frame is untrusted. A `probe_error` status only means
+    something when the parent sent probes; otherwise the frame is judged like any
+    other, on its (missing) answer."""
+    forge = (
+        "import json, os, sys\n"
+        "class Codec:\n"
+        "    def __init__(self):\n"
+        "        frame = {'status': 'probe_error', 'error': 5}\n"
+        "        os.write(int(sys.argv[2]), (json.dumps(frame) + '\\n').encode())\n"
+        "        os._exit(0)\n"
+    )
+    res = results(payload(forge, [case(0, ["Codec", "encode"], [[], ["u"]], None)],
+                          class_name="Codec", comparison=_validator(PROBE_ROUND_TRIP)))
+    assert res[0]["status"] == "wrong_answer"
 
 
 def test_a_probe_cannot_change_actual_through_returned_internal_state():

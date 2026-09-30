@@ -24,6 +24,7 @@ from app.queue import ACCOUNTS_QUEUE
 from worker import runner
 from worker.accounts import EMAIL_MAX_TRIES, purge_unverified_users, send_account_email
 from worker.judge import judge_submission, reap_orphans
+from worker.stale_validators import warn_about_stale_validators
 from worker.sweeper import sweep_stale
 from worker.watchdog import check_accounts_queue
 
@@ -35,6 +36,8 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message
 async def on_startup(ctx) -> None:
     # Reap any judge sandboxes orphaned by a previous crash (§5.5).
     await runner.sweep_orphans()
+    # Name stored problems whose validator the judge now refuses (ADR-0007 step 6).
+    await warn_about_stale_validators()
 
 
 class WorkerSettings:

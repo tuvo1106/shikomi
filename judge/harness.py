@@ -679,6 +679,12 @@ def _is_number(x):
     return isinstance(x, (int, float)) and not isinstance(x, bool)
 
 
+def _number_or_zero(x):
+    """`x` if it's a finite number, else 0: for a field of the child's (untrusted)
+    reply that a report row must carry as a number."""
+    return x if _is_number(x) and math.isfinite(x) else 0
+
+
 def _json_equal(a, b):
     """`a == b` with JSON's types: a bool never equals a number.
 
@@ -841,6 +847,7 @@ def compare(actual, expected, comparison):
 # because the exception's own message is the author's code talking and could
 # quote `expected`; `_validator_fault` logs the detail to stderr instead.
 VALIDATOR_FAULT = "the problem's custom validator failed (a problem bug, not your code)"
+PROBE_FAULT = "a check the judge adds to this test case is malformed (a problem bug, not your code)"
 
 
 def _validator_fault(test_case_id, exc):
@@ -862,25 +869,26 @@ def _load_validator(validator_code):
     validate_fn = namespace.get("validate")
     if not callable(validate_fn):
         raise ValidatorError("must define a 'validate' function")
-    if not _takes_probe_results(validate_fn):
-        raise ValidatorError("'validate' must take 'probe_results' (the older 'instance' "
-                             "form is gone; docs/adr/0007-custom-validators-in-every-language.md)")
+    if not _accepts_the_call(validate_fn):
+        raise ValidatorError("'validate' must accept (actual, expected, args, probe_results) by "
+                             "keyword; the older 'instance' form is gone "
+                             "(docs/adr/0007-custom-validators-in-every-language.md)")
     return validate_fn
 
 
-def _takes_probe_results(validate_fn):
-    """Whether `validate_fn` can be passed `probe_results` by keyword, as
-    `_run_validator` does: a parameter of that name that isn't positional-only,
-    or a `**kwargs`. `app.schemas.problem`'s `_validate_params` applies the same
-    rule at seed time."""
+def _accepts_the_call(validate_fn):
+    """Whether `_run_validator`'s call, `validate(actual=, expected=, args=,
+    probe_results=)`, binds to `validate_fn`'s signature. Binding catches every
+    way it wouldn't: no `probe_results` (the older `instance` form), a
+    positional-only parameter, or a leftover required parameter such as
+    `instance` next to `probe_results`, which would fail every case.
+    `app.schemas.problem`'s `binds_validator_call` applies the same rule at seed
+    time, without running anything."""
     try:
-        params = inspect.signature(validate_fn).parameters
-    except (TypeError, ValueError):  # a callable with no introspectable signature
+        inspect.signature(validate_fn).bind(actual=None, expected=None, args=None, probe_results=None)
+    except (TypeError, ValueError):  # doesn't bind, or no introspectable signature
         return False
-    if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
-        return True
-    param = params.get("probe_results")
-    return param is not None and param.kind != inspect.Parameter.POSITIONAL_ONLY
+    return True
 
 
 def _run_validator(validate_fn, actual, expected, args, budget_s, probe_results):
@@ -1043,9 +1051,11 @@ def _execute_case(ctx, message):
         sys.stdout = ctx.real_stdout
         return {"status": "time_limit_exceeded", "stdout": _truncate(buffer.getvalue())}
     except ValidatorError as exc:  # a malformed probe (`_run_probes`): the author's bug
+        elapsed = round((time.perf_counter() - start) * 1000, 3)
         signal.setitimer(signal.ITIMER_REAL, 0)
         sys.stdout = ctx.real_stdout
-        return {"status": "probe_error", "error": str(exc)}
+        return {"status": "probe_error", "runtime_ms": elapsed, "stdout": _truncate(buffer.getvalue()),
+                "error": str(exc)}
     except _ProbeFailed as exc:
         elapsed = round((time.perf_counter() - start) * 1000, 3)
         signal.setitimer(signal.ITIMER_REAL, 0)
@@ -1202,11 +1212,15 @@ def _finalize(tc, reply, comparison, validate_fn=None, time_limit_s=None, probes
         return {"test_case_id": tc_id, "status": "runtime_error", "runtime_ms": reply.get("runtime_ms", 0),
                 "output": None, "stdout": _truncate(reply.get("stdout", "")),
                 "error": _truncate(reply.get("error", ""))}
-    if status == "probe_error":
-        # Probes are test data the child already had, so their detail isn't secret
-        # (unlike a validator's own exception). A forged frame can claim this too,
-        # but only to fail its own case.
-        return _judge_error_result(tc_id, reply.get("error", "malformed probe"))
+    if status == "probe_error" and probes:
+        # A probe the child couldn't make (a `refs` past the case's ops): the case's
+        # data is wrong, not the submission. The user sees a fixed line, as for a
+        # failed validator, since the probe is a hidden case's data; the detail goes
+        # to stderr. The frame is the child's, so a submission could forge it, but
+        # only to turn its own case into a judge_error, and only where probes exist.
+        sys.stderr.write("harness: case %s: %s\n" % (tc_id, _truncate(str(reply.get("error")))))
+        return {**_judge_error_result(tc_id, PROBE_FAULT), "runtime_ms": _number_or_zero(reply.get("runtime_ms")),
+                "stdout": _truncate(str(reply.get("stdout", "")))}
 
     actual = reply.get("actual")
     if validate_fn is not None:
@@ -1255,8 +1269,10 @@ def run(payload):
     go to the child with its input. A case that hangs past the limit is killed and reported
     `time_limit_exceeded`; a case that crashes the child is reported
     `runtime_error`; either way the parent respawns a fresh child for the
-    remaining cases. A top-level compile error (or a bad validator) surfaces from
-    setup as a single runtime_error (or judge_error), exactly as before.
+    remaining cases. A top-level compile error surfaces from the child's setup
+    as a single runtime_error; a validator that won't load (or that the harness's
+    call can't bind to) is refused here, before any child starts, as a single
+    judge_error.
 
     By default every case runs (for an honest X/N); `stop_on_first_failure` ends
     at the first non-passing case.

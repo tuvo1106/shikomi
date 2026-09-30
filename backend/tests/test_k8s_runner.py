@@ -103,3 +103,14 @@ def test_sweep_orphans_skips_active_pods():
     deleted_cms = {c.args[0] for c in fake_v1.delete_namespaced_config_map.call_args_list}
     assert deleted_pods == {"judge-dead"}
     assert deleted_cms == {"judge-dead"}
+
+
+def test_split_log_takes_the_report_from_the_last_line():
+    """The Pod log merges stdout and stderr, and the harness may write a
+    diagnostic (a custom validator's exception) before its one-line report."""
+    from worker.k8s_runner import _split_log
+    report = '{"results": []}'
+    assert _split_log(report) == (report, "")
+    assert _split_log(report + "\n") == (report + "\n", "")
+    assert _split_log("harness: custom validator raised ValueError: x\n" + report + "\n") == (
+        report, "harness: custom validator raised ValueError: x\n")

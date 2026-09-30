@@ -614,13 +614,20 @@ Probes are not secret: they reach the submission's process with the input. A pro
 that failed), and the parent refuses a reply whose `probe_results` doesn't match
 the probes it sent, so a forged frame can't reach the validator in a shape that
 would blame the author. Forged probe *results* are harmless: anything a forged
-frame claims, the submission's own methods could have returned.
+frame claims, the submission's own methods could have returned. A malformed probe
+(a `refs` past the case's ops) is a `judge_error` with a fixed line, its detail on
+stderr, and the parent honours that status from the child only for a case it sent
+probes with.
 
 The older validator form, `def validate(actual, expected, args, instance=None)`,
 made its extra calls through the live object, so in operations mode it had to run
 in the **child**, where `expected` was readable and the verdict forgeable. Probes
-replaced it, and it's refused: the harness reports a validator it can't pass
-`probe_results` by keyword as a `judge_error`, and seeding refuses it in every mode.
+replaced it, and it's refused: the harness reports a validator its call
+`validate(actual=, expected=, args=, probe_results=)` can't bind to (the older form,
+or one with a leftover required parameter) as a `judge_error`, and seeding refuses
+it in every mode. Because stored problems keep whatever form they were seeded with,
+the judge worker names any stored validator it would refuse in its startup log
+(`worker/stale_validators.py`): re-seed the converted problem set.
 `args` is the parent's own copy of the input (it never crossed into the child),
 separate from the one handed to the submission: validators routinely check "same
 multiset as the input", and if they read the submission's copy, a submission
@@ -747,7 +754,7 @@ sequenceDiagram
 The worker selects a sandbox backend from `JUDGE_RUNNER`; both live behind `worker/runner.py` and return the same `ContainerResult`, so the judging code (`worker/judging.py`) is identical either way:
 
 - `docker` (default) — the `docker run` above, against the host daemon. For the Compose stack / single VPS.
-- `k8s` (`worker/k8s_runner.py`) — on Kubernetes there is *no* host Docker socket to shell against, and mounting one would hand any container escape the whole node. So the worker calls the Kubernetes API to create one locked-down **Pod per submission**. Every `docker run` flag maps to a Pod field: `--network=none` → a deny-all `NetworkPolicy` on `app=judge`; `--memory`/`--cpus` → `resources.limits`; `--read-only` + `--tmpfs` → `readOnlyRootFilesystem` + a memory `emptyDir` at `/tmp`; `--cap-drop=ALL` → `securityContext.capabilities.drop:[ALL]`; `no-new-privileges` → `allowPrivilegeEscalation:false`; `--user 1000` → `runAsNonRoot`; plus `automountServiceAccountToken:false` so the judge can't reach the API server. There's no stdin pipe to a Pod, so the payload rides in as a ConfigMap, which an init container copies into a writable `emptyDir` the judge mounts (`JUDGE_PAYLOAD_FILE`; the harness reads file-or-stdin, then deletes the file before running the submission — §5.3, ADR-0006 — since a read-only ConfigMap mount couldn't be deleted). That `emptyDir` is node-backed, **not** `medium: Memory`: a tmpfs emptyDir charges its bytes to the judge container's memory cgroup, which would shrink the `memory_limit_mb` a submission is graded under; the payload holds only `expected` and is deleted before the submission's peak memory, so node ephemeral storage is its right home (`/tmp` stays tmpfs). The verdict is read back from the Pod log. A least-privilege RBAC Role scopes the worker's ServiceAccount to managing judge pods + their ConfigMaps in its own namespace.
+- `k8s` (`worker/k8s_runner.py`) — on Kubernetes there is *no* host Docker socket to shell against, and mounting one would hand any container escape the whole node. So the worker calls the Kubernetes API to create one locked-down **Pod per submission**. Every `docker run` flag maps to a Pod field: `--network=none` → a deny-all `NetworkPolicy` on `app=judge`; `--memory`/`--cpus` → `resources.limits`; `--read-only` + `--tmpfs` → `readOnlyRootFilesystem` + a memory `emptyDir` at `/tmp`; `--cap-drop=ALL` → `securityContext.capabilities.drop:[ALL]`; `no-new-privileges` → `allowPrivilegeEscalation:false`; `--user 1000` → `runAsNonRoot`; plus `automountServiceAccountToken:false` so the judge can't reach the API server. There's no stdin pipe to a Pod, so the payload rides in as a ConfigMap, which an init container copies into a writable `emptyDir` the judge mounts (`JUDGE_PAYLOAD_FILE`; the harness reads file-or-stdin, then deletes the file before running the submission — §5.3, ADR-0006 — since a read-only ConfigMap mount couldn't be deleted). That `emptyDir` is node-backed, **not** `medium: Memory`: a tmpfs emptyDir charges its bytes to the judge container's memory cgroup, which would shrink the `memory_limit_mb` a submission is graded under; the payload holds only `expected` and is deleted before the submission's peak memory, so node ephemeral storage is its right home (`/tmp` stays tmpfs). The verdict is read back from the Pod log. That log merges stdout and stderr, so the runner takes the report from its last line (every harness writes it last, on one line) and treats the lines before as stderr; only the harness's trusted parent writes to either stream. The worker logs a run's harness stderr (truncated) whatever the runner, since that's where a custom validator's exception detail goes. A least-privilege RBAC Role scopes the worker's ServiceAccount to managing judge pods + their ConfigMaps in its own namespace.
 
   **Two caveats a laptop can't cover** (both the prod cluster's job): `NetworkPolicy` needs an enforcing CNI (Calico/Cilium — kind's kindnet ignores it), and real kernel isolation needs a gVisor/Kata node pool via `runtimeClassName` (`JUDGE_RUNTIME_CLASS`).
 

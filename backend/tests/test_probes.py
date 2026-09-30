@@ -142,6 +142,19 @@ def test_the_last_def_validate_is_the_one_checked_as_it_is_the_one_that_runs():
     assert "the older `instance` form is gone" in _error(_file([DECODE], validator=probe_then_older))
 
 
+def test_a_validator_the_harness_call_cant_bind_to_is_refused():
+    """The harness calls `validate(actual=, expected=, args=, probe_results=)`;
+    a leftover required `instance` would fail that on every case."""
+    for sig in ("actual, expected, args, instance, probe_results",
+                "actual, expected, args, probe_results, instance",
+                "actual, expected, args, *, probe_results, instance"):
+        bad = f"def validate({sig}):\n    return True\n"
+        assert "the older `instance` form is gone" in _error(_file(None, validator=bad)), sig
+    for sig in ("actual, expected, args, probe_results, instance=None",
+                "actual, **rest", "actual, expected, args, probe_results, *extra"):
+        ProblemFile.model_validate(_file(None, validator=f"def validate({sig}):\n    return True\n"))
+
+
 def test_a_positional_only_probe_results_doesnt_count():
     """The harness passes it by keyword, which a positional-only parameter refuses."""
     positional = "def validate(actual, expected, args, probe_results, /):\n    return True\n"
