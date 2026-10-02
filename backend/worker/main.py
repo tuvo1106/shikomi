@@ -20,6 +20,7 @@ import logging
 from arq import cron, func
 from arq.connections import RedisSettings
 
+from app import telemetry
 from app.config import EMAIL_JOB_TIMEOUT_SECONDS, get_settings
 from app.judge_budget import JUDGE_JOB_TIMEOUT_SECONDS
 from app.queue import ACCOUNTS_QUEUE
@@ -36,11 +37,13 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message
 
 
 async def on_startup(ctx) -> None:
+    telemetry.init_telemetry("shikomi-worker")
     # Reap any judge sandboxes orphaned by a previous crash (§5.5).
     await runner.sweep_orphans()
 
 
 async def on_accounts_startup(ctx) -> None:
+    telemetry.init_telemetry("shikomi-accounts-worker")
     # Name stored problems whose validator the judge now refuses (ADR-0007 step 6).
     # Here, not in the judge worker's startup: that one runs on every KEDA scale-up,
     # ahead of the job that woke it, and would repeat the same error each time. In
@@ -48,14 +51,24 @@ async def on_accounts_startup(ctx) -> None:
     ctx["stale_validator_check"] = asyncio.create_task(warn_about_stale_validators())
 
 
+async def heartbeat(ctx) -> None:
+    """Cron (every minute): prove this worker is alive.
+
+    A worker that has died reports nothing, and nothing is hard to alert on; a gauge that stops
+    arriving is not. `arq.job.count` going quiet could just mean no traffic.
+    """
+    telemetry.gauge("worker.heartbeat", 1)
+
+
 class WorkerSettings:
     redis_settings = RedisSettings.from_dsn(settings.redis_url)
-    functions = [judge_submission]
+    functions = [telemetry.job(judge_submission)]
     cron_jobs = [
         cron(reap_orphans, second=0, run_at_startup=False),  # top of every minute
         # Watches the *accounts* queue from here so it still fires when that worker is the
         # thing that died (worker/watchdog.py).
         cron(check_accounts_queue, second=30, run_at_startup=False),
+        cron(heartbeat, second=15, run_at_startup=False),
     ]
     on_startup = on_startup
     max_jobs = settings.judge_max_concurrency
@@ -78,7 +91,8 @@ class AccountsWorkerSettings:
     redis_settings = RedisSettings.from_dsn(settings.redis_url)
     queue_name = ACCOUNTS_QUEUE
     functions = [
-        func(send_account_email, timeout=EMAIL_JOB_TIMEOUT_SECONDS, max_tries=EMAIL_MAX_TRIES),
+        func(telemetry.job(send_account_email), timeout=EMAIL_JOB_TIMEOUT_SECONDS,
+             max_tries=EMAIL_MAX_TRIES),
     ]
     cron_jobs = [
         # Its own generous timeout: the class-level job_timeout below is sized for mail,
@@ -88,6 +102,7 @@ class AccountsWorkerSettings:
         # Fails stuck submissions, re-enqueues lost judge jobs, prunes tokens. Here rather than
         # on the judge worker so it still runs when KEDA has scaled that to zero (worker/sweeper.py).
         cron(sweep_stale, second=0, run_at_startup=False),  # top of every minute
+        cron(heartbeat, second=15, run_at_startup=False),
     ]
     on_startup = on_accounts_startup
     max_jobs = 10

@@ -1,0 +1,40 @@
+# Opt-in override that sends this stack's metrics to a local ozymandias agent.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.ozymandias.yml up
+#
+# It needs ozymandias running first (it owns the external `ozymandias` network). The base
+# compose file is untouched, so without this override the stack runs exactly as before, and
+# with it but the agent stopped the app still runs: the SDK drops what it cannot send.
+#
+# Containers are named by the agent through the Docker socket, so Postgres, Redis and the
+# judge sandboxes need no agent of their own, only the `ozy.service` label for grouping.
+# Judge sandboxes (`judge-*`) get no OZY_* variables and no network access to the agent:
+# they run untrusted code and are observed only from outside.
+x-ozy-env: &ozy-env
+  OZY_AGENT_HOST: agent
+  OZY_ENV: ${OZY_ENV:-dev}
+  OZY_VERSION: ${OZY_VERSION:-0.1.0}
+
+services:
+  api:
+    environment: *ozy-env
+    labels: {ozy.service: shikomi-api}
+    networks: [default, ozymandias]
+  worker:
+    environment: *ozy-env
+    labels: {ozy.service: shikomi-worker}
+    networks: [default, ozymandias]
+  accounts-worker:
+    environment: *ozy-env
+    labels: {ozy.service: shikomi-accounts-worker}
+    networks: [default, ozymandias]
+  postgres:
+    labels: {ozy.service: shikomi-postgres}
+  redis:
+    labels: {ozy.service: shikomi-redis}
+  web:
+    labels: {ozy.service: shikomi-web}
+
+networks:
+  ozymandias:
+    external: true

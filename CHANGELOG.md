@@ -8,6 +8,11 @@ All notable changes to this project are recorded here. The format follows
 
 ### Added
 
+- **Optional ozymandias telemetry.** Request rate, errors and latency by route, queue depth,
+  job and judge-run durations, verdicts by language, sweep counts, and auth events, sent over UDP
+  to a local [ozymandias](https://github.com/tuvo1106/ozymandias) agent through one seam
+  (`app/telemetry.py`). Inert unless `OZY_AGENT_HOST` is set; opt in with
+  `docker-compose.ozymandias.yml`. The SDK is vendored as a wheel in `backend/vendor/`.
 - **Known-wrong solutions in problem files.** A problem file can list `wrong_solutions`,
   code the judge must reject. The seed-solution tests run each one and fail unless some
   case is judged `wrong_answer`, which proves a custom validator rejects a plausible

@@ -1155,6 +1155,14 @@ wheels = [
 ]
 
 [[package]]
+name = "ozy"
+version = "0.1.0"
+source = { path = "vendor/ozy-0.1.0-py3-none-any.whl" }
+wheels = [
+    { filename = "ozy-0.1.0-py3-none-any.whl", hash = "sha256:9a5b4cdf63252a13f822de8c8cbf4c15051c61410193544cc88aa40275096ddd" },
+]
+
+[[package]]
 name = "packaging"
 version = "26.2"
 source = { registry = "https://pypi.org/simple" }
@@ -1595,6 +1603,7 @@ dependencies = [
     { name = "fastapi" },
     { name = "httpx" },
     { name = "kubernetes" },
+    { name = "ozy" },
     { name = "pydantic", extra = ["email"] },
     { name = "pydantic-settings" },
     { name = "pyjwt" },
@@ -1621,6 +1630,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.115" },
     { name = "httpx", specifier = ">=0.28" },
     { name = "kubernetes", specifier = ">=36.0.3" },
+    { name = "ozy", path = "vendor/ozy-0.1.0-py3-none-any.whl" },
     { name = "pydantic", extras = ["email"], specifier = ">=2.9" },
     { name = "pydantic-settings", specifier = ">=2.6" },
     { name = "pyjwt", specifier = ">=2.10" },

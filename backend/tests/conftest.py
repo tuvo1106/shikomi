@@ -310,3 +310,35 @@ def make_submission(session_factory):
             await s.refresh(sub)
             return str(sub.id)
     return _make
+
+
+class RecordingStatsd:
+    """Stands in for `ozy.statsd`, recording calls as `(kind, name, value, tags)`."""
+
+    enabled = True
+
+    def __init__(self):
+        self.calls: list[tuple] = []
+
+    def increment(self, name, value=1, tags=None, sample_rate=1.0):
+        self.calls.append(("count", name, value, tags or []))
+
+    def gauge(self, name, value, tags=None, sample_rate=1.0):
+        self.calls.append(("gauge", name, value, tags or []))
+
+    def distribution(self, name, value, tags=None, sample_rate=1.0):
+        self.calls.append(("distribution", name, value, tags or []))
+
+    def named(self, name):
+        return [c for c in self.calls if c[1] == name]
+
+
+@pytest.fixture
+def statsd_calls(monkeypatch):
+    """Swap the telemetry module's statsd for a recorder, so a test can assert what a code
+    path reported without a socket or an agent."""
+    from app import telemetry
+
+    recorder = RecordingStatsd()
+    monkeypatch.setattr(telemetry, "statsd", recorder)
+    return recorder

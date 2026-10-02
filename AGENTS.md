@@ -377,6 +377,17 @@ and `playwright`.
   Rust test payload that uses `ListNode` must declare it in `params`/`return_type`, or the
   build fails with "cannot find type".
 
+- **`ozy` is a vendored wheel (`backend/vendor/`), and the Dockerfile copies `vendor/` before
+  `uv sync`.** The build context is `./backend`, so a path outside it is invisible to the image build,
+  and CI can't see the sibling ozymandias repo either. Refresh the wheel from the ozymandias repo,
+  then `uv lock --upgrade-package ozy`: a plain `uv lock` keeps the old hash for a same-version
+  wheel, and the mismatch fails `uv run` and the image build's frozen sync.
+- **Telemetry is a side channel: keep it inert and keep tags bounded.** `app/telemetry.py` is the only
+  importer of `ozy`. Never put a user id, email, submission id or raw path in a tag (route *patterns*
+  only); the tag set becomes the series count. Probe and KEDA endpoints are excluded from request
+  metrics in `create_app()`: add a new polled endpoint there too. `audit()` counts every event by name,
+  which is only safe because call sites pass literals, so never audit a name built from user input.
+
 ## Deferred / TODO
 
 Open work only. Shipped work is recorded in [CHANGELOG.md](CHANGELOG.md); when a

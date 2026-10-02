@@ -17,6 +17,8 @@ ENV PYTHONUNBUFFERED=1 \
 
 # Install deps first (own layer) so source edits don't re-run the resolver.
 # --no-install-project: this repo is `package = false`; we run from source.
+# The vendored ozymandias SDK wheel must exist before `uv sync` resolves the path source.
+COPY vendor ./vendor
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 

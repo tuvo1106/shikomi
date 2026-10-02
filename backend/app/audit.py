@@ -11,6 +11,8 @@ audit log). Callers pass only safe context.
 """
 import logging
 
+from app import telemetry
+
 logger = logging.getLogger("app.audit")
 
 
@@ -27,3 +29,7 @@ def audit(event: str, **fields) -> None:
     safe = {k: v for k, v in fields.items() if v is not None}
     kv = " ".join(f"{k}={v}" for k, v in safe.items())
     logger.info("audit %s %s", event, kv, extra={"audit_event": event, "audit_fields": safe})
+    # One counter for the whole trail, tagged by event name. Safe as a tag only because every
+    # call site passes a literal, so the set is the ~25 names in the code: never audit() a name
+    # built from user input, or this becomes one series per value.
+    telemetry.count("audit.event", event=event)

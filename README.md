@@ -146,6 +146,18 @@ encryption key once, into gitignored files. For real account email, set
 the accounts-worker log. The judge worker mounts the host Docker socket to start
 sandboxes; [DESIGN.md §5.5](DESIGN.md) explains that trade-off.
 
+**Metrics (optional).** With an [ozymandias](https://github.com/tuvo1106/ozymandias) agent running,
+add the override file and the services report request, queue and judge metrics to it:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.ozymandias.yml up
+# or, with the script:  COMPOSE_FILE=docker-compose.yml:docker-compose.ozymandias.yml scripts/prod-up.sh
+```
+
+Without `OZY_AGENT_HOST` the integration does nothing. For host-run dev (`scripts/dev-up.sh`) set
+`OZY_AGENT_HOST=localhost` instead. The SDK wheel in `backend/vendor/` is refreshed from the
+ozymandias repo.
+
 **Kubernetes:** `scripts/k8s-up.sh [--keda]` stands up a local kind cluster with
 the Helm chart in [`deploy/helm/shikomi`](deploy/helm/shikomi). Judging runs as
 one locked-down Pod per submission through the Kubernetes API, with no Docker

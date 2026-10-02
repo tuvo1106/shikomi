@@ -13,6 +13,7 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app import telemetry
 from app.audit import audit
 from app.config import get_settings
 from app.errors import APIError
@@ -102,6 +103,7 @@ async def register(session: AsyncSession, data: RegisterRequest,
     await session.refresh(user)
     await account_service.enqueue_account_email(
         queue, account_service.EMAIL_VERIFY, user.email)
+    telemetry.count("auth.signup")  # accounts actually created; the "existing" path is not one
     return "created", user
 
 

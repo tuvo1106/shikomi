@@ -788,3 +788,86 @@ async def test_a_language_the_problem_no_longer_offers_is_a_judge_error(
     assert captured == {}  # never reached a sandbox
     async with session_factory() as s:
         assert (await s.get(Submission, uuid.UUID(sid))).status == "judge_error"
+
+
+async def test_judge_reports_the_verdict_by_status_language_and_mode(
+        session_factory, make_problem, make_user, monkeypatch, statsd_calls):
+    pid, _ = await make_problem()
+    user, _ = await make_user()
+    sid = await _make_pending(session_factory, user["id"], pid)
+
+    async def fake_run(**_kwargs):
+        return Verdict(status="accepted", runtime_ms=1, passed=2, total=2, results=[])
+
+    monkeypatch.setattr(judge_mod, "SessionLocal", session_factory)
+    monkeypatch.setattr(judge_mod, "run_judgement", fake_run)
+    await judge_mod.judge_submission({"redis": FakeRedis()}, sid, "submit")
+    assert statsd_calls.named("submission.verdict")[0][3] == [
+        "status:accepted", "language:python", "mode:submit"]
+
+
+async def test_judge_error_is_reported_as_a_verdict_too(
+        session_factory, make_problem, make_user, monkeypatch, statsd_calls):
+    pid, _ = await make_problem()
+    user, _ = await make_user()
+    sid = await _make_pending(session_factory, user["id"], pid)
+
+    async def boom(**_kwargs):
+        raise RuntimeError("docker exploded")
+
+    monkeypatch.setattr(judge_mod, "SessionLocal", session_factory)
+    monkeypatch.setattr(judge_mod, "run_judgement", boom)
+    await judge_mod.judge_submission({"redis": FakeRedis()}, sid, "submit")
+    assert statsd_calls.named("submission.verdict")[0][3] == [
+        "status:judge_error", "language:python", "mode:submit"]
+
+
+async def test_a_failure_before_the_problem_loads_still_reports_the_submissions_language(
+        session_factory, make_problem, make_user, monkeypatch, statsd_calls):
+    """The language is the submission's own, so it is known even when loading the problem fails."""
+    pid, _ = await make_problem(languages=("python", "js"))
+    user, _ = await make_user()
+    sid = await _make_pending(session_factory, user["id"], pid, language="js")
+
+    def unavailable(*_args):
+        raise RuntimeError("database went away while loading the problem")
+
+    monkeypatch.setattr(judge_mod, "selectinload", unavailable)
+    monkeypatch.setattr(judge_mod, "SessionLocal", session_factory)
+    await judge_mod.judge_submission({"redis": FakeRedis()}, sid, "submit")
+    assert statsd_calls.named("submission.verdict")[0][3] == [
+        "status:judge_error", "language:js", "mode:submit"]
+
+
+async def test_run_judgement_times_the_sandbox_and_tags_the_verdict(monkeypatch, statsd_calls):
+    from worker import judging
+
+    async def fake_container(payload, **_kwargs):
+        return ContainerResult(stdout="", stderr="", exit_code=0, timed_out=True,
+                               stdout_truncated=False)
+
+    monkeypatch.setattr(judging.runner, "run_in_container", fake_container)
+    verdict = await judging.run_judgement(
+        code="x", comparison={"mode": "exact"}, time_limit_ms=1000, memory_limit_mb=64,
+        test_cases=[{"id": 0, "input": [], "expected": 1}], container_name="judge-t",
+        function_name="f", language="python")
+    assert verdict.status == "time_limit_exceeded"
+    assert statsd_calls.named("judge.run.count")[0][3] == [
+        "language:python", "runner:docker", "outcome:time_limit_exceeded"]
+    assert len(statsd_calls.named("judge.run.duration")) == 1
+
+
+async def test_sweep_stale_reports_how_many_it_failed(
+        session_factory, make_problem, make_user, monkeypatch, statsd_calls):
+    pid, _ = await make_problem()
+    user, _ = await make_user()
+    sids = [await _make_pending(session_factory, user["id"], pid) for _ in range(2)]
+    async with session_factory() as s:
+        for sid in sids:
+            sub = await s.get(Submission, uuid.UUID(sid))
+            sub.status = "running"
+            sub.updated_at = datetime.now(timezone.utc) - timedelta(minutes=10)
+        await s.commit()
+    monkeypatch.setattr(sweeper, "SessionLocal", session_factory)
+    await sweeper.sweep_stale({"redis": FakeRedis()})
+    assert statsd_calls.named("submissions.stale_swept")[0][2] == 2  # the count, not "some"

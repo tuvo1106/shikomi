@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app import telemetry
 from app.config import get_settings
 from app.email import send_best_effort
 from app.errors import APIError
@@ -71,6 +72,10 @@ async def deliver_account_email(session: AsyncSession, kind: str, email: str) ->
         await send_password_reset_email(session, user)
     else:
         logger.error("unknown account email kind %r", kind)
+        return
+    # "handled", not "sent": `send_best_effort` swallows an SMTP failure after its retries, so
+    # reaching here proves the job ran for a real user, not that a message was delivered.
+    telemetry.count("account.email.handled", kind=kind)
 
 
 async def _issue_token(session: AsyncSession, user: User, purpose: str, ttl: int) -> str:

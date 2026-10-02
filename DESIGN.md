@@ -150,6 +150,20 @@ tools whose internals stay legible over ones that hide the mechanism.
   At ≤15 nodes and ≤7-character labels there's no zoom, pan, collapse, or text measurement to get wrong —
   the layout is arithmetic. Tradeoff: layout quality is ours to maintain, bounded by that size envelope
   (`docs/adr/0003-sample-case-diagrams-hand-rolled-svg.md`, §6.6).
+- **ozymandias SDK (`ozy`, vendored; vs Prometheus + Grafana / OpenTelemetry):** an optional way to
+  watch a running instance, built by the same author as an exercise in what the standard tools hide.
+  Everything goes through one seam, `app/telemetry.py`, the only importer of the SDK, and it is inert
+  unless `OZY_AGENT_HOST` is set (no socket, no thread, nothing sent), so tests, CI and anyone who
+  has never heard of ozymandias see no difference. The SDK is a **vendored wheel** (`backend/vendor/`)
+  rather than a registry install, because the Docker build context is `./backend` and CI cannot see
+  the sibling repo. Request metrics come from a pure ASGI middleware; queue, judge and sweep metrics
+  are counted where the event happens (`Queue`, `run_judgement`, `judge_submission`, `sweep_stale`);
+  auth events (logins, lockouts, 2FA, password changes) are counted once in `audit()`, the existing
+  single seam for them, tagged by their fixed event names; queue depth is gauged by a task in the API
+  lifespan. Tags come from bounded sets only (route *pattern*, language, verdict status), never ids or
+  raw paths. Tradeoff: a second metrics path beside whatever a real deploy would use, and a vendored
+  binary to refresh by hand. Rejected: Prometheus + Grafana (the point was to build the thing) and
+  OpenTelemetry (a far larger surface than metrics need).
 - **`cryptography` (Fernet), and a hand-rolled TOTP:** two-factor auth needs a *recoverable* secret — we must read it back to verify a code, so unlike a password it can't be one-way hashed. Storing it plaintext would mean a database leak alone hands over every user's second factor, so it's Fernet-encrypted (authenticated AES + HMAC) with a key from the environment (`TOTP_ENCRYPTION_KEY`, with `TOTP_PREVIOUS_KEYS` via `MultiFernet` so it can rotate). Symmetric encryption isn't something to hand-roll, so this one earns a dependency (`cryptography` is the standard, well-audited library). *Rejected:* a plaintext column (simplest, but defeats the point of a second factor) and `pyotp` (RFC 6238 is ~20 lines of stdlib `hmac`, so a library would hide a mechanism this project wants legible; the hand-rolled version is pinned by the RFC's own test vectors). On the frontend, `qrcode.react` renders the enrollment QR code — a QR encoder is far too large to hand-roll.
 
 ## 3. Data Model
@@ -1104,6 +1118,7 @@ All via environment variables (pydantic-settings). `.env` for dev, compose `envi
 | `BREACHED_PASSWORD_API_URL` | `https://api.pwnedpasswords.com/range` (override to point at a mirror) | api |
 | `CORS_ORIGINS`            | `http://localhost:5173` (dev only)           | api         |
 | `ENV`                     | `dev` \| `prod`                              | all         |
+| `OZY_AGENT_HOST` / `OZY_ENV` / `OZY_VERSION` | ozymandias telemetry (§2.1): the agent's hostname (unset ⇒ telemetry is fully inert), and the `env` / `version` tags. Keyed off these alone, never `ENV`. Set by `docker-compose.ozymandias.yml` | api, workers |
 
 Prod serves the built frontend as static files via Caddy on the same origin as the API (no CORS in prod). Under `ENV=prod` the refresh cookie is `Secure` (`ENV` is a closed `dev`|`prod` set, so a typo like `ENV=production` fails at startup instead of silently shipping a non-Secure cookie); visit over HTTPS (or `localhost`, a secure context).
 

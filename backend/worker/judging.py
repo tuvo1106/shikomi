@@ -6,6 +6,7 @@ and Submit, so the two always judge identically. See DESIGN.md §5.2, §5.3.
 import json
 import logging
 
+from app import telemetry
 from app.config import get_settings
 from app.judge_budget import wall_budget_s
 from app.sandbox import RUST_COMPILE_TIMEOUT_S, profile_for
@@ -89,20 +90,27 @@ async def run_judgement(*, code, comparison, time_limit_ms, memory_limit_mb,
     # The same number the authoring path checks against arq's job timeout (app/judge_budget.py).
     wall_timeout = wall_budget_s(len(test_cases), time_limit_ms, language)
     profile = profile_for(language)
-    result = await runner.run_in_container(
-        payload, image=_image_for(profile), container_name=container_name,
-        memory_mb=memory_limit_mb, cpus=CPUS, pids_limit=PIDS_LIMIT,
-        tmpfs_size_mb=profile.tmpfs_size_mb, tmpfs_exec=profile.tmpfs_exec,
-        wall_timeout_s=wall_timeout)
-    if result.stderr.strip():
-        # The harness's own diagnostics (the trusted parent's stderr; a submission's
-        # goes to /dev/null): a custom validator's exception, a bad payload. The user
-        # sees only a fixed line for those, since the detail could quote `expected`,
-        # so this log is where the problem's author finds it.
-        logger.warning("judge harness stderr (%s): %s", container_name,
-                       result.stderr[:MAX_LOGGED_STDERR])
-    case_ids = [tc["id"] for tc in test_cases]
-    return aggregate(result, parse_harness_output(result.stdout, case_ids), total_cases=len(test_cases))
+    # `outcome` is the verdict status, so judge.run.count{outcome:time_limit_exceeded} is the
+    # rate of sandboxes the judge had to give up on. A fault in the runner itself (the
+    # exception path) is outcome:error.
+    with telemetry.observe("judge.run", language=language, runner=settings.judge_runner) as obs:
+        result = await runner.run_in_container(
+            payload, image=_image_for(profile), container_name=container_name,
+            memory_mb=memory_limit_mb, cpus=CPUS, pids_limit=PIDS_LIMIT,
+            tmpfs_size_mb=profile.tmpfs_size_mb, tmpfs_exec=profile.tmpfs_exec,
+            wall_timeout_s=wall_timeout)
+        if result.stderr.strip():
+            # The harness's own diagnostics (the trusted parent's stderr; a submission's
+            # goes to /dev/null): a custom validator's exception, a bad payload. The user
+            # sees only a fixed line for those, since the detail could quote `expected`,
+            # so this log is where the problem's author finds it.
+            logger.warning("judge harness stderr (%s): %s", container_name,
+                           result.stderr[:MAX_LOGGED_STDERR])
+        case_ids = [tc["id"] for tc in test_cases]
+        verdict = aggregate(result, parse_harness_output(result.stdout, case_ids),
+                            total_cases=len(test_cases))
+        obs.outcome = verdict.status
+    return verdict
 
 
 def build_verdict_results(results: list[dict], cases: list) -> list[dict]:

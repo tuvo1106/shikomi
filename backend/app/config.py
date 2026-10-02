@@ -83,6 +83,14 @@ class Settings(BaseSettings):
     # app/sandbox.py) to fit MariaDB's data directory.
     judge_image_sql: str = PROFILES["mysql"].default_image
     judge_max_concurrency: int = 4
+
+    # --- ozymandias telemetry (app/telemetry.py) ----------------------------------------
+    # Unset `OZY_AGENT_HOST` and the SDK is fully inert: no socket, no thread, nothing sent.
+    # Telemetry keys off these alone; `ENV` has no say, so prod and dev behave the same.
+    ozy_agent_host: str | None = None
+    ozy_env: str | None = None
+    ozy_version: str | None = None
+
     # How the worker runs a judge sandbox: `docker` shells `docker run` against the
     # host daemon (compose / single VPS); `k8s` launches a per-submission Pod via
     # the Kubernetes API (in-cluster). See worker/runner.py.

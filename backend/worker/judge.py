@@ -20,6 +20,7 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import selectinload
 
 from app import comparison as problem_comparison
+from app import telemetry
 from app.db import SessionLocal
 from app.models import Problem, Submission
 from app.queue import Queue
@@ -76,6 +77,7 @@ async def judge_submission(ctx, submission_id: str, mode: str) -> None:
         # Read once, before anything can expire the ORM object (a rollback does), so the
         # `finally` can always release the lock without a lazy load that would itself raise.
         user_id, problem_id = sub.user_id, sub.problem_id
+        language = sub.language  # the submission's own, so a failure before the problem loads still has it
         try:
             problem = (await session.execute(
                 select(Problem).where(Problem.id == problem_id)
@@ -133,9 +135,13 @@ async def judge_submission(ctx, submission_id: str, mode: str) -> None:
                 "total": verdict.total,
             }
             await session.commit()
+            telemetry.count("submission.verdict", status=verdict.status,
+                            language=language, mode=mode)
             logger.info("submission %s -> %s", submission_id, verdict.status)
         except Exception:
             logger.exception("judge error for submission %s", submission_id)
+            telemetry.count("submission.verdict", status="judge_error",
+                            language=language, mode=mode)
             await session.rollback()
             stuck = await session.get(Submission, sub_uuid)
             if stuck is not None:

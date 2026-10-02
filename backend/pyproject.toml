@@ -18,6 +18,7 @@ dependencies = [
     "kubernetes>=36.0.3",
     "httpx>=0.28",
     "cryptography>=50.0.1",
+    "ozy",
 ]
 
 [dependency-groups]
@@ -30,6 +31,12 @@ dev = [
 
 [tool.uv]
 package = false
+
+# The ozymandias SDK is vendored as a wheel rather than installed from a registry: the
+# Docker build context is ./backend, so nothing outside it is visible to the build, and
+# CI has no access to the sibling repo. Refresh it with `make sdk-release` over there.
+[tool.uv.sources]
+ozy = { path = "vendor/ozy-0.1.0-py3-none-any.whl" }
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

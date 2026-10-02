@@ -9,6 +9,7 @@ import dataclasses
 import logging
 from datetime import datetime, timezone
 
+from app import telemetry
 from app.judge_budget import MAX_LIVE_SANDBOX_AGE_S
 
 logger = logging.getLogger(__name__)
@@ -165,6 +166,7 @@ async def sweep_orphans(prefix="judge-"):
         if (now - created_at).total_seconds() <= MAX_LIVE_SANDBOX_AGE_S:
             continue
         await _docker("kill", name)
+        telemetry.count("judge.orphans.swept")
 
 
 async def _kill_and_reap(container_name, proc):

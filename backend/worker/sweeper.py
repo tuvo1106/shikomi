@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import delete, func, or_, select, update
 
+from app import telemetry
 from app.db import SessionLocal
 from app.models import EmailToken, RefreshToken, Submission
 from app.queue import Queue
@@ -78,6 +79,7 @@ async def sweep_stale(ctx) -> None:
             .returning(Submission.id, Submission.user_id, Submission.problem_id))).all()
         await session.commit()
         if stale:
+            telemetry.count("submissions.stale_swept", len(stale))
             logger.warning("swept %d stale submission(s) to judge_error", len(stale))
         # After the commit, so the verdict is durable even if Redis is down. A Run never took
         # the inflight lock (only "submit" does), and a lock that now belongs to a newer

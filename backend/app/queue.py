@@ -18,6 +18,7 @@ from arq import create_pool
 from arq.connections import ArqRedis, RedisSettings
 from arq.constants import default_queue_name, job_key_prefix, result_key_prefix
 
+from app import telemetry
 from app.config import get_settings
 
 settings = get_settings()
@@ -91,6 +92,8 @@ class Queue:
         job = await self.redis.enqueue_job(
             JUDGE_TASK, submission_id, mode, _job_id=submission_id,
             _queue_name=default_queue_name)
+        if job is not None:
+            telemetry.count("arq.jobs.enqueued", function=JUDGE_TASK)
         return job is not None
 
     async def missing_judge_jobs(self, submission_ids: list[str]) -> list[str]:
@@ -118,6 +121,7 @@ class Queue:
         `worker/accounts.py:send_account_email`. Goes to `ACCOUNTS_QUEUE`, not the judge queue.
         """
         await self.redis.enqueue_job(EMAIL_TASK, kind, email, _queue_name=ACCOUNTS_QUEUE)
+        telemetry.count("arq.jobs.enqueued", function=EMAIL_TASK)
 
     async def acquire_inflight(self, user_id, problem_id, owner: str) -> bool:
         """Try to take the "one submission at a time per problem" lock, as `owner`.
@@ -135,8 +139,11 @@ class Queue:
         Returns:
             True if the lock was acquired, False if one is already held.
         """
-        return bool(await self.redis.set(
+        acquired = bool(await self.redis.set(
             inflight_key(user_id, problem_id), owner, nx=True, ex=INFLIGHT_TTL_SECONDS))
+        if not acquired:
+            telemetry.count("inflight.lock.contended")
+        return acquired
 
     async def release_inflight(self, user_id, problem_id, owner: str) -> bool:
         """Release the lock only if `owner` still holds it (compare-and-delete).
@@ -159,6 +166,8 @@ class Queue:
         bucket = int(time.time()) // 60
         key = f"ratelimit:{action}:{user_id}:{bucket}"
         count = await self.redis.eval(_INCR_WITH_TTL, 1, key, 60)
+        if count > limit:
+            telemetry.count("ratelimit.rejected", action=action)
         return count <= limit
 
     # --- login lockout (per-account brute-force defense, §4.1) --------------
@@ -178,6 +187,7 @@ class Queue:
     async def set_login_lock(self, email: str, seconds: int) -> None:
         """Lock `email` out of login for `seconds` (a key that auto-expires)."""
         await self.redis.set(f"authlock:{email.lower()}", "1", ex=seconds)
+        telemetry.count("auth.login.locked")
 
     async def get_login_lock(self, email: str) -> int:
         """Seconds remaining on `email`'s lock, or 0 if not locked."""
