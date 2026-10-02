@@ -256,8 +256,14 @@ def test_both_workers_register_wrapped_jobs_and_a_heartbeat():
     # `telemetry.job` wraps with functools.wraps, which leaves `__wrapped__` behind.
     assert all(hasattr(f, "__wrapped__") for f in WorkerSettings.functions)
     assert hasattr(AccountsWorkerSettings.functions[0].coroutine, "__wrapped__")
-    for settings in (WorkerSettings, AccountsWorkerSettings):
-        assert "cron:heartbeat" in [c.name for c in settings.cron_jobs]
+    judge = [c.name for c in WorkerSettings.cron_jobs]
+    accounts = [c.name for c in AccountsWorkerSettings.cron_jobs]
+    assert "cron:heartbeat:judge" in judge
+    assert "cron:heartbeat:accounts" in accounts
+    # arq runs a cron job once per scheduled time across ALL workers, keyed by its name, so two
+    # workers sharing a name means one of them never fires. Every cron name must be unique across
+    # both classes (found live: the judge worker's heartbeat never ran).
+    assert len(set(judge + accounts)) == len(judge + accounts)
     assert AccountsWorkerSettings.functions[0].name == "send_account_email"
 
 

@@ -68,7 +68,10 @@ class WorkerSettings:
         # Watches the *accounts* queue from here so it still fires when that worker is the
         # thing that died (worker/watchdog.py).
         cron(check_accounts_queue, second=30, run_at_startup=False),
-        cron(heartbeat, second=15, run_at_startup=False),
+        # A distinct name per worker: arq dedupes a cron job across *all* workers by
+        # `name:timestamp` in Redis, so two workers registering the same `heartbeat` would
+        # race for each second and one would never run (the judge worker's never did).
+        cron(heartbeat, name="cron:heartbeat:judge", second=15, run_at_startup=False),
     ]
     on_startup = on_startup
     max_jobs = settings.judge_max_concurrency
@@ -102,7 +105,7 @@ class AccountsWorkerSettings:
         # Fails stuck submissions, re-enqueues lost judge jobs, prunes tokens. Here rather than
         # on the judge worker so it still runs when KEDA has scaled that to zero (worker/sweeper.py).
         cron(sweep_stale, second=0, run_at_startup=False),  # top of every minute
-        cron(heartbeat, second=15, run_at_startup=False),
+        cron(heartbeat, name="cron:heartbeat:accounts", second=15, run_at_startup=False),
     ]
     on_startup = on_accounts_startup
     max_jobs = 10
