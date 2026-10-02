@@ -38,10 +38,19 @@ docker exec shikomi-pg psql -U app -d shikomi -tc \
   "SELECT 1 FROM pg_database WHERE datname='shikomi_test'" | grep -q 1 \
   || docker exec shikomi-pg psql -U app -d shikomi -c "CREATE DATABASE shikomi_test;" >/dev/null
 
+# PROBLEMS_DIR points the seed at your own problem set (e.g. ../shikomi-problems/problems);
+# unset, it loads only the bundled starter examples, so a bring-your-own set would show
+# stale languages after every `dev up`. Resolved to an absolute path before the cd below.
+SEED_ARGS=()
+if [ -n "${PROBLEMS_DIR:-}" ]; then
+  SEED_ARGS=(--dir "$(cd "$PROBLEMS_DIR" && pwd)")
+  log "seeding from PROBLEMS_DIR=${SEED_ARGS[1]}"
+fi
+
 log "migrating + seeding (idempotent)"
 ( cd backend
   uv run alembic upgrade head >/dev/null
-  uv run python -m app.cli seed >/dev/null
+  uv run python -m app.cli seed ${SEED_ARGS[@]+"${SEED_ARGS[@]}"} >/dev/null
   uv run python -m app.cli seed-dev-user )
 
 LOGDIR=/tmp/shikomi-dev; mkdir -p "$LOGDIR"

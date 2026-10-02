@@ -68,7 +68,8 @@ docker build -t shikomi-judge:latest judge/     # the Python sandbox image
 scripts/dev-up.sh                               # → http://localhost:5173
 ```
 
-`dev-up.sh` does the whole setup. It is safe to re-run.
+`dev-up.sh` does the whole setup. It is safe to re-run. It seeds the bundled starter problems;
+set `PROBLEMS_DIR=/path/to/problems` to seed your own set instead (upsert by slug, nothing deleted).
 
 1. Starts Postgres and Redis containers.
 2. Runs the migrations.
