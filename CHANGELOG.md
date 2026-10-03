@@ -8,6 +8,8 @@ All notable changes to this project are recorded here. The format follows
 
 ### Added
 
+- **Runtime tooltip on submissions.** Explains that Rust times include process startup while
+  Python times only the call, so raw times aren't comparable across languages (percentiles are).
 - **`dev-up.sh` honors `PROBLEMS_DIR`.** Seeds your own problem set instead of only the bundled
   starters, so re-running `dev up` no longer leaves a bring-your-own set stale.
 - **Known-wrong solutions in problem files.** A problem file can list `wrong_solutions`,

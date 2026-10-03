@@ -10,6 +10,14 @@ import { SubmissionDetailModal } from './SubmissionDetailModal'
 import { relativeTime } from './format'
 
 /**
+ * Why Rust and Python runtimes differ. The judge times Python around the call only, but
+ * times Rust from process spawn to exit (so a submission can't under-report), which adds
+ * a ~1 ms startup floor. "Beats X%" ranks within one language, so only raw times mislead.
+ */
+const RUNTIME_NOTE =
+  'Python times only your function; Rust times the whole process (about 1 ms of startup). Compare runtimes within one language.'
+
+/**
  * The Submissions tab: this user's Submit history for the problem, newest first.
  *
  * On a multi-language problem each row shows its language, and loading a past
@@ -54,7 +62,9 @@ export function Submissions({
           <tr>
             <th className="py-1 font-medium">Status</th>
             {multiLanguage && <th className="py-1 font-medium">Language</th>}
-            <th className="py-1 font-medium">Runtime</th>
+            <th className="py-1 font-medium" title={RUNTIME_NOTE}>
+              Runtime
+            </th>
             <th className="py-1 font-medium">Submitted</th>
             <th className="py-1"></th>
           </tr>
@@ -70,7 +80,7 @@ export function Submissions({
                 <StatusText status={s.status} />
               </td>
               {multiLanguage && <td className="py-1.5 text-zinc-400">{LANGUAGE_LABEL[s.language]}</td>}
-              <td className="py-1.5 font-mono text-zinc-400">
+              <td className="py-1.5 font-mono text-zinc-400" title={s.language === 'rust' ? RUNTIME_NOTE : undefined}>
                 {s.runtime_ms != null ? `${s.runtime_ms} ms` : '—'}
               </td>
               <td className="py-1.5 text-zinc-500">{relativeTime(s.created_at)}</td>
