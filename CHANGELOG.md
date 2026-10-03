@@ -178,6 +178,8 @@ All notable changes to this project are recorded here. The format follows
 
 ### Fixed
 
+- **Tab icon matches the app.** The favicon was the Vite template's lightning bolt; it's now the
+  navbar's braces mark.
 - The Helm chart now migrates the database *before* an upgrade's new pods start
   (a `pre-upgrade` hook). It used to run after them, so the new code briefly met the
   old schema.
